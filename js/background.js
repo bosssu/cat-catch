@@ -558,6 +558,27 @@ chrome.runtime.onMessage.addListener(function (Message, sender, sendResponse) {
         sendResponse("ok");
         return true;
     }
+    // 打开页面到侧边栏（从popup委托background执行，避免popup生命周期问题）
+    if (Message.Message == "openSidePanel") {
+        chrome.sidePanel.setOptions({
+            tabId: Message.tabId,
+            path: Message.path,
+            enabled: true
+        }, () => {
+            if (chrome.runtime.lastError) {
+                console.error('openSidePanel setOptions:', chrome.runtime.lastError.message);
+                sendResponse("error");
+                return;
+            }
+            chrome.sidePanel.open({ tabId: Message.tabId }, () => {
+                if (chrome.runtime.lastError) {
+                    console.error('openSidePanel open:', chrome.runtime.lastError.message);
+                }
+                sendResponse("ok");
+            });
+        });
+        return true;
+    }
 });
 
 // 选定标签 更新G.tabId
@@ -623,10 +644,14 @@ chrome.tabs.onUpdated.addListener(function (tabId, changeInfo, tab) {
             G.damnUrlSet.add(tabId);
         }
     }
-    chrome.sidePanel.setOptions({
-        tabId,
-        path: "popup.html?tabId=" + tabId
-    });
+    // 仅在页面URL真正改变时（导航到新页面）才重置侧边栏
+    // 切标签不会触发 URL 变化，因此不会覆盖用户正在查看的解析页面
+    if (changeInfo.url) {
+        chrome.sidePanel.setOptions({
+            tabId,
+            path: "popup.html?tabId=" + tabId
+        });
+    }
 });
 
 /**

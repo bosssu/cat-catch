@@ -635,6 +635,12 @@
   "downloadRange": {
     "message": "Faixa de Download"
   },
+  "startTime": {
+    "message": "Tempo inicial (00:00:00)"
+  },
+  "endTime": {
+    "message": "Tempo final (00:00:00)"
+  },
   "recordLive": {
     "message": "Gravar"
   },
@@ -740,13 +746,13 @@
     "message": "Esperando por Dados do Ao Vivo"
   },
   "sNumError": {
-    "message": "Erro no número de série"
+    "message": "Erro de tempo ou número de série"
   },
   "startGTend": {
-    "message": "O número inicial não pode ser maior que o número final"
+    "message": "O tempo inicial não pode ser maior que o tempo final"
   },
   "sNumMax": {
-    "message": "O número de série não pode exceder $num$",
+    "message": "Tempo ou número de série fora do intervalo, não pode exceder $num$",
     "placeholders": {
       "num": {
         "content": "$1"
@@ -807,6 +813,12 @@
   },
   "streamOnbeforeunload": {
     "message": "A transmissão está em andamento, o download será interrompido após o fechamento"
+  },
+  "sidePanelDownloadDelegated": {
+    "message": "O download está em uma aba em segundo plano. Volte aqui para ver o progresso em tempo real."
+  },
+  "sidePanelFocusDownloadTab": {
+    "message": "Ir para a aba de download"
   },
   "fileLoading": {
     "message": "Carregamento de Arquivo"
@@ -1042,5 +1054,16 @@
   },
   "dataPreprocessing": {
     "message": "Pré-processamento de Dados"	
+  },
+  "autoRetry": {
+    "message": "Tentar novamente ao falhar"
+  },
+  "autoRetrying": {
+    "message": "Segmento $1 falhou, tentando $2/$3...",
+    "placeholders": {
+      "num": { "content": "$1" },
+      "cur": { "content": "$2" },
+      "max": { "content": "$3" }
+    }
   }
 }

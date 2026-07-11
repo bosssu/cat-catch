@@ -635,6 +635,12 @@
   "downloadRange": {
     "message": "Rango descarga"
   },
+  "startTime": {
+    "message": "Tiempo inicio (00:00:00)"
+  },
+  "endTime": {
+    "message": "Tiempo fin (00:00:00)"
+  },
   "recordLive": {
     "message": "Grabar"
   },
@@ -740,13 +746,13 @@
     "message": "A la espera de datos en directo"
   },
   "sNumError": {
-    "message": "Error de número de serie"
+    "message": "Error de tiempo o número de serie"
   },
   "startGTend": {
-    "message": "El número inicial no puede ser mayor que el final"
+    "message": "El tiempo de inicio no puede ser mayor que el de fin"
   },
   "sNumMax": {
-    "message": "El número de serie no puede ser superior a $num$",
+    "message": "Tiempo o número de serie fuera de rango, no puede superar $num$",
     "placeholders": {
       "num": {
         "content": "$1"
@@ -807,6 +813,12 @@
   },
   "streamOnbeforeunload": {
     "message": "La transmisión está en curso, la descarga se detendrá tras el cierre"
+  },
+  "sidePanelDownloadDelegated": {
+    "message": "La descarga se ejecuta en una pestaña en segundo plano. Vuelva aquí para ver el progreso en tiempo real."
+  },
+  "sidePanelFocusDownloadTab": {
+    "message": "Ir a la pestaña de descarga"
   },
   "fileLoading": {
     "message": "Cargando archivo"
@@ -1033,5 +1045,16 @@
   },
   "removeFailedPreviewFiles": {
     "message": "Eliminar archivos que no se pueden previsualizar"
+  },
+  "autoRetry": {
+    "message": "Reintentar al fallar"
+  },
+  "autoRetrying": {
+    "message": "Segmento $1 falló, reintentando $2/$3...",
+    "placeholders": {
+      "num": { "content": "$1" },
+      "cur": { "content": "$2" },
+      "max": { "content": "$3" }
+    }
   }
 }

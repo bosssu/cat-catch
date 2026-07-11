@@ -635,6 +635,12 @@
   "downloadRange": {
     "message": "ダウンロード範囲"
   },
+  "startTime": {
+    "message": "開始時間 (00:00:00)"
+  },
+  "endTime": {
+    "message": "終了時間 (00:00:00)"
+  },
   "recordLive": {
     "message": "ライブ録画"
   },
@@ -740,13 +746,13 @@
     "message": "ライブデータ待機中…ページを閉じないでください…"
   },
   "sNumError": {
-    "message": "番号エラー"
+    "message": "時間または番号エラー"
   },
   "startGTend": {
-    "message": "開始番号は終了番号より大きくできません"
+    "message": "開始時間は終了時間より大きくできません"
   },
   "sNumMax": {
-    "message": "最大番号は $num$ を超えられません",
+    "message": "時間または番号が範囲外です,最大 $num$ を超えられません",
     "placeholders": {
       "num": {
         "content": "$1"
@@ -807,6 +813,12 @@
   },
   "streamOnbeforeunload": {
     "message": "ストリーミング中 閉じるとダウンロード停止…"
+  },
+  "sidePanelDownloadDelegated": {
+    "message": "バックグラウンドタブでダウンロード中。このページに戻ると進捗をリアルタイムで確認できます。"
+  },
+  "sidePanelFocusDownloadTab": {
+    "message": "ダウンロードタブへ移動"
   },
   "fileLoading": {
     "message": "ファイル読み込み中"
@@ -1009,5 +1021,16 @@
   },
   "deleteDuplicateFilenames": {
     "message": "重複ファイル名を削除"
+  },
+  "autoRetry": {
+    "message": "失敗時に自動リトライ"
+  },
+  "autoRetrying": {
+    "message": "セグメント $1 失敗、リトライ $2/$3...",
+    "placeholders": {
+      "num": { "content": "$1" },
+      "cur": { "content": "$2" },
+      "max": { "content": "$3" }
+    }
   }
 }

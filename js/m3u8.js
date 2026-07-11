@@ -1,5 +1,6 @@
 // url 参数解析
 const params = new URL(location.href).searchParams;
+const isInSidePanel = params.get("sidepanel") === "1";   // 是否在侧边栏中
 let _m3u8Url = params.get("url");   // m3u8的url地址
 const _requestHeaders = params.get("requestHeaders");   // 自定义请求头
 const _initiator = params.get("initiator"); // referer 备用
@@ -41,6 +42,13 @@ let _data = {
 };
 setRequestHeaders(requestHeaders, () => {
     chrome.tabs.getCurrent(function (tab) {
+        // 侧边栏环境 tab 为 undefined，降级处理
+        if (!tab) {
+            currentIndex = 0;
+            currentTabId = 0;
+            awaitG(init);
+            return;
+        }
         currentIndex = tab.index;
         currentTabId = tab.id;
         if (tabId && tabId != -1) {
@@ -125,6 +133,24 @@ function init() {
     }
     loadCSS();
 
+    // 侧边栏模式：注入宽屏布局样式，并监听后台下载状态
+    if (isInSidePanel) {
+        initSidePanelDownloadMonitor();
+        document.addEventListener('visibilitychange', () => {
+            if (document.visibilityState === 'visible') {
+                initSidePanelDownloadMonitor();
+            }
+        });
+        $('head').append(`<style>
+            html, body { min-width: 1000px; max-width: 100%; }
+            .container, .main-container, .content { max-width: 100% !important; width: 100% !important; }
+            body { padding: 8px 16px !important; margin: 0 !important; }
+            .m3u8-info, .optionBox { word-break: break-all; }
+            table { width: 100%; }
+            textarea, input[type="text"] { max-width: 100% !important; box-sizing: border-box; }
+        </style>`);
+    }
+
     // 隐藏firefox 不支持的功能
     G.isFirefox && $(".firefoxHide").each(function () { $(this).hide(); });
 
@@ -148,6 +174,7 @@ function init() {
     $("#StreamSaver").prop("checked", G.M3u8StreamSaver);
     $("#ffmpeg").prop("checked", G.M3u8Ffmpeg);
     $("#autoClose").prop("checked", autoClose && autoClose == 1 ? true : G.M3u8AutoClose);
+    $("#autoRetry").prop("checked", G.M3u8AutoRetry);
 
     // 发送到ffmpeg取消边下边存设置
     _ffmpeg && $("#StreamSaver").prop("checked", false);
@@ -331,6 +358,53 @@ channel.onmessage = (event) => {
     }
 };
 
+/* 侧边栏 ↔ 后台标签页 下载状态同步 */
+const downloadStatusChannel = new BroadcastChannel('m3u8DownloadStatus');
+let lastPublishedDownloadStatus = null;
+let activeDownloader = null;
+let sidePanelDownloadTabId = null;
+
+function getDownloadStatusStorageKey() {
+    return `m3u8Download_${tabId}`;
+}
+
+function publishDownloadStatus(update) {
+    if (!tabId || tabId <= 0 || isInSidePanel) return;
+    lastPublishedDownloadStatus = {
+        Message: 'downloadStatus',
+        tabid: tabId,
+        state: 'downloading',
+        ...lastPublishedDownloadStatus,
+        ...update,
+    };
+    downloadStatusChannel.postMessage(lastPublishedDownloadStatus);
+    (chrome.storage.session ?? chrome.storage.local).set({ [getDownloadStatusStorageKey()]: lastPublishedDownloadStatus });
+}
+
+function clearDownloadStatus() {
+    lastPublishedDownloadStatus = null;
+    activeDownloader = null;
+    if (!tabId || tabId <= 0) return;
+    (chrome.storage.session ?? chrome.storage.local).remove(getDownloadStatusStorageKey());
+}
+
+downloadStatusChannel.onmessage = (event) => {
+    const data = event.data;
+    if (!data?.tabid || data.tabid !== tabId) return;
+    if (isInSidePanel && data.Message === 'downloadStatus') {
+        applySidePanelDownloadStatus(data);
+        return;
+    }
+    if (!isInSidePanel) {
+        if (data.Message === 'downloadStatusRequest' && lastPublishedDownloadStatus) {
+            downloadStatusChannel.postMessage(lastPublishedDownloadStatus);
+        }
+        if (data.Message === 'downloadStopRequest' && activeDownloader) {
+            $("#stopDownload").trigger("click");
+        }
+    }
+};
+
 
 // 监听 MANIFEST_LOADED 装载解析的m3u8 URL
 hls.on(Hls.Events.MANIFEST_LOADED, function (event, data) {
@@ -363,10 +437,18 @@ hls.on(Hls.Events.MANIFEST_PARSED, function (event, data) {
             html.find(".sendFfmpeg").click(function () {
                 let newUrl = url + `&autoDown=1`;
                 newUrl += `&ffmpeg=addFile`;
-                chrome.tabs.create({ url: newUrl, index: currentIndex + 1, active: false });
+                if (isInSidePanel) {
+                    navigateInSidePanel(newUrl, tabId);
+                } else {
+                    chrome.tabs.create({ url: newUrl, index: currentIndex + 1, active: false });
+                }
             });
             html.find("#parser").click(function () {
-                chrome.tabs.update({ url: url });
+                if (isInSidePanel) {
+                    navigateInSidePanel(url, tabId);
+                } else {
+                    chrome.tabs.update({ url: url });
+                }
             });
             html.find(".more_class").click(function (e) {
                 dataMerge.video = item;
@@ -400,10 +482,18 @@ hls.on(Hls.Events.MANIFEST_PARSED, function (event, data) {
             html.find(".sendFfmpeg").click(function () {
                 let newUrl = url + `&autoDown=1`;
                 newUrl += `&ffmpeg=addFile`;
-                chrome.tabs.create({ url: newUrl, index: currentIndex + 1, active: false });
+                if (isInSidePanel) {
+                    navigateInSidePanel(newUrl, tabId);
+                } else {
+                    chrome.tabs.create({ url: newUrl, index: currentIndex + 1, active: false });
+                }
             });
             html.find("#parser").click(function () {
-                chrome.tabs.update({ url: url });
+                if (isInSidePanel) {
+                    navigateInSidePanel(url, tabId);
+                } else {
+                    chrome.tabs.update({ url: url });
+                }
             });
             html.find("label").click(function () {
                 dataMerge.video = item;
@@ -781,9 +871,9 @@ function parseTs(data) {
         $("#count").append(' <b>' + i18n.encryptedSAMPLE + '</b>');
     }
 
-    // 范围下载所需数据
-    $("#rangeStart").attr("max", _fragments.length);
-    $("#rangeEnd").attr("max", _fragments.length).val(_fragments.length);
+    // 范围下载所需数据 (默认使用时间格式 HH:MM:SS)
+    $("#rangeStart").val(secToTime(0));
+    $("#rangeEnd").val(secToTime(data.totalduration));
     $m3u8dlArg.val(getM3u8DlArg());
 
     if (data.live) {
@@ -795,6 +885,9 @@ function parseTs(data) {
         $("#count").append(i18n("m3u8Info", [_fragments.length, secToTime(data.totalduration)]));
         $("#sendFfmpeg").show();
         $("#retryCount").parent().hide();
+    }
+    if (autoDown) {
+        restoreDownloadOptions();
     }
     if (!_fragments.some(fragment => fragment.initSegment) && autoDown) {
         autoMerge();
@@ -1074,9 +1167,9 @@ $("#ffmpeg").on("change", function () {
         $("#saveAs").prop("checked", false);
     }
 });
-// 范围 线程数 滚轮调节
+// 范围 线程数 滚轮调节 (仅适用于线程数,时间范围不支持滚轮)
 let debounce2 = undefined;
-$("#rangeStart, #rangeEnd, #thread").on("wheel", function (event) {
+$("#thread").on("wheel", function (event) {
     $(this).blur();
     let number = $(this).val();
     number = parseInt(number ? number : 1);
@@ -1086,22 +1179,20 @@ $("#rangeStart, #rangeEnd, #thread").on("wheel", function (event) {
     }
     $(this).val(number);
     $m3u8dlArg.val(getM3u8DlArg());
-    if (this.id == "thread") {
-        clearTimeout(debounce2);
-        debounce2 = setTimeout(() => {
-            chrome.storage.local.set({ thread: number });
-        }, 500);
-    }
+    clearTimeout(debounce2);
+    debounce2 = setTimeout(() => {
+        chrome.storage.local.set({ thread: number });
+    }, 500);
     return false;
 });
 $("#rangeStart, #rangeEnd, #thread").keyup(function () {
     if ($(this).val() == '') {
         switch (this.id) {
             case 'rangeStart':
-                $(this).val(1);
+                $(this).val(secToTime(0));
                 break;
             case 'rangeEnd':
-                $(this).val(_fragments.length);
+                $(this).val(secToTime(_fragments.reduce((acc, f) => acc + f.duration, 0)));
                 break;
             case 'thread':
                 $(this).val(6);
@@ -1191,6 +1282,14 @@ $("#mergeTs").click(async function () {
     }
     if (start > _fragments.length - 1 || end > _fragments.length - 1) {
         $progress.html(`<b>${i18n("sNumMax", [_fragments.length])}</b>`);
+        return;
+    }
+    // 侧边栏模式：在后台标签页下载，避免切换标签时触发 beforeunload 中断下载
+    if (isInSidePanel) {
+        if (!$("#StreamSaver").prop("checked") && estimateFileSize > G.chromeLimitSize && confirm(i18n("fileTooLargeStream", ["2G"]))) {
+            $("#StreamSaver").prop("checked", true);
+        }
+        delegateDownloadToBackgroundTab();
         return;
     }
     /* 设定自定义密钥和IV */
@@ -1345,13 +1444,22 @@ $(document).on("click", "#setRequestHeaders, #setRequestHeadersError", function 
 // #EXT-X-DISCONTINUITY 范围选择
 $('#cc').change(function () {
     if (this.value == "0") {
-        $("#rangeStart").val(1);
-        $("#rangeEnd").val(_fragments.length);
+        $("#rangeStart").val(secToTime(0));
+        $("#rangeEnd").val(secToTime(_fragments.reduce((acc, f) => acc + f.duration, 0)));
         return;
     }
     const range = this.value.split("-");
-    $("#rangeStart").val(+range[0]);
-    $("#rangeEnd").val(+range[1]);
+    // 将序号转换为时间格式
+    let startSec = 0;
+    for (let i = 0; i < (+range[0] - 1) && i < _fragments.length; i++) {
+        startSec += _fragments[i].duration;
+    }
+    let endSec = startSec;
+    for (let i = (+range[0] - 1); i < (+range[1]) && i < _fragments.length; i++) {
+        endSec += _fragments[i].duration;
+    }
+    $("#rangeStart").val(secToTime(startSec));
+    $("#rangeEnd").val(secToTime(endSec));
 });
 
 // 折叠
@@ -1504,9 +1612,27 @@ function downloadNew(start = 0, end = _fragments.length) {
     const selectedFragments = recorder ? _fragments.slice(start) : _fragments.filter(fragment => fragment.selected);
     const down = new Downloader(selectedFragments, parseInt($("#thread").val()));
     $progress.html(`${down.success}/${down.total}`);
+    if (!isInSidePanel && tabId > 0) {
+        activeDownloader = down;
+        chrome.tabs.getCurrent((downloadTab) => {
+            publishDownloadStatus({
+                type: 'start',
+                state: 'downloading',
+                success: down.success,
+                total: down.total,
+                fileSize: 0,
+                duration: 0,
+                downloadTabId: downloadTab?.id,
+            });
+        });
+    }
 
     // 储存切片所需 DOM 提高性能
     const itemDOM = new Map();
+
+    // 失败自动重试计数器
+    const autoRetryCount = new Map();
+    const MAX_AUTO_RETRY = 3;
 
     // 数据预处理 切片数据伪装PNG 剔除PNG数据
     document.querySelector("#dataPreprocessing").checked && down.use(function (buffer, fragment) {
@@ -1594,6 +1720,19 @@ function downloadNew(start = 0, end = _fragments.length) {
     }
     // 下载错误
     down.on('downloadError', function (fragment, error) {
+        console.log(`Download error for fragment ${fragment.index}:`, error);
+
+        // 如果开启了失败自动重试，尝试自动重试
+        if ($("#autoRetry").prop("checked")) {
+            const retried = autoRetryCount.get(fragment.index) || 0;
+            if (retried < MAX_AUTO_RETRY) {
+                autoRetryCount.set(fragment.index, retried + 1);
+                $progress.html(i18n("autoRetrying", [fragment.index + 1, retried + 1, MAX_AUTO_RETRY]));
+                down.downloader(fragment);
+                return;
+            }
+        }
+
         $("#ForceDownload").show(); // 强制下载
         $("#errorDownload").show(); // 重下所有失败项
 
@@ -1602,6 +1741,13 @@ function downloadNew(start = 0, end = _fragments.length) {
         item.retryBtn.style.display = "inline";
         item.stopBtn.style.display = "none";
         item.root.scrollIntoView({ behavior: "smooth", block: "center" });
+        publishDownloadStatus({
+            type: 'itemError',
+            state: 'downloading',
+            success: down.success,
+            total: down.total,
+            sn: fragment.sn,
+        });
 
     });
     // 切片下载完成
@@ -1613,6 +1759,9 @@ function downloadNew(start = 0, end = _fragments.length) {
             return;
         }
 
+        // 清除自动重试计数
+        autoRetryCount.delete(fragment.index);
+
         const item = itemDOM.get(fragment.index);
         item.root.style.setProperty("--progress", "100%");
         item.stopBtn.style.display = "none";
@@ -1622,6 +1771,15 @@ function downloadNew(start = 0, end = _fragments.length) {
         $progress.html(`${down.success}/${down.total}`);
         $fileSize.html(i18n.downloaded + ":" + byteToSize(down.buffersize));
         $fileDuration.html(i18n.downloadedVideoLength + ":" + secToTime(down.duration));
+        publishDownloadStatus({
+            type: 'itemCompleted',
+            state: 'downloading',
+            success: down.success,
+            total: down.total,
+            fileSize: down.buffersize,
+            duration: down.duration,
+            completedSn: fragment.sn,
+        });
     });
     // 全部下载完成
     down.on('allCompleted', async function (buffer) {
@@ -1641,13 +1799,26 @@ function downloadNew(start = 0, end = _fragments.length) {
         $("#errorDownload").hide(); // 重下所有失败项
 
         buttonState("#mergeTs", true);
+        publishDownloadStatus({ type: 'allCompleted', state: 'completed', success: down.success, total: down.total });
+        clearDownloadStatus();
     });
     // 单个项目下载进度
     let lastEmitted = Date.now();
     down.on('itemProgress', function (fragment, state, receivedLength, contentLength) {
         if (Date.now() - lastEmitted >= 233) {
-            itemDOM.get(fragment.index).root.style.setProperty("--progress", (receivedLength / contentLength * 100).toFixed(2) + "%");
+            const percent = (receivedLength / contentLength * 100).toFixed(2);
+            itemDOM.get(fragment.index).root.style.setProperty("--progress", percent + "%");
             lastEmitted = Date.now();
+            publishDownloadStatus({
+                type: 'itemProgress',
+                state: 'downloading',
+                success: down.success,
+                total: down.total,
+                fileSize: down.buffersize,
+                duration: down.duration,
+                sn: fragment.sn,
+                percent,
+            });
         }
     });
     if (fileStream) {
@@ -1736,6 +1907,8 @@ function downloadNew(start = 0, end = _fragments.length) {
             $fileSize.html("");
             $fileDuration.html("");
             initDownload();
+            publishDownloadStatus({ type: 'stopped', state: 'stopped', success: down.success, total: down.total });
+            clearDownloadStatus();
         }, 1000);
     });
 }
@@ -1915,12 +2088,161 @@ function createStreamSaver(url) {
     return streamSaver.createWriteStream(`${GetFileName(url)}.${ext}`).getWriter();
 }
 window.addEventListener('beforeunload', function () {
+    if (isInSidePanel) return;
     fileStream && fileStream.abort();
 });
 window.onbeforeunload = function (event) {
+    if (isInSidePanel) return;
     if (fileStream) {
         event.returnValue = i18n.streamOnbeforeunload;
     }
+}
+
+/**
+ * 保存下载选项到 sessionStorage，供后台标签页恢复
+ */
+function saveDownloadOptions() {
+    sessionStorage.setItem('m3u8DownloadOptions', JSON.stringify({
+        rangeStart: $("#rangeStart").val(),
+        rangeEnd: $("#rangeEnd").val(),
+        streamSaver: $("#StreamSaver").prop("checked"),
+        ffmpeg: $("#ffmpeg").prop("checked"),
+        saveAs: $("#saveAs").prop("checked"),
+        skipDecrypt: $("#skipDecrypt").prop("checked"),
+        mp4: $("#mp4").prop("checked"),
+        onlyAudio: $("#onlyAudio").prop("checked"),
+        autoClose: $("#autoClose").prop("checked"),
+        autoRetry: $("#autoRetry").prop("checked"),
+        thread: $("#thread").val(),
+        customKey: $("#customKey").val(),
+        customIV: $("#customIV").val(),
+        customFilename: $("#customFilename").val(),
+        addParam: $("#addParam").prop("checked"),
+    }));
+}
+
+/**
+ * 从 sessionStorage 恢复下载选项
+ */
+function restoreDownloadOptions() {
+    const saved = sessionStorage.getItem('m3u8DownloadOptions');
+    if (!saved) return;
+    sessionStorage.removeItem('m3u8DownloadOptions');
+    try {
+        const opts = JSON.parse(saved);
+        if (opts.rangeStart != null) $("#rangeStart").val(opts.rangeStart);
+        if (opts.rangeEnd != null) $("#rangeEnd").val(opts.rangeEnd);
+        if (opts.streamSaver != null) $("#StreamSaver").prop("checked", opts.streamSaver);
+        if (opts.ffmpeg != null) $("#ffmpeg").prop("checked", opts.ffmpeg);
+        if (opts.saveAs != null) $("#saveAs").prop("checked", opts.saveAs);
+        if (opts.skipDecrypt != null) $("#skipDecrypt").prop("checked", opts.skipDecrypt);
+        if (opts.mp4 != null) $("#mp4").prop("checked", opts.mp4);
+        if (opts.onlyAudio != null) $("#onlyAudio").prop("checked", opts.onlyAudio);
+        if (opts.autoClose != null) $("#autoClose").prop("checked", opts.autoClose);
+        if (opts.autoRetry != null) $("#autoRetry").prop("checked", opts.autoRetry);
+        if (opts.thread != null) $("#thread").val(opts.thread);
+        if (opts.customKey != null) $("#customKey").val(opts.customKey);
+        if (opts.customIV != null) $("#customIV").val(opts.customIV);
+        if (opts.customFilename != null) $("#customFilename").val(opts.customFilename);
+        if (opts.addParam != null) $("#addParam").prop("checked", opts.addParam);
+    } catch (e) { console.log(e); }
+}
+
+/**
+ * 侧边栏应用后台标签页同步过来的下载状态
+ * @param {Object} status 下载状态对象
+ */
+function applySidePanelDownloadStatus(status) {
+    if (!status || !isInSidePanel) return;
+    if (status.downloadTabId) {
+        sidePanelDownloadTabId = status.downloadTabId;
+    }
+    if (status.state === 'downloading' || status.type === 'start' || status.type === 'delegated' || status.type === 'progress' || status.type === 'itemProgress' || status.type === 'itemCompleted') {
+        $("#stopDownload").show().off("click").on("click", function () {
+            downloadStatusChannel.postMessage({ Message: 'downloadStopRequest', tabid: tabId });
+        });
+        buttonState("#mergeTs", false);
+        if (status.success != null && status.total != null) {
+            const focusHint = sidePanelDownloadTabId ? ` <span class="focusDownloadTab" title="${i18n.sidePanelFocusDownloadTab}">↗</span>` : '';
+            $progress.html(`${status.success}/${status.total}${focusHint}`);
+            $progress.find('.focusDownloadTab').off('click').on('click', function (e) {
+                e.preventDefault();
+                sidePanelDownloadTabId && chrome.tabs.update(sidePanelDownloadTabId, { active: true });
+            });
+        } else if (status.type === 'delegated') {
+            $progress.html(i18n.sidePanelDownloadDelegated);
+        }
+        if (status.fileSize != null && status.fileSize > 0) {
+            $fileSize.html(i18n.downloaded + ":" + byteToSize(status.fileSize));
+        }
+        if (status.duration != null && status.duration > 0) {
+            $fileDuration.html(i18n.downloadedVideoLength + ":" + secToTime(status.duration));
+        }
+    }
+    if (status.type === 'itemProgress' && status.sn != null && status.percent != null) {
+        document.querySelector(`#media-item-${status.sn}`)?.style.setProperty("--progress", status.percent + "%");
+    }
+    if (status.type === 'itemCompleted' || status.completedSn != null) {
+        const sn = status.completedSn ?? status.sn;
+        const root = document.querySelector(`#media-item-${sn}`);
+        if (root) {
+            root.style.setProperty("--progress", "100%");
+            root.classList.remove("error");
+        }
+    }
+    if (status.type === 'itemError' && status.sn != null) {
+        document.querySelector(`#media-item-${status.sn}`)?.classList.add("error");
+    }
+    if (status.state === 'completed' || status.type === 'allCompleted') {
+        $progress.html(i18n.downloadComplete);
+        $("#stopDownload").hide();
+        buttonState("#mergeTs", true);
+    }
+    if (status.state === 'stopped' || status.type === 'stopped') {
+        $progress.html(i18n.stopDownload);
+        $("#stopDownload").hide();
+        buttonState("#mergeTs", true);
+        $fileSize.html("");
+        $fileDuration.html("");
+    }
+}
+
+/**
+ * 侧边栏初始化时拉取后台下载状态
+ */
+function initSidePanelDownloadMonitor() {
+    if (!isInSidePanel || !tabId || tabId <= 0) return;
+    (chrome.storage.session ?? chrome.storage.local).get(getDownloadStatusStorageKey(), (result) => {
+        const status = result[getDownloadStatusStorageKey()];
+        if (status) applySidePanelDownloadStatus(status);
+    });
+    downloadStatusChannel.postMessage({ Message: 'downloadStatusRequest', tabid: tabId });
+}
+
+/**
+ * 侧边栏下载委托到后台标签页
+ */
+function delegateDownloadToBackgroundTab() {
+    saveDownloadOptions();
+    const url = new URL(location.href);
+    url.searchParams.delete('sidepanel');
+    url.searchParams.set('autoDown', '1');
+    const selectedCount = _fragments.filter(fragment => fragment.selected).length;
+    chrome.tabs.create({ url: url.pathname + url.search, active: false }, (downloadTab) => {
+        const status = {
+            Message: 'downloadStatus',
+            tabid: tabId,
+            type: 'delegated',
+            state: 'downloading',
+            success: 0,
+            total: selectedCount,
+            downloadTabId: downloadTab?.id,
+        };
+        downloadStatusChannel.postMessage(status);
+        (chrome.storage.session ?? chrome.storage.local).set({ [getDownloadStatusStorageKey()]: status });
+        applySidePanelDownloadStatus(status);
+    });
+    buttonState("#mergeTs", true);
 }
 function getTemplates(text) {
     // 也许请求头被更改
@@ -1949,13 +2271,19 @@ function getM3u8DlREArg() {
         m3u8dlArg += ` --thread-count ${tsThread}`;
     }
 
-    // 范围处理
+    // 范围处理 (支持序号与时间格式 HH:MM:SS)
     let rangeStart = $("#rangeStart").val();
-    rangeStart = rangeStart.includes(":") ? rangeStart : rangeStart - 1;
     let rangeEnd = $("#rangeEnd").val();
-    rangeEnd = rangeEnd.includes(":") ? rangeEnd : rangeEnd - 1;
-    if (rangeStart != 0 || rangeEnd != _fragments.length - 1) {
-        m3u8dlArg += ` --custom-range "${rangeStart}-${rangeEnd}"`
+    const totalDuration = _fragments.reduce((acc, f) => acc + f.duration, 0);
+    const startIsTime = rangeStart.includes(":");
+    const endIsTime = rangeEnd.includes(":");
+    // 仅在用户实际修改过范围时(非默认值)才添加参数
+    const isStartDefault = (startIsTime && rangeStart === "00:00:00") || (!startIsTime && +rangeStart === 1);
+    const isEndDefault = (endIsTime && parseTimeToSeconds(rangeEnd) >= totalDuration - 1) || (!endIsTime && +rangeEnd === _fragments.length);
+    if (!isStartDefault || !isEndDefault) {
+        const startVal = startIsTime ? rangeStart : (+rangeStart - 1);
+        const endVal = endIsTime ? rangeEnd : (+rangeEnd - 1);
+        m3u8dlArg += ` --custom-range "${startVal}-${endVal}"`;
     }
 
     // 自定义密钥
@@ -1994,11 +2322,20 @@ function getM3u8DlArg() {
     const tsThread = $("#thread").val();  // 线程数量
     m3u8dlArg += ` --maxThreads "${tsThread}"`
 
+    // 范围处理 (支持序号与时间格式 HH:MM:SS)
     let rangeStart = $("#rangeStart").val();
-    rangeStart = rangeStart.includes(":") ? rangeStart : rangeStart - 1;
     let rangeEnd = $("#rangeEnd").val();
-    rangeEnd = rangeEnd.includes(":") ? rangeEnd : rangeEnd - 1;
-    m3u8dlArg += ` --downloadRange "${rangeStart}-${rangeEnd}"`
+    const totalDuration = _fragments.reduce((acc, f) => acc + f.duration, 0);
+    const startIsTime = rangeStart.includes(":");
+    const endIsTime = rangeEnd.includes(":");
+    // 仅在用户实际修改过范围时(非默认值)才添加参数
+    const isStartDefault = (startIsTime && rangeStart === "00:00:00") || (!startIsTime && +rangeStart === 1);
+    const isEndDefault = (endIsTime && parseTimeToSeconds(rangeEnd) >= totalDuration - 1) || (!endIsTime && +rangeEnd === _fragments.length);
+    if (!isStartDefault || !isEndDefault) {
+        const startVal = startIsTime ? rangeStart : (+rangeStart - 1);
+        const endVal = endIsTime ? rangeEnd : (+rangeEnd - 1);
+        m3u8dlArg += ` --downloadRange "${startVal}-${endVal}"`;
+    }
 
     let customKey = $("#customKey").val().trim();  // 自定义密钥
     if (customKey) {
@@ -2025,8 +2362,19 @@ function getM3u8DlArg() {
  * @returns {number}
  */
 function timeToIndex(time) {
-    let totalSeconds = time.split(":").reduce((acc, time) => 60 * acc + +time);
-    return _fragments.findIndex(fragment => (totalSeconds -= fragment.duration) < 0);
+    let totalSeconds = parseTimeToSeconds(time);
+    const index = _fragments.findIndex(fragment => (totalSeconds -= fragment.duration) < 0);
+    return index === -1 ? _fragments.length - 1 : index;
+}
+
+/**
+ * 时间格式字符串转总秒数 (HH:MM:SS 或 MM:SS)
+ * @param {string} time
+ * @returns {number}
+ */
+function parseTimeToSeconds(time) {
+    if (!time || typeof time !== "string") return 0;
+    return time.split(":").reduce((acc, t) => 60 * acc + (+t || 0), 0);
 }
 
 /**

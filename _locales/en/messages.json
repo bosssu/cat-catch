@@ -635,6 +635,12 @@
   "downloadRange": {
     "message": "Download Range"
   },
+  "startTime": {
+    "message": "Start time (00:00:00)"
+  },
+  "endTime": {
+    "message": "End time (00:00:00)"
+  },
   "recordLive": {
     "message": "Record"
   },
@@ -740,13 +746,13 @@
     "message": "Waiting for Live Data"
   },
   "sNumError": {
-    "message": "Serial Number Error"
+    "message": "Invalid time or segment number"
   },
   "startGTend": {
-    "message": "Start Number Cannot Be Greater Than End Number"
+    "message": "Start time cannot be greater than end time"
   },
   "sNumMax": {
-    "message": "Serial Number Cannot Exceed $num$",
+    "message": "Time or segment number out of range, cannot exceed $num$",
     "placeholders": {
       "num": {
         "content": "$1"
@@ -807,6 +813,12 @@
   },
   "streamOnbeforeunload": {
     "message": "Streaming is in progress, the download will stop after closing"
+  },
+  "sidePanelDownloadDelegated": {
+    "message": "Download runs in a background tab. Switch back here to see live progress."
+  },
+  "sidePanelFocusDownloadTab": {
+    "message": "Go to download tab"
   },
   "fileLoading": {
     "message": "File Loading"
@@ -1042,5 +1054,16 @@
   },
   "dataPreprocessing": {
     "message": "Data Preprocessing"
+  },
+  "autoRetry": {
+    "message": "Auto Retry on Failure"
+  },
+  "autoRetrying": {
+    "message": "Segment $1 failed, retrying $2/$3...",
+    "placeholders": {
+      "num": { "content": "$1" },
+      "cur": { "content": "$2" },
+      "max": { "content": "$3" }
+    }
   }
 }

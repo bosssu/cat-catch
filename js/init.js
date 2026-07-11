@@ -179,6 +179,7 @@ G.OptionLists = {
     M3u8SkipDecrypt: false,
     M3u8StreamSaver: false,
     M3u8Ffmpeg: true,
+    M3u8AutoRetry: false,
     M3u8AutoClose: false,
 
     // 第三方服务地址

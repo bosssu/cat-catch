@@ -564,22 +564,78 @@ function closeTab(tabId = 0) {
  * @param {Object} options 选项
  */
 function openParser(data, options = {}) {
-    chrome.tabs.get(G.tabId, function (tab) {
-        const url = `/${data.parsing ? data.parsing : "m3u8"}.html?${new URLSearchParams({
-            url: data.url,
-            title: data.title,
-            filename: data.downFileName,
-            tabid: data.tabId == -1 ? G.tabId : data.tabId,
-            initiator: data.initiator,
-            requestHeaders: data.requestHeaders ? JSON.stringify(data.requestHeaders) : undefined,
-            ...Object.fromEntries(Object.entries(options).map(([key, value]) => [key, typeof value === 'boolean' ? (value ? 1 : 0) : value])),
-        })}`
-        chrome.tabs.create({
-            url: url,
-            index: tab.index + 1,
-            active: G.isMobile || !options.autoDown
-        });
-    });
+    const url = `/${data.parsing ? data.parsing : "m3u8"}.html?${new URLSearchParams({
+        url: data.url,
+        title: data.title,
+        filename: data.downFileName,
+        tabid: data.tabId == -1 ? G.tabId : data.tabId,
+        initiator: data.initiator,
+        requestHeaders: data.requestHeaders ? JSON.stringify(data.requestHeaders) : undefined,
+        sidepanel: 1,
+        ...Object.fromEntries(Object.entries(options).map(([key, value]) => [key, typeof value === 'boolean' ? (value ? 1 : 0) : value])),
+    })}`;
+
+    if (G.isMobile) {
+        chrome.tabs.create({ url: url, active: true });
+        return;
+    }
+
+    // 如果当前页面已在侧边栏内，直接导航并更新Chrome侧边栏路径
+    if (typeof location !== 'undefined' && location.href.includes('sidepanel=1')) {
+        navigateInSidePanel(url, data.tabId == -1 ? G.tabId : data.tabId);
+        return;
+    }
+
+    // 委托background.js操作侧边栏，避免popup生命周期导致API调用丢失
+    chrome.runtime.sendMessage({ Message: "openSidePanel", tabId: G.tabId, path: url });
+}
+
+/**
+ * 同步侧边栏当前页面路径到 Chrome sidePanel 配置
+ * 确保切标签再切回来时恢复正确的页面（而非一级解析页或 popup）
+ */
+function syncSidePanelPath() {
+    if (typeof location === 'undefined' || !location.href.includes('sidepanel=1')) return;
+    if (!chrome.sidePanel || !chrome.sidePanel.setOptions) return;
+    const urlParams = new URL(location.href).searchParams;
+    const tabId = parseInt(urlParams.get('tabid') || urlParams.get('tabId'));
+    if (!tabId || tabId <= 0) return;
+    const path = location.pathname + location.search;
+    chrome.sidePanel.setOptions({ tabId, path, enabled: true });
+}
+
+/**
+ * 在侧边栏中导航到新页面，同时更新 Chrome 侧边栏路径
+ * 确保切标签再切回来时不会丢失当前页面状态
+ * @param {string} url 目标URL（相对路径）
+ * @param {number} tabId 关联的标签页ID
+ */
+function navigateInSidePanel(url, tabId) {
+    if (tabId && tabId > 0) {
+        chrome.sidePanel.setOptions({ tabId, path: url, enabled: true });
+    }
+    window.location.href = url;
+}
+
+// 侧边栏页面加载时同步路径（覆盖直接点击链接、location.href 跳转等未更新 setOptions 的情况）
+syncSidePanelPath();
+
+// 拦截侧边栏内扩展页面链接点击，统一走 navigateInSidePanel
+if (typeof document !== 'undefined' && location.href.includes('sidepanel=1')) {
+    document.addEventListener('click', function (e) {
+        const anchor = e.target.closest('a[href]');
+        if (!anchor) return;
+        const href = anchor.getAttribute('href');
+        if (!href || href.startsWith('#') || href.startsWith('javascript:')) return;
+        let linkUrl;
+        try { linkUrl = new URL(anchor.href); } catch { return; }
+        if (linkUrl.origin !== location.origin || !/\.html$/i.test(linkUrl.pathname)) return;
+        const urlParams = new URL(location.href).searchParams;
+        const tabId = parseInt(urlParams.get('tabid') || urlParams.get('tabId'));
+        if (!tabId || tabId <= 0) return;
+        e.preventDefault();
+        navigateInSidePanel(linkUrl.pathname + linkUrl.search, tabId);
+    }, true);
 }
 /**
  * 加载CSS样式

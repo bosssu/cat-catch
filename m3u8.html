@@ -176,8 +176,8 @@
                   <option disabled selected hidden>playlist</option>
                 </select>
                 <div class="merge">
-                  <input type="text" id="rangeStart" spellcheck="false" data-i18n-placeholder="start" value="1" />
-                  <input type="text" id="rangeEnd" spellcheck="false" data-i18n-placeholder="end" />
+                  <input type="text" id="rangeStart" spellcheck="false" data-i18n-placeholder="startTime" />
+                  <input type="text" id="rangeEnd" spellcheck="false" data-i18n-placeholder="endTime" />
                 </div>
                 <button id="rangeConfirm" data-i18n="confirm"></button>
               </div>
@@ -231,6 +231,10 @@
                 <p data-i18n-outer="skipDecryption"></p><input type="checkbox" id="skipDecrypt" save="change" />
               </label>
             </div>
+            <!-- 失败自动重试 -->
+            <label class="m3u8checkbox textColor">
+              <p data-i18n-outer="autoRetry"></p><input type="checkbox" id="autoRetry" />
+            </label>
             <!-- 下载完自动关闭页面 -->
             <label class="m3u8checkbox textColor">
               <p data-i18n-outer="autoClosePageAfterDownload"></p><input type="checkbox" id="autoClose" save="change" />

@@ -1,9 +1,11 @@
 // url 参数解析
 const params = new URL(location.href).searchParams;
+const isInSidePanel = params.get("sidepanel") === "1";   // 是否在侧边栏中
 const _url = params.get("url");
 // const _referer = params.get("referer");
 const _requestHeaders = params.get("requestHeaders");
 const _title = params.get("title");
+const _tabId = parseInt(params.get("tabid")) || 0;    // 关联的标签页ID
 
 // 修改当前标签下的所有xhr的requestHeaders
 let requestHeaders = JSONparse(_requestHeaders);
@@ -23,6 +25,16 @@ chrome.runtime.onMessage.addListener(function (message, sender, sendResponse) {
 
 function init() {
     loadCSS();
+
+    // 侧边栏模式：注入宽屏布局样式
+    if (isInSidePanel) {
+        $('head').append(`<style>
+            html, body { min-width: 1000px; max-width: 100%; }
+            .container, .main-container, .content { max-width: 100% !important; width: 100% !important; }
+            body { padding: 8px 16px !important; margin: 0 !important; }
+            textarea, input[type="text"] { max-width: 100% !important; box-sizing: border-box; }
+        </style>`);
+    }
     if (_url) {
         fetch(_url)
             .then(response => response.text())
@@ -83,7 +95,12 @@ function init() {
         m3u8Content += "#EXT-X-ENDLIST";
         // $("#media_file").html(m3u8Content); return;
         chrome.tabs.getCurrent(function (tabs) {
-            chrome.tabs.create({ url: "m3u8.html?getMpdId=" + tabs.id });
+            const tabId = tabs ? tabs.id : 0;
+            if (isInSidePanel) {
+                navigateInSidePanel("m3u8.html?getMpdId=" + tabId + "&sidepanel=1&tabid=" + _tabId, _tabId);
+            } else {
+                chrome.tabs.create({ url: "m3u8.html?getMpdId=" + tabId });
+            }
         });
     });
 }

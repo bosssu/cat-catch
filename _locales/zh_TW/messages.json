@@ -635,6 +635,12 @@
   "downloadRange": {
     "message": "下載範圍"
   },
+  "startTime": {
+    "message": "開始時間 (00:00:00)"
+  },
+  "endTime": {
+    "message": "結束時間 (00:00:00)"
+  },
   "recordLive": {
     "message": "錄音直播"
   },
@@ -740,13 +746,13 @@
     "message": "等待直播資料"
   },
   "sNumError": {
-    "message": "序號錯誤"
+    "message": "時間或序號錯誤"
   },
   "startGTend": {
-    "message": "開始序號不能大於結束序號"
+    "message": "開始時間不能大於結束時間"
   },
   "sNumMax": {
-    "message": "序號最大不能超過 $num$",
+    "message": "時間或序號超出範圍,最大不能超過 $num$",
     "placeholders": {
       "num": {
         "content": "$1"
@@ -807,6 +813,12 @@
   },
   "streamOnbeforeunload": {
     "message": "正在推流, 關閉後停止下載..."
+  },
+  "sidePanelDownloadDelegated": {
+    "message": "下載已在背景分頁進行，切回此頁可查看即時進度"
+  },
+  "sidePanelFocusDownloadTab": {
+    "message": "跳轉到下載分頁"
   },
   "fileLoading": {
     "message": "檔案載入"
@@ -1042,5 +1054,16 @@
   },
   "dataPreprocessing": {
     "message": "資料預處理"
+  },
+  "autoRetry": {
+    "message": "失敗自動重試"
+  },
+  "autoRetrying": {
+    "message": "切片 $1 下載失敗，正在第 $2/$3 次重試...",
+    "placeholders": {
+      "num": { "content": "$1" },
+      "cur": { "content": "$2" },
+      "max": { "content": "$3" }
+    }
   }
 }

@@ -635,6 +635,12 @@
   "downloadRange": {
     "message": "Phạm vi tải"
   },
+  "startTime": {
+    "message": "Thời gian bắt đầu (00:00:00)"
+  },
+  "endTime": {
+    "message": "Thời gian kết thúc (00:00:00)"
+  },
   "recordLive": {
     "message": "Ghi hình"
   },
@@ -740,13 +746,13 @@
     "message": "Đang chờ dữ liệu trực tiếp (Live)"
   },
   "sNumError": {
-    "message": "Lỗi số thứ tự"
+    "message": "Lỗi thời gian hoặc số thứ tự"
   },
   "startGTend": {
-    "message": "Số bắt đầu không thể lớn hơn số kết thúc"
+    "message": "Thời gian bắt đầu không thể lớn hơn thời gian kết thúc"
   },
   "sNumMax": {
-    "message": "Số thứ tự không thể vượt quá $num$",
+    "message": "Thời gian hoặc số thứ tự vượt phạm vi, không thể vượt quá $num$",
     "placeholders": {
       "num": {
         "content": "$1"
@@ -807,6 +813,12 @@
   },
   "streamOnbeforeunload": {
     "message": "Đang stream, quá trình tải sẽ dừng sau khi đóng"
+  },
+  "sidePanelDownloadDelegated": {
+    "message": "Đang tải trong tab nền. Quay lại đây để xem tiến trình theo thời gian thực."
+  },
+  "sidePanelFocusDownloadTab": {
+    "message": "Đến tab tải xuống"
   },
   "fileLoading": {
     "message": "Đang tải tệp"
@@ -1018,5 +1030,16 @@
   },
   "isBlockedSite": {
     "message": "Trang web này yêu cầu chặn hoạt động của tiện ích mở rộng này"
+  },
+  "autoRetry": {
+    "message": "Tự động thử lại khi thất bại"
+  },
+  "autoRetrying": {
+    "message": "Phân đoạn $1 thất bại, đang thử lại $2/$3...",
+    "placeholders": {
+      "num": { "content": "$1" },
+      "cur": { "content": "$2" },
+      "max": { "content": "$3" }
+    }
   }
 }

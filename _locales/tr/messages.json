@@ -635,6 +635,12 @@
   "downloadRange": {
     "message": "İndirme Aralığı"
   },
+  "startTime": {
+    "message": "Başlangıç zamanı (00:00:00)"
+  },
+  "endTime": {
+    "message": "Bitiş zamanı (00:00:00)"
+  },
   "recordLive": {
     "message": "Kayıt"
   },
@@ -740,13 +746,13 @@
     "message": "Canlı Veriler Bekleniyor"
   },
   "sNumError": {
-    "message": "Seri Numarası Hatası"
+    "message": "Zaman veya Seri Numarası Hatası"
   },
   "startGTend": {
-    "message": "Başlama Numarası Bitiş Numarasından Büyük Olamaz"
+    "message": "Başlangıç Zamanı Bitiş Zamanından Büyük Olamaz"
   },
   "sNumMax": {
-    "message": "Seri Numarası $num$ Aşamaz",
+    "message": "Zaman veya seri numarası aralık dışı, $num$ aşamaz",
     "placeholders": {
       "num": {
         "content": "$1"
@@ -807,6 +813,12 @@
   },
   "streamOnbeforeunload": {
     "message": "Akış devam ediyor, kapatıldıktan sonra indirme durur"
+  },
+  "sidePanelDownloadDelegated": {
+    "message": "İndirme arka plan sekmesinde devam ediyor. Canlı ilerlemeyi görmek için buraya dönün."
+  },
+  "sidePanelFocusDownloadTab": {
+    "message": "İndirme sekmesine git"
   },
   "fileLoading": {
     "message": "Dosya Yükleniyor"
@@ -1012,5 +1024,16 @@
   },
   "deleteDuplicateFilenames": {
     "message": "Yinelenen dosya adlarını sil"
+  },
+  "autoRetry": {
+    "message": "Başarısız olunca otomatik yeniden dene"
+  },
+  "autoRetrying": {
+    "message": "Parça $1 başarısız, $2/$3 deneniyor...",
+    "placeholders": {
+      "num": { "content": "$1" },
+      "cur": { "content": "$2" },
+      "max": { "content": "$3" }
+    }
   }
 }

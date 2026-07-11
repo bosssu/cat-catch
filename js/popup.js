@@ -735,7 +735,10 @@ $("[go]").click(function () {
         chrome.tabs.create({ url: G.ffmpegConfig.url })
         return;
     }
-    chrome.tabs.create({ url: url });
+    // 委托background.js打开解析器到侧边栏
+    const separator = url.includes('?') ? '&' : '?';
+    const sidePath = '/' + url + separator + 'sidepanel=1';
+    chrome.runtime.sendMessage({ Message: "openSidePanel", tabId: G.tabId, path: sidePath });
 });
 // 暂停 启用
 $("#enable").click(function () {
