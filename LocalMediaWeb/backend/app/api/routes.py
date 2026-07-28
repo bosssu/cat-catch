@@ -18,7 +18,8 @@ from app.core.db import get_db
 from app.models.entities import DownloadJob, MediaItem
 from app.services.download import enqueue_jobs, register_uploaded_file, request_cancel
 from app.services.feed_rank import rank_recommend_with_affinity
-from app.services.scan import ensure_category, list_categories, rescan_medias
+from app.services.media_process import merge_av_to_mp4, remux_to_playable, write_temp_bytes
+from app.services.scan import ensure_category, list_categories, purge_missing_media, rescan_medias
 from app.services.thumb import generate_thumb, thumb_path_for
 from app.services.util import detect_media_type, safe_category, safe_filename
 
@@ -178,6 +179,10 @@ def get_media(media_id: int, db=Depends(get_db)):
 
 @router.get("/media/{media_id}/file", dependencies=[Depends(require_token)])
 def media_file(media_id: int, db=Depends(get_db)):
+    """
+    Stream media with Range support (native <video> on mobile).
+    Auth: header or ?token= (see require_token).
+    """
     m = db.get(MediaItem, media_id)
     if not m:
         raise HTTPException(404, "Not found")
@@ -185,7 +190,17 @@ def media_file(media_id: int, db=Depends(get_db)):
     if not path.is_file():
         raise HTTPException(404, "File missing on disk")
     media = m.mime or mimetypes.guess_type(path.name)[0] or "application/octet-stream"
-    return FileResponse(path, media_type=media, filename=path.name)
+    # webm leftovers: still serve, but prefer correct type for mp4 after remux
+    if path.suffix.lower() == ".mp4":
+        media = "video/mp4"
+    elif path.suffix.lower() == ".webm":
+        media = "video/webm"
+    return FileResponse(
+        path,
+        media_type=media,
+        filename=path.name,
+        content_disposition_type="inline",
+    )
 
 
 @router.get("/media/{media_id}/thumb", dependencies=[Depends(require_token)])
@@ -275,32 +290,103 @@ async def upload(
     title: str = Form(""),
     source_url: str = Form(""),
     media_type: str = Form(""),
+    remux: str = Form("1"),
     file: UploadFile = File(...),
 ):
+    """
+    Direct blob upload (cache capture / recorder).
+    Default remux=1 runs ffmpeg copy+faststart so MSE fMP4 / webm is browser-playable.
+    """
     cat = ensure_category(category)
     settings = get_settings()
     raw_name = file.filename or "upload.bin"
     data = await file.read()
     if settings.max_file_bytes and len(data) > settings.max_file_bytes:
         raise HTTPException(400, "File too large")
-    # write temp then register
     ext = Path(raw_name).suffix.lstrip(".") or "bin"
     mtype = media_type or detect_media_type(raw_name, file.content_type, None)
     if mtype == "m3u8":
+        mtype = "video"
+    if mtype not in ("image", "gif", "video"):
         mtype = "video"
     fname = safe_filename(title or Path(raw_name).stem, source_url or raw_name, ext)
     dest = settings.medias_path() / cat / fname
     dest.parent.mkdir(parents=True, exist_ok=True)
     dest.write_bytes(data)
+    mime = file.content_type or ""
+    note = ""
+    if remux not in ("0", "false", "False") and mtype == "video":
+        try:
+            dest2 = remux_to_playable(dest, prefer_ext=ext)
+            if dest2 != dest:
+                dest = dest2
+                note = "remuxed"
+            mime = mimetypes.guess_type(dest.name)[0] or mime or "video/mp4"
+        except Exception as e:
+            note = f"remux_skip:{e}"
     item = register_uploaded_file(
         category=cat,
         dest=dest,
         title=title or Path(raw_name).stem,
         source_url=source_url,
-        media_type=mtype if mtype in ("image", "gif", "video") else "video",
-        mime=file.content_type or "",
+        media_type=mtype,
+        mime=mime,
+        dedupe=False,
     )
-    return {"media_id": item.id, "item": _media_out(item)}
+    return {"media_id": item.id, "item": _media_out(item), "note": note}
+
+
+@router.post("/upload-av", dependencies=[Depends(require_token)])
+async def upload_av(
+    category: str = Form("default"),
+    title: str = Form(""),
+    source_url: str = Form(""),
+    video: UploadFile = File(...),
+    audio: UploadFile | None = File(None),
+):
+    """
+    Merge separate MSE video + audio buffers into one playable mp4 (one media item).
+    """
+    cat = ensure_category(category)
+    settings = get_settings()
+    vdata = await video.read()
+    adata = await audio.read() if audio is not None else b""
+    if settings.max_file_bytes and (len(vdata) + len(adata)) > settings.max_file_bytes:
+        raise HTTPException(400, "File too large")
+    if len(vdata) < 32:
+        raise HTTPException(400, "Empty video track")
+
+    v_tmp = write_temp_bytes(vdata, ".mp4")
+    a_tmp = write_temp_bytes(adata, ".mp4") if adata and len(adata) > 32 else None
+    try:
+        fname = safe_filename(title or "capture", source_url or "capture", "mp4")
+        dest = settings.medias_path() / cat / fname
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        try:
+            merge_av_to_mp4(v_tmp, a_tmp, dest)
+            note = "merged"
+        except Exception as e:
+            # fallback: remux video track only
+            dest.write_bytes(vdata)
+            dest = remux_to_playable(dest, prefer_ext="mp4")
+            note = f"video_only:{e}"
+        item = register_uploaded_file(
+            category=cat,
+            dest=dest,
+            title=title or "capture",
+            source_url=source_url,
+            media_type="video",
+            mime="video/mp4",
+            dedupe=False,
+        )
+        return {"media_id": item.id, "item": _media_out(item), "note": note}
+    finally:
+        for p in (v_tmp, a_tmp):
+            if p and p.exists():
+                try:
+                    p.unlink()
+                except OSError:
+                    pass
 
 
 @router.get("/jobs", dependencies=[Depends(require_token)])
@@ -350,5 +436,20 @@ def cancel_job(job_id: int, db=Depends(get_db)):
 
 
 @router.post("/rescan", dependencies=[Depends(require_token)])
-def rescan():
-    return rescan_medias()
+def rescan(purge: bool = Query(default=False)):
+    """Scan Medias disk → DB. purge=1 also drops rows whose files are gone."""
+    return rescan_medias(purge=purge)
+
+
+@router.post("/refresh-library", dependencies=[Depends(require_token)])
+def refresh_library():
+    """
+    Force refresh: purge missing/deleted files from DB, remove orphan thumbs,
+    then re-scan Medias for new files.
+    """
+    return rescan_medias(purge=True)
+
+
+@router.post("/purge-missing", dependencies=[Depends(require_token)])
+def purge_missing():
+    return purge_missing_media()

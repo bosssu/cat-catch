@@ -170,6 +170,9 @@ G.OptionLists = {
     lmwToken: "",
     lmwDefaultCategory: "default",
     lmwAutoFallback: true,
+    // 页面媒体浮动「入库」按钮（资源嗅探）
+    lmwFloatIngest: true,
+    lmwFloatMinPx: 72,
 
     popup: false,
     popupMode: 0, // 0:preview.html 1:popup.html 2:window preview.html 3: window popup.html

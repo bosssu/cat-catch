@@ -312,11 +312,320 @@ function save(tabId) {
     }
 }
 
+/** LocalMediaWeb helpers for page float-ingest (service worker). */
+async function lmwGetSettings() {
+    const defaults = {
+        lmwURL: "http://127.0.0.1:8790",
+        lmwToken: "",
+        lmwDefaultCategory: "default",
+        lmwAutoFallback: true,
+    };
+    try {
+        const keys = Object.keys(defaults);
+        // 选项页写 sync；部分入口写 local。合并：默认 → sync → local
+        const [syncData, localData] = await Promise.all([
+            chrome.storage.sync.get(keys),
+            chrome.storage.local.get(keys),
+        ]);
+        return { ...defaults, ...syncData, ...localData };
+    } catch (e) {
+        return { ...defaults };
+    }
+}
+
+function lmwBaseUrl(s) {
+    return (s.lmwURL || "http://127.0.0.1:8790").replace(/\/+$/, "");
+}
+
+function lmwAuthHeaders(s, json) {
+    const h = {};
+    if (json) h["Content-Type"] = "application/json;charset=utf-8";
+    const token = (s.lmwToken || "").trim();
+    if (token) h["X-LMW-Token"] = token;
+    return h;
+}
+
+async function lmwFetchJson(url, options) {
+    let res;
+    try {
+        res = await fetch(url, options);
+    } catch (e) {
+        throw new Error(
+            "无法连接 LocalMediaWeb（" +
+                ((e && e.message) || "network") +
+                "）。请确认服务已启动且地址正确。"
+        );
+    }
+    const text = await res.text().catch(() => "");
+    let body = null;
+    try {
+        body = text ? JSON.parse(text) : null;
+    } catch (e) {
+        body = text;
+    }
+    if (!res.ok) {
+        const detail =
+            (body && (body.detail || body.message)) ||
+            (typeof body === "string" ? body : text) ||
+            res.statusText;
+        throw new Error(`${res.status} ${String(detail).slice(0, 180)}`);
+    }
+    return body;
+}
+
+async function lmwBuildCookieHeader(url) {
+    if (!url || !chrome.cookies?.getAll) return "";
+    try {
+        const cookies = await chrome.cookies.getAll({ url });
+        if (cookies && cookies.length) {
+            return cookies.map((c) => `${c.name}=${c.value}`).join("; ");
+        }
+    } catch (e) { /* ignore */ }
+    return "";
+}
+
+function lmwGuessExt(url, mime, mediaType) {
+    const m = (mime || "").toLowerCase();
+    if (m.includes("png")) return "png";
+    if (m.includes("jpeg") || m.includes("jpg")) return "jpg";
+    if (m.includes("gif")) return "gif";
+    if (m.includes("webp")) return "webp";
+    if (m.includes("avif")) return "avif";
+    if (m.includes("mp4")) return "mp4";
+    if (m.includes("webm")) return "webm";
+    if (m.includes("mpegurl") || mediaType === "m3u8") return "m3u8";
+    const path = (url || "").split("?")[0].split("#")[0];
+    const ext = path.includes(".") ? path.split(".").pop().toLowerCase() : "";
+    if (ext && ext.length <= 5) return ext.replace(/[^a-z0-9]/g, "") || "bin";
+    if (mediaType === "image") return "jpg";
+    if (mediaType === "gif") return "gif";
+    return "mp4";
+}
+
+async function lmwUploadBlob(s, blob, meta) {
+    const fd = new FormData();
+    fd.append("category", meta.category || s.lmwDefaultCategory || "default");
+    fd.append("title", meta.title || "");
+    fd.append("source_url", meta.source_url || meta.url || "");
+    fd.append("media_type", meta.media_type || "video");
+    fd.append("remux", "1");
+    const name = meta.filename || "upload.bin";
+    fd.append("file", blob, name);
+    const headers = lmwAuthHeaders(s, false);
+    const data = await lmwFetchJson(lmwBaseUrl(s) + "/api/upload", {
+        method: "POST",
+        headers,
+        body: fd,
+    });
+    return {
+        ok: true,
+        media_id: data.media_id ?? data.item?.id,
+        note: data.note || "upload",
+        item: data.item,
+    };
+}
+
+async function lmwWaitJob(s, jobId, { timeoutMs = 12000, intervalMs = 700 } = {}) {
+    const start = Date.now();
+    let last = null;
+    while (Date.now() - start < timeoutMs) {
+        last = await lmwFetchJson(lmwBaseUrl(s) + `/api/jobs/${jobId}`, {
+            headers: lmwAuthHeaders(s, false),
+        });
+        if (last && !["queued", "running"].includes(last.status)) return last;
+        await new Promise((r) => setTimeout(r, intervalMs));
+    }
+    return last;
+}
+
+/**
+ * Page float-ingest: prefer direct fetch+upload for file media; server job for streams.
+ */
+async function lmwPageIngestFromBackground(Message) {
+    const s = await lmwGetSettings();
+    const url = (Message.url || "").trim();
+    if (!url) throw new Error("缺少资源 URL");
+    if (url.startsWith("blob:")) throw new Error("blob 请走 lmwPageUpload");
+
+    const mediaType = Message.media_type || "video";
+    const title = Message.title || "";
+    const page = Message.source_page || Message.page_url || Message.referer || "";
+    const category = Message.category || s.lmwDefaultCategory || "default";
+    const isStream =
+        mediaType === "m3u8" ||
+        mediaType === "dash" ||
+        /\.m3u8(\?|#|$)/i.test(url) ||
+        /\.mpd(\?|#|$)/i.test(url);
+
+    const headers = {
+        Referer: Message.referer || page || "",
+        "User-Agent":
+            typeof navigator !== "undefined"
+                ? navigator.userAgent
+                : "Mozilla/5.0 Chrome",
+    };
+    const cookie = await lmwBuildCookieHeader(url);
+    if (cookie) headers.Cookie = cookie;
+
+    // Non-stream: extension fetch + upload is more reliable than server-side download
+    if (!isStream) {
+        try {
+            const res = await fetch(url, { headers, credentials: "omit", cache: "force-cache" });
+            if (!res.ok) throw new Error(`拉取资源 HTTP ${res.status}`);
+            const blob = await res.blob();
+            if (!blob.size) throw new Error("资源内容为空");
+            const mime = res.headers.get("content-type") || blob.type || "";
+            const ext = lmwGuessExt(url, mime, mediaType);
+            const up = await lmwUploadBlob(s, blob, {
+                category,
+                title,
+                source_url: url,
+                media_type: mediaType === "m3u8" || mediaType === "dash" ? "video" : mediaType,
+                filename: `${String(title || "media").slice(0, 40)}.${ext}`,
+            });
+            return up;
+        } catch (e) {
+            // fall through to server ingest
+            console.warn("lmw client fetch failed, try server ingest", e);
+        }
+    }
+
+    // Server ingest (m3u8/dash or client fetch failed)
+    const item = {
+        url,
+        media_type: isStream
+            ? /\.mpd/i.test(url) || mediaType === "dash"
+                ? "dash"
+                : "m3u8"
+            : mediaType,
+        title: String(title).slice(0, 512),
+        referer: page,
+        source_page: page,
+        headers,
+    };
+    const ingestRes = await lmwFetchJson(lmwBaseUrl(s) + "/api/ingest", {
+        method: "POST",
+        headers: lmwAuthHeaders(s, true),
+        body: JSON.stringify({ category, items: [item] }),
+    });
+
+    const dupIds = ingestRes.duplicate_media_ids || [];
+    if (dupIds.length && !(ingestRes.job_ids || []).length) {
+        return { ok: true, duplicate: true, media_id: dupIds[0], message: "已在库中" };
+    }
+
+    const jobId = (ingestRes.job_ids || [])[0];
+    if (jobId == null) {
+        if (dupIds.length) {
+            return { ok: true, duplicate: true, media_id: dupIds[0] };
+        }
+        return {
+            ok: true,
+            message: `已提交（accepted=${ingestRes.accepted ?? 0}）`,
+            accepted: ingestRes.accepted,
+        };
+    }
+
+    // Wait briefly so UI can show real success/failure
+    let job = null;
+    try {
+        job = await lmwWaitJob(s, jobId, { timeoutMs: 15000 });
+    } catch (e) {
+        return { ok: true, job_id: jobId, job_status: "queued", message: "已提交任务，后台下载中" };
+    }
+
+    if (!job) {
+        return { ok: true, job_id: jobId, job_status: "queued" };
+    }
+
+    if (job.status === "success") {
+        return {
+            ok: true,
+            job_id: jobId,
+            job_status: "success",
+            media_id: job.media_id ?? job.result_media_id,
+            message: "入库成功",
+        };
+    }
+
+    // Client fallback for failed non-stream
+    const canFallback =
+        s.lmwAutoFallback !== false &&
+        !isStream &&
+        ["failed_auth", "need_client_fetch", "failed_network", "failed_partial", "failed"].includes(
+            job.status
+        );
+    if (canFallback) {
+        try {
+            const res = await fetch(url, { headers, credentials: "omit" });
+            if (!res.ok) throw new Error(`fallback HTTP ${res.status}`);
+            const blob = await res.blob();
+            const mime = res.headers.get("content-type") || blob.type || "";
+            const ext = lmwGuessExt(url, mime, mediaType);
+            const up = await lmwUploadBlob(s, blob, {
+                category,
+                title,
+                source_url: url,
+                media_type: mediaType,
+                filename: `${String(title || "media").slice(0, 40)}.${ext}`,
+            });
+            return { ...up, note: "fallback_upload", job_id: jobId };
+        } catch (e2) {
+            throw new Error(
+                `任务 #${jobId} ${job.status}: ${job.error_message || ""}；回退上传失败: ${
+                    (e2 && e2.message) || e2
+                }`.slice(0, 220)
+            );
+        }
+    }
+
+    if (["queued", "running"].includes(job.status)) {
+        return {
+            ok: true,
+            job_id: jobId,
+            job_status: job.status,
+            message: "已提交，服务端仍在下载…",
+        };
+    }
+
+    throw new Error(
+        `任务 #${jobId} ${job.status}: ${(job.error_message || job.message || "").slice(0, 160)}`
+    );
+}
+
+async function lmwPageUploadFromBackground(Message) {
+    const s = await lmwGetSettings();
+    const buf = Message.buffer;
+    if (!buf) throw new Error("缺少文件数据");
+    const blob = new Blob([buf], { type: Message.mime || "application/octet-stream" });
+    if (!blob.size) throw new Error("文件为空");
+    return lmwUploadBlob(s, blob, {
+        category: Message.category || s.lmwDefaultCategory || "default",
+        title: Message.title || "",
+        source_url: Message.source_url || "",
+        media_type: Message.media_type || "video",
+        filename: Message.filename || "upload.bin",
+    });
+}
+
 /**
  * 监听 扩展 message 事件
  */
 chrome.runtime.onMessage.addListener(function (Message, sender, sendResponse) {
     if (chrome.runtime.lastError) { return; }
+    // 页面浮动入库不依赖媒体嗅探 init，优先处理
+    if (Message.Message == "lmwPageIngest") {
+        lmwPageIngestFromBackground(Message)
+            .then((r) => sendResponse(r))
+            .catch((e) => sendResponse({ ok: false, error: (e && e.message) || String(e) }));
+        return true;
+    }
+    if (Message.Message == "lmwPageUpload") {
+        lmwPageUploadFromBackground(Message)
+            .then((r) => sendResponse(r))
+            .catch((e) => sendResponse({ ok: false, error: (e && e.message) || String(e) }));
+        return true;
+    }
     if (!G.initLocalComplete || !G.initSyncComplete) {
         sendResponse("error");
         return true;

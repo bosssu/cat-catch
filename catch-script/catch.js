@@ -133,9 +133,13 @@
             <div id="catCatch" style="${style}">
                 <div id="tips"></div>
                 <button id="download" ${buttonStyle} data-i18n="downloadCapturedData">下载已捕获的数据</button>
+                <button id="ingestLmw" ${buttonStyle}>入库到媒体库</button>
+                <button id="stopIngest" ${buttonStyle} title="停止继续捕获，把当前已抓到的数据入库（推荐）">停止并入库</button>
                 <button id="clean" ${buttonStyle} data-i18n="deleteCapturedData">删除已捕获数据</button>
+                <div style="font-size:11px;opacity:.85;max-width:220px;line-height:1.3;">仅「停止并入库」会写入媒体库。Close/关闭捕捉会刷新页面并丢弃未入库数据。</div>
                 <div><button id="hide" ${buttonStyle} data-i18n="hide">隐藏</button><button id="close" ${buttonStyle} data-i18n="close">关闭</button></div>
                 <label><input type="checkbox" id="autoDown" ${localStorage.getItem("CatCatchCatch_autoDown") || ""} ${checkboxStyle}><span data-i18n="automaticDownload">完成捕获自动下载</span></label>
+                <label><input type="checkbox" id="autoIngest" ${localStorage.getItem("CatCatchCatch_autoIngest") || ""} ${checkboxStyle}><span>完成捕获自动入库</span></label>
                 <label><input type="checkbox" id="ffmpeg" ${localStorage.getItem("CatCatchCatch_ffmpeg") || ""} ${checkboxStyle}><span data-i18n="ffmpeg">使用ffmpeg合并</span></label>
                 <label><input type="checkbox" id="autoToBuffered" ${checkboxStyle}><span data-i18n="autoToBuffered">自动跳转缓冲尾</span></label>
                 <label><input type="checkbox" id="checkHead" ${checkboxStyle}><span data-i18n="checkHead">清理多余头部数据</span></label>
@@ -280,6 +284,17 @@
 
             const download = this.catCatch.querySelector("#download");
             if (download) download.addEventListener('click', this.handleDownload.bind(this));
+
+            const ingestLmw = this.catCatch.querySelector("#ingestLmw");
+            if (ingestLmw) ingestLmw.addEventListener('click', this.handleIngestLmw.bind(this));
+
+            const stopIngest = this.catCatch.querySelector("#stopIngest");
+            if (stopIngest) stopIngest.addEventListener('click', this.handleStopAndIngest.bind(this));
+
+            const autoIngest = this.catCatch.querySelector("#autoIngest");
+            if (autoIngest) autoIngest.addEventListener('change', (event) => {
+                localStorage.setItem("CatCatchCatch_autoIngest", event.target.checked ? "checked" : "");
+            });
 
             const hide = this.catCatch.querySelector("#hide");
             if (hide) hide.addEventListener('click', this.handleHide.bind(this));
@@ -426,6 +441,259 @@
             }
         }
 
+        /**
+         * 将已捕获 buffer 入库到 LocalMediaWeb（捕获未结束时会二次确认）
+         */
+        handleIngestLmw(event) {
+            try {
+                if (!this.hasCatchData()) {
+                    alert(this.i18n("noData", "没抓到有效数据"));
+                    return;
+                }
+                const sizeHint = this.byteToSize ? this.byteToSize(this.mediaSize) : "";
+                let msg = `确认将已捕获数据入库到媒体库？\n大小约 ${sizeHint || "未知"}`;
+                if (!this.isComplete && this.enable) {
+                    msg += "\n\n捕获尚未结束，可能不完整。推荐用「停止并入库」。";
+                }
+                if (!window.confirm(msg)) return;
+                this.catchIngestLmw();
+            } catch (error) {
+                console.error("入库处理失败:", error);
+                alert("入库过程中出错: " + (error?.message || error));
+            }
+        }
+
+        /**
+         * 停止继续捕获 + 把当前 buffer 入库（推荐路径，避免关脚本刷新丢数据）
+         * 注意：不会卸载页面脚本；popup 仍显示「关闭捕捉」是正常的，需手动关或关面板。
+         */
+        async handleStopAndIngest(event) {
+            try {
+                if (!this.hasCatchData()) {
+                    alert(this.i18n("noData", "没抓到有效数据"));
+                    return;
+                }
+                const sizeHint = this.byteToSize ? this.byteToSize(this.mediaSize) : "";
+                if (!window.confirm(
+                    `停止继续捕获，并将当前数据入库？\n大小约 ${sizeHint || "未知"}\n\n` +
+                    `入库后脚本仍挂在本页（popup 仍可能显示「关闭捕捉」），可稍后手动关闭；关闭会刷新页面。`
+                )) {
+                    return;
+                }
+                // 停止后续 appendBuffer 写入
+                this.enable = false;
+                this.isComplete = true;
+                this.stoppedAfterIngest = true;
+                try {
+                    document.querySelectorAll("video, audio").forEach((el) => {
+                        try { el.pause(); } catch (e) { /* ignore */ }
+                    });
+                } catch (e) { /* ignore */ }
+                if (this.tips) {
+                    this.tips.innerHTML = "已停止捕获，正在入库…";
+                }
+                const btn = this.catCatch.querySelector("#stopIngest");
+                if (btn) {
+                    btn.disabled = true;
+                    btn.textContent = "入库中…";
+                }
+                await this.catchIngestLmw();
+                if (btn) {
+                    btn.disabled = false;
+                    btn.textContent = "停止并入库";
+                }
+                if (this.tips && !String(this.tips.innerHTML).includes("失败")) {
+                    this.tips.innerHTML =
+                        (this.tips.innerHTML || "入库成功") +
+                        " · 已停止写入。popup 仍显示「关闭捕捉」属正常，数据已在库中；需要时再点关闭（会刷新）。";
+                }
+            } catch (error) {
+                console.error("停止并入库失败:", error);
+                alert("停止并入库失败: " + (error?.message || error));
+                const btn = this.catCatch.querySelector("#stopIngest");
+                if (btn) {
+                    btn.disabled = false;
+                    btn.textContent = "停止并入库";
+                }
+            }
+        }
+
+        /** 是否已有可导出的 buffer */
+        hasCatchData() {
+            if (!this.catchMedia || !this.catchMedia.length) return false;
+            return this.catchMedia.some((item) => item?.bufferList?.length > 0);
+        }
+
+        /**
+         * 通过 content-script 上传 blob URL 到 LocalMediaWeb
+         */
+        postIngestBlob(blob, meta = {}) {
+            return new Promise((resolve, reject) => {
+                const requestId = "lmw_" + Date.now() + "_" + Math.random().toString(36).slice(2, 8);
+                const blobUrl = URL.createObjectURL(blob);
+                let settled = false;
+                const finish = (fn) => {
+                    if (settled) return;
+                    settled = true;
+                    clearTimeout(timer);
+                    window.removeEventListener("message", onMsg);
+                    setTimeout(() => URL.revokeObjectURL(blobUrl), 2000);
+                    fn();
+                };
+                const onMsg = (event) => {
+                    if (!event.data || event.data.action !== "catCatchIngestBlobResult") return;
+                    if (event.data.requestId !== requestId) return;
+                    if (event.data.ok) finish(() => resolve(event.data.result));
+                    else finish(() => reject(new Error(event.data.error || "ingest failed")));
+                };
+                window.addEventListener("message", onMsg);
+                window.postMessage({
+                    action: "catCatchIngestBlob",
+                    requestId,
+                    blobUrl,
+                    filename: meta.filename || "capture.bin",
+                    title: meta.title || document.title || "capture",
+                    media_type: meta.media_type || "video",
+                    source_url: location.href,
+                }, location.origin);
+                const timer = setTimeout(() => {
+                    finish(() => reject(new Error("入库超时（请确认扩展 content-script 与 LocalMediaWeb 已启动）")));
+                }, 600000);
+            });
+        }
+
+        /** video+audio → 服务端 ffmpeg 合成一条媒体 */
+        postIngestAV(videoBlob, audioBlob, meta = {}) {
+            return new Promise((resolve, reject) => {
+                const requestId = "lmw_av_" + Date.now() + "_" + Math.random().toString(36).slice(2, 8);
+                const videoBlobUrl = URL.createObjectURL(videoBlob);
+                const audioBlobUrl = audioBlob ? URL.createObjectURL(audioBlob) : "";
+                let settled = false;
+                const finish = (fn) => {
+                    if (settled) return;
+                    settled = true;
+                    clearTimeout(timer);
+                    window.removeEventListener("message", onMsg);
+                    setTimeout(() => {
+                        URL.revokeObjectURL(videoBlobUrl);
+                        if (audioBlobUrl) URL.revokeObjectURL(audioBlobUrl);
+                    }, 2000);
+                    fn();
+                };
+                const onMsg = (event) => {
+                    if (!event.data || event.data.action !== "catCatchIngestBlobResult") return;
+                    if (event.data.requestId !== requestId) return;
+                    if (event.data.ok) finish(() => resolve(event.data.result));
+                    else finish(() => reject(new Error(event.data.error || "ingest failed")));
+                };
+                window.addEventListener("message", onMsg);
+                window.postMessage({
+                    action: "catCatchIngestAV",
+                    requestId,
+                    videoBlobUrl,
+                    audioBlobUrl,
+                    filename: meta.filename || "capture.mp4",
+                    title: meta.title || document.title || "capture",
+                    source_url: location.href,
+                }, location.origin);
+                const timer = setTimeout(() => {
+                    finish(() => reject(new Error("入库超时（AV 合并）")));
+                }, 600000);
+            });
+        }
+
+        /** 清理多余 ftyp/WebM 头 */
+        prepareCatchBuffers() {
+            const checkHead = this.catCatch.querySelector("#checkHead");
+            let userConfirmedHeadChoice = false;
+            for (let key in this.catchMedia) {
+                if (!this.catchMedia[key]?.bufferList || this.catchMedia[key].bufferList.length <= 1) continue;
+                let lastHeaderIndex = -1;
+                for (let i = 0; i < this.catchMedia[key].bufferList.length; i++) {
+                    const data = new Uint8Array(this.catchMedia[key].bufferList[i]);
+                    if (data.length > 8 && data[4] === 0x66 && data[5] === 0x74 && data[6] === 0x79 && data[7] === 0x70) {
+                        lastHeaderIndex = i;
+                    } else if (data.length > 4 && data[0] === 0x1A && data[1] === 0x45 && data[2] === 0xDF && data[3] === 0xA3) {
+                        lastHeaderIndex = i;
+                    }
+                }
+                if (lastHeaderIndex > 0) {
+                    if (!userConfirmedHeadChoice && checkHead && !checkHead.checked) {
+                        checkHead.checked = window.confirm(this.i18n("headData", "检测到多余头部数据, 是否清除?"));
+                        userConfirmedHeadChoice = true;
+                    }
+                    if (checkHead && checkHead.checked) {
+                        this.catchMedia[key].bufferList.splice(0, lastHeaderIndex);
+                    }
+                }
+            }
+        }
+
+        /**
+         * 整理 buffer 后上传：
+         * - 音视频双轨 → 合并为 1 条媒体（解决「成功 2 项」且无法播）
+         * - 单轨 → remux 后 1 条
+         */
+        async catchIngestLmw() {
+            if (this.catchMedia.length == 0) {
+                alert(this.i18n("noData", "没抓到有效数据"));
+                return;
+            }
+            this.prepareCatchBuffers();
+
+            const baseTitle = this.fileName ? this.fileName.innerHTML.trim() : document.title;
+            if (this.tips) this.tips.innerHTML = "正在入库…";
+
+            const tracks = [];
+            for (let item of this.catchMedia) {
+                if (!item || !item.bufferList || item.bufferList.length === 0) continue;
+                const mime = (item.mimeType && item.mimeType.split(';')[0]) || 'video/mp4';
+                const major = (mime.split('/')[0] || 'video').toLowerCase();
+                const size = item.bufferList.reduce((n, b) => n + (b.byteLength || b.length || 0), 0);
+                tracks.push({ mime, major, size, bufferList: item.bufferList, mimeType: item.mimeType || mime });
+            }
+            if (!tracks.length) {
+                alert(this.i18n("noData", "没有有效数据可入库"));
+                return;
+            }
+
+            const videos = tracks.filter((t) => t.major === "video").sort((a, b) => b.size - a.size);
+            const audios = tracks.filter((t) => t.major === "audio").sort((a, b) => b.size - a.size);
+
+            try {
+                if (videos.length && audios.length) {
+                    const vBlob = new Blob(videos[0].bufferList, { type: videos[0].mime });
+                    const aBlob = new Blob(audios[0].bufferList, { type: audios[0].mime });
+                    if (this.tips) this.tips.innerHTML = "正在合并音视频并入库…";
+                    const res = await this.postIngestAV(vBlob, aBlob, {
+                        filename: `${baseTitle}.mp4`,
+                        title: baseTitle,
+                    });
+                    const id = res?.media_id || res?.item?.id || "";
+                    if (this.tips) this.tips.innerHTML = id ? `入库成功 1 项（#${id}，音视频已合并）` : "入库成功 1 项（音视频已合并）";
+                } else {
+                    // 取最大的一条（避免无意义的双轨假成功）
+                    const best = (videos[0] || audios[0] || tracks[0]);
+                    const ext = best.major === "audio" ? "m4a" : (best.mime.includes("webm") ? "webm" : "mp4");
+                    const fileBlob = new Blob(best.bufferList, { type: best.mime });
+                    const res = await this.postIngestBlob(fileBlob, {
+                        filename: `${baseTitle}.${ext}`,
+                        title: baseTitle,
+                        media_type: "video",
+                    });
+                    const id = res?.media_id || res?.item?.id || "";
+                    if (this.tips) this.tips.innerHTML = id ? `入库成功 1 项（#${id}）` : "入库成功 1 项";
+                }
+            } catch (e) {
+                console.error("LMW ingest failed", e);
+                if (this.tips) this.tips.innerHTML = "入库失败: " + (e?.message || e);
+                throw e;
+            }
+            if (this.isComplete && localStorage.getItem("CatCatchCatch_completeClearCache") == "checked") {
+                this.clearCache();
+            }
+        }
+
         handleHide(event) {
             const catCatchElement = this.catCatch.querySelector('#catCatch');
             if (catCatchElement.style.display === "none") {
@@ -438,12 +706,21 @@
         }
 
         handleClose(event) {
-            if (this.isComplete || window.confirm(this.i18n("closeConfirmation", "确认关闭?"))) {
-                this.clearCache();
-                this.enable = false;
-                this.catCatch.style.display = "none";
-                window.postMessage({ action: "catCatchCloseScript", script: "catch.js" });
+            // Close 只关脚本/刷新，不入库；入库请用「停止并入库」
+            if (this.hasCatchData()) {
+                if (!window.confirm(
+                    "关闭将刷新页面，内存中未入库的捕获数据会丢失。\n\n" +
+                    "需要保留请先点「停止并入库」。\n\n确定关闭？"
+                )) {
+                    return;
+                }
+            } else if (!this.isComplete && !window.confirm(this.i18n("closeConfirmation", "确认关闭?"))) {
+                return;
             }
+            this.clearCache();
+            this.enable = false;
+            this.catCatch.style.display = "none";
+            window.postMessage({ action: "catCatchCloseScript", script: "catch.js" });
         }
 
         /**
@@ -621,6 +898,9 @@
 
                             if (localStorage.getItem("CatCatchCatch_autoDown") == "checked") {
                                 setTimeout(() => this.catchDownload(), 500);
+                            }
+                            if (localStorage.getItem("CatCatchCatch_autoIngest") == "checked") {
+                                setTimeout(() => this.catchIngestLmw().catch((e) => console.error(e)), 600);
                             }
                         }
                     } catch (error) {

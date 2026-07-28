@@ -814,35 +814,55 @@ def register_uploaded_file(
     source_url: str,
     media_type: str,
     mime: str,
+    dedupe: bool = False,
 ) -> MediaItem:
+    """
+    Register a file already written under Medias/.
+
+    Uploads from extension capture must use dedupe=False: same page URL is reused
+    for every capture and would otherwise collapse to the first row (unplayable).
+    """
     cat = safe_category(category)
-    uh = url_hash(source_url or dest.name, cat)
     rel = f"{cat}/{dest.name}"
+    size = dest.stat().st_size if dest.is_file() else 0
+    # Unique per file path + size so re-uploads never clobber DB identity
+    uh = url_hash(f"upload|{rel}|{size}|{source_url or ''}", cat)
     with session_scope() as db:
         existing = None
-        if source_url:
+        if dedupe and source_url:
             existing = db.scalars(
                 select(MediaItem).where(MediaItem.url_hash == uh, MediaItem.category == cat)
             ).first()
+        if not existing:
+            existing = db.scalars(select(MediaItem).where(MediaItem.rel_path == rel)).first()
         if existing:
-            return existing
-        item = MediaItem(
-            category=cat,
-            title=(title or dest.stem)[:512],
-            media_type=media_type,
-            rel_path=rel,
-            source_url=(source_url or "")[:2048],
-            url_hash=uh,
-            file_size=dest.stat().st_size,
-            mime=mime or "",
-        )
-        db.add(item)
-        db.commit()
-        db.refresh(item)
-        media_id = item.id
-        mtype = media_type
+            existing.file_size = size
+            existing.mime = mime or existing.mime
+            existing.title = (title or existing.title or dest.stem)[:512]
+            db.commit()
+            db.refresh(existing)
+            media_id = existing.id
+            mtype = existing.media_type or media_type
+            dest_for_thumb = dest
+        else:
+            item = MediaItem(
+                category=cat,
+                title=(title or dest.stem)[:512],
+                media_type=media_type,
+                rel_path=rel,
+                source_url=(source_url or "")[:2048],
+                url_hash=uh,
+                file_size=size,
+                mime=mime or "",
+            )
+            db.add(item)
+            db.commit()
+            db.refresh(item)
+            media_id = item.id
+            mtype = media_type
+            dest_for_thumb = dest
 
-    thumb_rel = generate_thumb(dest, media_id, mtype)
+    thumb_rel = generate_thumb(dest_for_thumb, media_id, mtype)
     if thumb_rel:
         with session_scope() as db:
             item = db.get(MediaItem, media_id)

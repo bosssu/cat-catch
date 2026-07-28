@@ -774,7 +774,7 @@ $("#currentPage").click(function () {
     });
 });
 
-// LocalMediaWeb 网格页（底部栏按钮，默认显示）
+// LocalMediaWeb：媒体库=打开页；入库=勾选直接提交；解析媒体在「更多」里
 function openLocalMediaPage(extraQuery) {
     let url = `local-media.html?tabId=${G.tabId}`;
     if (extraQuery) url += "&" + extraQuery;
@@ -786,16 +786,104 @@ $("#openLocalMedia").click(function () {
 $("#parsePageImages").click(function () {
     openLocalMediaPage("auto=images");
 });
+
+/**
+ * 勾选资源 → LocalMediaWeb 入库（不强制打开库页）。
+ * m3u8 可选填写时间范围；失败时提示是否打开库页。
+ */
+async function lmwIngestChecked() {
+    if (typeof LMW === "undefined") {
+        Tips("LocalMediaWeb 客户端未加载", 2000);
+        return;
+    }
+    const [checkedData] = getCheckedData();
+    if (!checkedData.length) {
+        Tips("请先勾选要入库的资源", 1500);
+        return;
+    }
+    let pageUrl = "";
+    try {
+        const tab = await chrome.tabs.get(G.tabId);
+        pageUrl = tab?.url || "";
+    } catch (e) { /* ignore */ }
+
+    const items = [];
+    for (const data of checkedData) {
+        if (!data.url) continue;
+        // m3u8/dash 可选 clip：简单 prompt，与库页 range 对话框二选一够用
+        if (data.parsing === "m3u8" || isM3U8?.(data)) {
+            if (data._startSec == null && data._endSec == null) {
+                const tip = window.prompt(
+                    `m3u8 下载范围（秒）\n格式: 起始-结束，留空=整片\n${(data.name || data.url || "").slice(0, 60)}`,
+                    ""
+                );
+                if (tip === null) continue; // 用户取消该条
+                const m = String(tip).trim().match(/^(\d+(?:\.\d+)?)\s*[-~～]\s*(\d+(?:\.\d+)?|)$/);
+                if (m) {
+                    data._startSec = +m[1];
+                    if (m[2] !== "") data._endSec = +m[2];
+                } else if (String(tip).trim()) {
+                    const only = String(tip).trim().match(/^(\d+(?:\.\d+)?)$/);
+                    if (only) data._startSec = +only[1];
+                }
+            }
+        }
+        try {
+            items.push(await LMW.itemToIngest(data, pageUrl || data.webUrl || data.href || ""));
+        } catch (e) {
+            console.warn("itemToIngest", e);
+        }
+    }
+    if (!items.length) {
+        Tips("没有可入库的资源", 1500);
+        return;
+    }
+    Tips(`正在入库 ${items.length} 项…`, 0);
+    $("#lmwSelect").prop("disabled", true);
+    try {
+        await LMW.health();
+        // 不在 popup 里长时间 waitJobs，提交后即反馈；大任务由服务端后台跑
+        const res = await LMW.pushItems(items, G.lmwDefaultCategory || "default", {
+            wait: false,
+            autoFallback: G.lmwAutoFallback,
+        });
+        Tips(LMW.summarizePushResult(res), 3500);
+    } catch (e) {
+        const msg = (e && e.message) || String(e);
+        Tips("入库失败: " + msg.slice(0, 120), 4000);
+        if (window.confirm("无法连接 LocalMediaWeb。是否打开媒体库页面？\n" + msg.slice(0, 80))) {
+            openLocalMediaPage("auto=caught");
+        }
+    } finally {
+        $("#lmwSelect").prop("disabled", false);
+    }
+}
 $("#lmwSelect").click(function () {
-    openLocalMediaPage("auto=caught");
+    lmwIngestChecked();
 });
 // 仅当明确关闭时隐藏；G 可能尚未从 storage 读完，延迟再判一次
 function applyLmwButtonVisibility() {
     const show = G.lmwEnable !== false;
-    $("#openLocalMedia, #parsePageImages, #lmwSelect").toggle(show);
+    $("#openLocalMedia, #parsePageImages, #lmwSelect, #lmwFloatToggle").toggle(show);
+    const on = G.lmwFloatIngest !== false;
+    $("#lmwFloatToggle").text(on ? "页面入库:开" : "页面入库:关")
+        .attr("title", on
+            ? "悬停页面图片/视频时显示「入库」（点击关闭）"
+            : "页面浮动入库已关（点击开启）");
 }
 applyLmwButtonVisibility();
 setTimeout(applyLmwButtonVisibility, 300);
+
+$("#lmwFloatToggle").click(function () {
+    const next = G.lmwFloatIngest === false;
+    G.lmwFloatIngest = next;
+    // 与选项页一致写 sync，并同步 local，避免页面嗅探读不到
+    chrome.storage.sync.set({ lmwFloatIngest: next });
+    chrome.storage.local.set({ lmwFloatIngest: next }, function () {
+        applyLmwButtonVisibility();
+        Tips(next ? "页面浮动入库已开启（悬停大图/视频）" : "页面浮动入库已关闭", 1500);
+    });
+});
 
 // 发送到本地 多个
 $("#send2localSelect").click(function () {

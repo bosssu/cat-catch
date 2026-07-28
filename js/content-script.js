@@ -231,11 +231,129 @@
             requestId: data.requestId
         });
     };
+    /** LocalMediaWeb settings cache for blob upload from page scripts */
+    const LMW_DEFAULTS = {
+        lmwURL: "http://127.0.0.1:8790",
+        lmwToken: "",
+        lmwDefaultCategory: "default",
+    };
+    let _lmwSettings = null;
+    async function getLmwSettings() {
+        if (_lmwSettings) return _lmwSettings;
+        try {
+            const keys = Object.keys(LMW_DEFAULTS);
+            const [syncData, localData] = await Promise.all([
+                chrome.storage.sync.get(keys),
+                chrome.storage.local.get(keys),
+            ]);
+            _lmwSettings = { ...LMW_DEFAULTS, ...syncData, ...localData };
+        } catch (e) {
+            _lmwSettings = { ...LMW_DEFAULTS };
+        }
+        return _lmwSettings;
+    }
+    chrome.storage?.onChanged?.addListener((changes, area) => {
+        if (area !== "local" && area !== "sync") return;
+        if (changes.lmwURL || changes.lmwToken || changes.lmwDefaultCategory) {
+            _lmwSettings = null;
+        }
+    });
+
+    /**
+     * Upload blob URL created in page MAIN world to LocalMediaWeb.
+     * Page scripts cannot call extension APIs; content-script bridges them.
+     */
+    async function uploadBlobUrlToLmw(payload) {
+        const { blobUrl, filename, title, media_type, source_url, category } = payload;
+        if (!blobUrl) throw new Error("missing blobUrl");
+        const s = await getLmwSettings();
+        const base = (s.lmwURL || LMW_DEFAULTS.lmwURL).replace(/\/+$/, "");
+        const resBlob = await fetch(blobUrl);
+        if (!resBlob.ok) throw new Error("fetch blob failed " + resBlob.status);
+        const blob = await resBlob.blob();
+        const fd = new FormData();
+        fd.append("category", category || s.lmwDefaultCategory || "default");
+        fd.append("title", title || document.title || "");
+        fd.append("source_url", source_url || location.href || "");
+        fd.append("media_type", media_type || "video");
+        fd.append("remux", "1");
+        const name = filename || `${(title || document.title || "capture").slice(0, 40)}.bin`;
+        fd.append("file", blob, name);
+        const headers = {};
+        const token = (s.lmwToken || "").trim();
+        if (token) headers["X-LMW-Token"] = token;
+        const res = await fetch(base + "/api/upload", { method: "POST", headers, body: fd });
+        if (!res.ok) {
+            const text = await res.text().catch(() => "");
+            throw new Error(`${res.status} ${text || res.statusText}`);
+        }
+        return res.json();
+    }
+
+    /** Merge separate video + audio capture tracks into one media item. */
+    async function uploadAvBlobUrlsToLmw(payload) {
+        const { videoBlobUrl, audioBlobUrl, filename, title, source_url, category } = payload;
+        if (!videoBlobUrl) throw new Error("missing videoBlobUrl");
+        const s = await getLmwSettings();
+        const base = (s.lmwURL || LMW_DEFAULTS.lmwURL).replace(/\/+$/, "");
+        const vRes = await fetch(videoBlobUrl);
+        if (!vRes.ok) throw new Error("fetch video blob failed");
+        const vBlob = await vRes.blob();
+        const fd = new FormData();
+        fd.append("category", category || s.lmwDefaultCategory || "default");
+        fd.append("title", title || document.title || "");
+        fd.append("source_url", source_url || location.href || "");
+        const baseName = (filename || title || document.title || "capture").replace(/\.[^.]+$/, "");
+        fd.append("video", vBlob, `${baseName}_video.mp4`);
+        if (audioBlobUrl) {
+            const aRes = await fetch(audioBlobUrl);
+            if (aRes.ok) {
+                const aBlob = await aRes.blob();
+                if (aBlob.size > 32) fd.append("audio", aBlob, `${baseName}_audio.mp4`);
+            }
+        }
+        const headers = {};
+        const token = (s.lmwToken || "").trim();
+        if (token) headers["X-LMW-Token"] = token;
+        const res = await fetch(base + "/api/upload-av", { method: "POST", headers, body: fd });
+        if (!res.ok) {
+            const text = await res.text().catch(() => "");
+            throw new Error(`${res.status} ${text || res.statusText}`);
+        }
+        return res.json();
+    }
+
+    function replyIngest(requestId, ok, data) {
+        try {
+            window.postMessage({
+                action: "catCatchIngestBlobResult",
+                requestId,
+                ok,
+                ...(ok ? { result: data } : { error: data }),
+            }, window.location.origin);
+        } catch (e) { /* ignore */ }
+    }
+
     window.addEventListener("message", (event) => {
-        const action = ["catCatchAddMedia", "catCatchAddKey", "catCatchFFmpeg", "catCatchFFmpegResult", "catCatchCloseScript"];
+        const action = ["catCatchAddMedia", "catCatchAddKey", "catCatchFFmpeg", "catCatchFFmpegResult", "catCatchCloseScript", "catCatchIngestBlob", "catCatchIngestAV"];
         if (!event.data || !event.data.action || event.origin !== window.location.origin || !action.includes(event.data.action)) { return; }
         event.stopPropagation();
         event.stopImmediatePropagation();
+
+        if (event.data.action == "catCatchIngestBlob") {
+            const requestId = event.data.requestId || String(Date.now());
+            uploadBlobUrlToLmw(event.data)
+                .then((result) => replyIngest(requestId, true, result))
+                .catch((err) => replyIngest(requestId, false, (err && err.message) || String(err)));
+            return;
+        }
+        if (event.data.action == "catCatchIngestAV") {
+            const requestId = event.data.requestId || String(Date.now());
+            uploadAvBlobUrlsToLmw(event.data)
+                .then((result) => replyIngest(requestId, true, result))
+                .catch((err) => replyIngest(requestId, false, (err && err.message) || String(err)));
+            return;
+        }
 
         if (event.data.action == "catCatchAddMedia") {
             if (!event.data.url) { return; }

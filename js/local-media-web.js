@@ -227,12 +227,15 @@ const LMW = {
     /**
      * Ingest items; optionally fallback upload on auth/network failure.
      */
-    async pushItems(items, category, { autoFallback } = {}) {
-        const cat = category || G.lmwDefaultCategory || "default";
-        const fallback = autoFallback ?? G.lmwAutoFallback ?? true;
+    async pushItems(items, category, { autoFallback, wait = true, onProgress } = {}) {
+        const cat = category || (typeof G !== "undefined" && G.lmwDefaultCategory) || "default";
+        const fallback = autoFallback ?? (typeof G !== "undefined" ? G.lmwAutoFallback : true) ?? true;
         const ingestRes = await this.ingest(cat, items);
         const jobIds = ingestRes.job_ids || [];
-        const jobs = jobIds.length ? await this.waitJobs(jobIds) : [];
+        if (!wait) {
+            return { ...ingestRes, jobs: [], fallbackOk: 0, failed: 0, success: 0, pending: jobIds.length };
+        }
+        const jobs = jobIds.length ? await this.waitJobs(jobIds, { onProgress }) : [];
         let fallbackOk = 0;
         let failed = 0;
         for (const job of jobs) {
@@ -266,6 +269,62 @@ const LMW = {
             failed,
             success: jobs.filter((j) => j.status === "success").length + fallbackOk,
         };
+    },
+
+    /** Load LMW settings when G is unavailable (content-script). */
+    async loadSettingsFromStorage() {
+        const defaults = { ...this.defaults };
+        try {
+            const data = await chrome.storage.local.get(Object.keys(defaults));
+            return { ...defaults, ...data };
+        } catch (e) {
+            return defaults;
+        }
+    },
+
+    /**
+     * Upload a Blob/File without relying on global G (content-script safe).
+     */
+    async uploadBlobWithSettings(blob, meta = {}, settings = null) {
+        const s = settings || (typeof G !== "undefined"
+            ? {
+                lmwURL: G.lmwURL,
+                lmwToken: G.lmwToken,
+                lmwDefaultCategory: G.lmwDefaultCategory,
+            }
+            : await this.loadSettingsFromStorage());
+        const base = (s.lmwURL || this.defaults.lmwURL || "").replace(/\/+$/, "") || this.defaults.lmwURL;
+        const fd = new FormData();
+        fd.append("category", meta.category || s.lmwDefaultCategory || "default");
+        fd.append("title", meta.title || "");
+        fd.append("source_url", meta.source_url || meta.url || "");
+        fd.append("media_type", meta.media_type || "");
+        const name = meta.filename || "upload.bin";
+        fd.append("file", blob, name);
+        const headers = {};
+        const token = (s.lmwToken || "").trim();
+        if (token) headers["X-LMW-Token"] = token;
+        const res = await fetch(base + "/api/upload", { method: "POST", headers, body: fd });
+        if (!res.ok) {
+            const text = await res.text().catch(() => "");
+            throw new Error(`${res.status} ${text || res.statusText}`);
+        }
+        return res.json();
+    },
+
+    /** Short human summary for popup Tips. */
+    summarizePushResult(res) {
+        if (!res) return "入库失败";
+        const ok = res.success ?? 0;
+        const failed = res.failed ?? 0;
+        const pending = res.pending ?? 0;
+        const jobs = res.job_ids?.length || 0;
+        if (pending) return `已提交 ${pending} 个任务，后台下载中`;
+        if (ok && !failed) return `入库成功 ${ok} 项` + (jobs ? `（任务 ${jobs}）` : "");
+        if (ok && failed) return `入库成功 ${ok}，失败 ${failed}`;
+        if (failed) return `入库失败 ${failed} 项`;
+        if (jobs) return `已提交 ${jobs} 个任务`;
+        return "已提交入库";
     },
 };
 

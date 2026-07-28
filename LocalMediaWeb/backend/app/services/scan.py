@@ -14,9 +14,64 @@ IMAGE_EXT = {".jpg", ".jpeg", ".png", ".gif", ".webp", ".avif", ".bmp"}
 VIDEO_EXT = {".mp4", ".webm", ".mkv", ".mov", ".ts", ".m4v"}
 
 
-def rescan_medias() -> dict:
+def purge_missing_media() -> dict:
+    """
+    Drop DB rows whose files were deleted, fix stale sizes, remove orphan thumbs.
+    """
     settings = get_settings()
     root = settings.medias_path()
+    thumbs_root = settings.data_path() / "thumbs"
+    purged = 0
+    fixed_size = 0
+    with session_scope() as db:
+        rows = list(db.scalars(select(MediaItem)).all())
+        for item in rows:
+            path = root / item.rel_path
+            if not path.is_file():
+                # orphan thumb
+                if item.thumb_rel:
+                    tp = settings.data_path() / item.thumb_rel
+                    try:
+                        if tp.is_file():
+                            tp.unlink()
+                    except OSError:
+                        pass
+                db.delete(item)
+                purged += 1
+                continue
+            try:
+                sz = path.stat().st_size
+                if item.file_size != sz:
+                    item.file_size = sz
+                    fixed_size += 1
+            except OSError:
+                pass
+        db.commit()
+
+    orphan_thumbs = 0
+    if thumbs_root.is_dir():
+        with session_scope() as db:
+            alive = {m.id for m in db.scalars(select(MediaItem)).all()}
+        for p in thumbs_root.glob("*"):
+            if not p.is_file():
+                continue
+            try:
+                mid = int(p.stem.split(".")[0])
+            except ValueError:
+                continue
+            if mid not in alive:
+                try:
+                    p.unlink()
+                    orphan_thumbs += 1
+                except OSError:
+                    pass
+    return {"purged": purged, "fixed_size": fixed_size, "orphan_thumbs": orphan_thumbs}
+
+
+def rescan_medias(*, purge: bool = False) -> dict:
+    settings = get_settings()
+    root = settings.medias_path()
+    purge_info = purge_missing_media() if purge else {"purged": 0, "fixed_size": 0, "orphan_thumbs": 0}
     added = 0
     skipped = 0
     for path in root.rglob("*"):
@@ -74,7 +129,7 @@ def rescan_medias() -> dict:
                     it.thumb_rel = thumb
                     db.commit()
         added += 1
-    return {"added": added, "skipped": skipped}
+    return {"added": added, "skipped": skipped, **purge_info}
 
 
 def list_categories() -> list[str]:

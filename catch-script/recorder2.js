@@ -100,6 +100,12 @@
                 </select>
             </div>
             <div id="catCatchRecorderStart" data-i18n="startRecording">开始录制</div>
+            <label style="color:#fff;font-size:12px;display:flex;align-items:center;gap:4px;white-space:nowrap;">
+                <input type="checkbox" id="ingestLmw" checked style="-webkit-appearance:auto;">入库
+            </label>
+            <label style="color:#fff;font-size:12px;display:flex;align-items:center;gap:4px;white-space:nowrap;">
+                <input type="checkbox" id="alsoDownload" style="-webkit-appearance:auto;">下载
+            </label>
             <div id="catCatchRecorderTitle" data-i18n="dragWindow">拖动窗口</div>
             <div id="catCatchRecorderClose" data-i18n="close">关闭</div>
         </div>`;
@@ -213,18 +219,81 @@
             buffer.push(e.data);
         }
         recorder.onstop = function () {
-            const fileBlob = new Blob(buffer, { type: option });
-            const a = document.createElement('a');
-            a.href = URL.createObjectURL(fileBlob);
-            a.download = `${document.title}.webm`;
-            a.click();
-            a.remove();
+            const fileBlob = new Blob(buffer, { type: option.mimeType || "video/webm" });
+            const title = (document.title || "screen").trim() || "screen";
+            const doIngest = cat.querySelector("#ingestLmw")?.checked;
+            const doDownload = cat.querySelector("#alsoDownload")?.checked || !doIngest;
+            if (doDownload) {
+                const a = document.createElement('a');
+                a.href = URL.createObjectURL(fileBlob);
+                a.download = `${title}.webm`;
+                a.click();
+                setTimeout(() => URL.revokeObjectURL(a.href), 2000);
+                a.remove();
+            }
+            if (doIngest) {
+                const sizeMb = (fileBlob.size / 1024 / 1024).toFixed(1);
+                if (!window.confirm(`确认将录屏入库到媒体库？\n约 ${sizeMb} MB · webm`)) {
+                    catCatchRecorderStart.innerHTML = i18n("startRecording", "开始录制");
+                } else {
+                    catCatchRecorderStart.innerHTML = "入库中…";
+                    catCatchIngestBlob(fileBlob, {
+                        filename: `${title}.webm`,
+                        title,
+                        media_type: "video",
+                    }).then((res) => {
+                        const id = res?.media_id || res?.item?.id || "";
+                        alert(id ? `录屏入库成功 #${id}` : "录屏入库成功");
+                        catCatchRecorderStart.innerHTML = i18n("startRecording", "开始录制");
+                    }).catch((e) => {
+                        console.error(e);
+                        alert("入库失败: " + (e?.message || e));
+                        catCatchRecorderStart.innerHTML = i18n("startRecording", "开始录制");
+                    });
+                }
+            } else {
+                catCatchRecorderStart.innerHTML = i18n("startRecording", "开始录制");
+            }
             buffer.slice(0);
             stream.getTracks().forEach(track => track.stop());
             recorder = undefined;
-            catCatchRecorderStart.innerHTML = i18n("startRecording", "开始录制");
             cat.classList.remove("animation");
         }
+    }
+
+    function catCatchIngestBlob(blob, meta = {}) {
+        return new Promise((resolve, reject) => {
+            const requestId = "lmw_" + Date.now() + "_" + Math.random().toString(36).slice(2, 8);
+            const blobUrl = URL.createObjectURL(blob);
+            let settled = false;
+            const finish = (fn) => {
+                if (settled) return;
+                settled = true;
+                clearTimeout(timer);
+                window.removeEventListener("message", onMsg);
+                setTimeout(() => URL.revokeObjectURL(blobUrl), 2000);
+                fn();
+            };
+            const onMsg = (event) => {
+                if (!event.data || event.data.action !== "catCatchIngestBlobResult") return;
+                if (event.data.requestId !== requestId) return;
+                if (event.data.ok) finish(() => resolve(event.data.result));
+                else finish(() => reject(new Error(event.data.error || "ingest failed")));
+            };
+            window.addEventListener("message", onMsg);
+            window.postMessage({
+                action: "catCatchIngestBlob",
+                requestId,
+                blobUrl,
+                filename: meta.filename || "screen.webm",
+                title: meta.title || document.title || "screen",
+                media_type: meta.media_type || "video",
+                source_url: location.href,
+            }, location.origin);
+            const timer = setTimeout(() => {
+                finish(() => reject(new Error("入库超时")));
+            }, 600000);
+        });
     }
     function getElementOffset(el) {
         const rect = el.getBoundingClientRect();

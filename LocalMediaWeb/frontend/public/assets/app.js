@@ -91,11 +91,21 @@
     return res;
   }
 
+  /** Append token for native media elements (cannot set X-LMW-Token header). */
+  function withAuthQuery(url) {
+    if (!url) return url;
+    const t = token();
+    if (!t) return url;
+    if (url.includes("token=")) return url;
+    const sep = url.includes("?") ? "&" : "?";
+    return `${url}${sep}token=${encodeURIComponent(t)}`;
+  }
+
   function fileUrl(item) {
-    return item.file_url;
+    return withAuthQuery(item.file_url);
   }
   function thumbUrl(item) {
-    return item.thumb_url;
+    return withAuthQuery(item.thumb_url);
   }
 
   /** Immersive: hide topnav / HUD / progress (double-tap). Not zoom. */
@@ -623,8 +633,32 @@
     }
   }
 
+  function tryAutoplayVideo(media) {
+    if (!media || media.tagName !== "VIDEO") return;
+    if (media.dataset.userPaused === "1") return;
+    applySoundToVideo(media);
+    const p = media.play();
+    if (p && typeof p.catch === "function") {
+      p.catch(() => {
+        // autoplay blocked or not ready — retry once after canplay
+        const once = () => {
+          media.removeEventListener("canplay", once);
+          if (media.dataset.userPaused === "1") return;
+          applySoundToVideo(media);
+          media.play().catch(() => {});
+        };
+        media.addEventListener("canplay", once);
+      });
+    }
+  }
+
   function observeFeedMedia() {
     const slides = [...document.querySelectorAll(".snap-slide")];
+    if (state._feedIo) {
+      try {
+        state._feedIo.disconnect();
+      } catch (_) {}
+    }
     const io = new IntersectionObserver(
       (entries) => {
         for (const en of entries) {
@@ -633,46 +667,66 @@
           if (!media) continue;
           if (en.isIntersecting && en.intersectionRatio > 0.5) {
             const src = media.getAttribute("data-src");
+            // 必须等 src 加载完成再 play，否则会出现「刷到暂停、要点一下才播」
             if (src && media.getAttribute("src") !== src) {
               loadMediaEl(media, src).then(() => {
-                if (media.tagName === "VIDEO") applySoundToVideo(media);
+                tryAutoplayVideo(media);
               });
-            }
-            if (media.tagName === "VIDEO") {
-              applySoundToVideo(media);
-              // 尊重用户单击暂停，滑走再回来后恢复自动播
-              if (media.dataset.userPaused !== "1") {
-                media.play().catch(() => {});
-              }
+            } else {
+              tryAutoplayVideo(media);
             }
             onSlideActive(Number(el.dataset.index || 0));
           } else if (media.tagName === "VIDEO") {
             media.pause();
+            // 滑走后清除 userPaused，回来可自动播
             media.dataset.userPaused = "0";
           }
         }
       },
       { root: $("#feedScroller"), threshold: [0.5, 0.75] }
     );
+    state._feedIo = io;
     slides.forEach((s) => io.observe(s));
   }
 
   async function loadMediaEl(el, url) {
     if (!url) return false;
+    const authed = withAuthQuery(url);
+
+    // VIDEO: never fetch-as-blob (breaks Range / OOM on mobile). Use native src + Range.
+    if (el.tagName === "VIDEO") {
+      try {
+        if (el.src && el.src.startsWith("blob:")) {
+          try {
+            URL.revokeObjectURL(el.src);
+          } catch (_) {}
+        }
+        el.src = authed;
+        el.setAttribute("playsinline", "");
+        el.setAttribute("webkit-playsinline", "");
+        el.playsInline = true;
+        if (typeof el.load === "function") el.load();
+        return true;
+      } catch (_) {
+        return false;
+      }
+    }
+
+    // Images: prefer direct URL with token (also works with Range-less GET)
     const t = token();
     if (!t) {
       el.src = url;
       return true;
     }
     try {
-      const res = await fetch(url, { headers: { "X-LMW-Token": t } });
-      if (!res.ok) return false;
-      const blob = await res.blob();
-      el.src = URL.createObjectURL(blob);
+      el.src = authed;
       return true;
     } catch {
       try {
-        el.src = url;
+        const res = await fetch(url, { headers: { "X-LMW-Token": t } });
+        if (!res.ok) return false;
+        const blob = await res.blob();
+        el.src = URL.createObjectURL(blob);
         return true;
       } catch (_) {
         return false;
@@ -1135,11 +1189,33 @@
     };
     $("#btnRescan").onclick = async () => {
       const r = await api("/api/rescan", { method: "POST" });
-      alert(JSON.stringify(r));
+      alert(`扫描完成\n新增 ${r.added ?? 0} · 跳过 ${r.skipped ?? 0}`);
       await loadCategories();
       await loadFeed();
       await refreshAdminMedia();
     };
+    const btnRefreshLib = $("#btnRefreshLibrary");
+    if (btnRefreshLib) {
+      btnRefreshLib.onclick = async () => {
+        if (!confirm("强制刷新媒体库？\n将剔除磁盘已删除的无效索引，并重新扫描 Medias。")) return;
+        try {
+          btnRefreshLib.disabled = true;
+          const r = await api("/api/refresh-library", { method: "POST" });
+          alert(
+            `强制刷新完成\n` +
+              `清理无效 ${r.purged ?? 0} · 修正大小 ${r.fixed_size ?? 0} · 孤儿缩略图 ${r.orphan_thumbs ?? 0}\n` +
+              `新扫描入库 ${r.added ?? 0} · 跳过 ${r.skipped ?? 0}`
+          );
+          await loadCategories();
+          await loadFeed();
+          await refreshAdminMedia();
+        } catch (e) {
+          alert("强制刷新失败: " + e.message);
+        } finally {
+          btnRefreshLib.disabled = false;
+        }
+      };
+    }
     $("#btnRefreshJobs").onclick = () => refreshAdmin();
     $("#btnRefreshMedia").onclick = () => refreshAdminMedia();
     $("#btnNewCat").onclick = async () => {

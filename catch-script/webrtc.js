@@ -30,6 +30,8 @@
             </select>
         ${i18n("recordEncoding", "录制编码")}: <select id="mimeTypeList" style="max-width: 200px;"></select>
         <label><input type="checkbox" id="autoSave1"} ${checkboxStyle} data-i18n="save1hour">1小时保存一次</label>
+        <label><input type="checkbox" id="ingestLmw" checked ${checkboxStyle}><span>停止后入库到媒体库</span></label>
+        <label><input type="checkbox" id="alsoDownload" ${checkboxStyle}><span>同时下载到浏览器</span></label>
         <label>
             <select id="videoBits">
                 <option value="2500000" data-i18n="videoBits">视频码率</option>
@@ -290,15 +292,74 @@
 
     function download(chunks) {
         const blob = new Blob(chunks, { type: option.mimeType });
-        const url = URL.createObjectURL(blob);
-        const a = document.createElement('a');
-        a.style.display = 'none';
-        a.href = url;
-        a.download = 'recorded-video.mp4';
-        document.body.appendChild(a);
-        a.click();
-        window.URL.revokeObjectURL(url);
-        document.body.removeChild(a);
+        const title = (document.title || "webrtc").trim() || "webrtc";
+        const ext = (option.mimeType || "").includes("mp4") ? "mp4" : "webm";
+        const doIngest = CatCatch.querySelector("#ingestLmw")?.checked;
+        const doDownload = CatCatch.querySelector("#alsoDownload")?.checked || !doIngest;
+        if (doDownload) {
+            const url = URL.createObjectURL(blob);
+            const a = document.createElement('a');
+            a.style.display = 'none';
+            a.href = url;
+            a.download = `${title}.${ext}`;
+            document.body.appendChild(a);
+            a.click();
+            setTimeout(() => window.URL.revokeObjectURL(url), 2000);
+            document.body.removeChild(a);
+        }
+        if (doIngest) {
+            const sizeMb = (blob.size / 1024 / 1024).toFixed(1);
+            if (!window.confirm(`确认将 WebRTC 录制入库到媒体库？\n约 ${sizeMb} MB · ${ext}`)) {
+                tips(doDownload ? "已下载，已取消入库" : "已取消入库");
+            } else {
+                tips("正在入库…");
+                catCatchIngestBlob(blob, {
+                    filename: `${title}.${ext}`,
+                    title,
+                    media_type: "video",
+                }).then((res) => {
+                    const id = res?.media_id || res?.item?.id || "";
+                    tips((id ? `入库成功 #${id}` : "入库成功") + (doDownload ? " / 已下载" : ""));
+                }).catch((e) => {
+                    tips("入库失败: " + (e?.message || e));
+                });
+            }
+        }
+    }
+
+    function catCatchIngestBlob(blob, meta = {}) {
+        return new Promise((resolve, reject) => {
+            const requestId = "lmw_" + Date.now() + "_" + Math.random().toString(36).slice(2, 8);
+            const blobUrl = URL.createObjectURL(blob);
+            let settled = false;
+            const finish = (fn) => {
+                if (settled) return;
+                settled = true;
+                clearTimeout(timer);
+                window.removeEventListener("message", onMsg);
+                setTimeout(() => URL.revokeObjectURL(blobUrl), 2000);
+                fn();
+            };
+            const onMsg = (event) => {
+                if (!event.data || event.data.action !== "catCatchIngestBlobResult") return;
+                if (event.data.requestId !== requestId) return;
+                if (event.data.ok) finish(() => resolve(event.data.result));
+                else finish(() => reject(new Error(event.data.error || "ingest failed")));
+            };
+            window.addEventListener("message", onMsg);
+            window.postMessage({
+                action: "catCatchIngestBlob",
+                requestId,
+                blobUrl,
+                filename: meta.filename || "webrtc.webm",
+                title: meta.title || document.title || "webrtc",
+                media_type: meta.media_type || "video",
+                source_url: location.href,
+            }, location.origin);
+            const timer = setTimeout(() => {
+                finish(() => reject(new Error("入库超时")));
+            }, 600000);
+        });
     }
 
     // 秒转换成时间

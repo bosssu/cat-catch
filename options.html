@@ -360,16 +360,35 @@
         <p>LocalMediaWeb</p>
       </h1>
       <div class="optionBox">
-        <span class="explain">本地媒体聚合服务（默认 http://127.0.0.1:8790 ）。见仓库 LocalMediaWeb/README.md</span>
+        <span class="explain">本地媒体聚合服务（默认 http://127.0.0.1:8790 ）。popup「媒体库」打开浏览页，「入库」将勾选资源提交；缓存捕捉/录制面板可 blob 直接入库。见 LocalMediaWeb/README.md</span>
         <div class="list">
           <div class="item">
-            <div><span>启用 LocalMediaWeb 入口</span></div>
+            <div><span>启用 LocalMediaWeb 入口（媒体库 / 入库）</span></div>
             <div class="switch">
               <label class="switchLabel switchRadius">
                 <input type="checkbox" id="lmwEnable" save="click" class="switchInput" />
                 <span class="switchRound switchRadius"><em class="switchRoundBtn switchRadius"></em></span>
               </label>
             </div>
+          </div>
+          <div class="item">
+            <div>
+              <span>页面浮动入库（悬停媒体时显示按钮）</span>
+              <p class="explain" style="margin:4px 0 0;font-size:12px;opacity:.85;">鼠标悬停在较大图片/视频上时，在右上角显示「入库」；点击后由扩展后台提交到媒体库，并提示成功/失败。需同时启用上方入口。</p>
+            </div>
+            <div class="switch">
+              <label class="switchLabel switchRadius">
+                <input type="checkbox" id="lmwFloatIngest" save="click" class="switchInput" />
+                <span class="switchRound switchRadius"><em class="switchRoundBtn switchRadius"></em></span>
+              </label>
+            </div>
+          </div>
+          <div class="item">
+            <div>
+              <span>浮动按钮最小尺寸（px，过滤小图标）</span>
+              <p class="explain" style="margin:4px 0 0;font-size:12px;opacity:.85;">显示宽和高都需 ≥ 此值才显示「入库」。例如 72 会忽略 16×16 图标；过大则只在很大的媒体上出现。</p>
+            </div>
+            <input id="lmwFloatMinPx" save="input" type="number" min="16" max="2000" step="1" class="width100" placeholder="72">
           </div>
           <div class="item">
             <div><span>服务器地址</span></div>
