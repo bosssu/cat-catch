@@ -1,0 +1,49 @@
+# Copy to settings.yaml or set LMW_* env vars.
+
+host: "0.0.0.0"
+port: 8790
+# Optional LAN token (empty = no auth). Send as X-LMW-Token or Authorization: Bearer ...
+access_token: ""
+
+# Windows launcher / logon
+open_browser: false          # open desktop browser after health OK
+hide_console: true           # hide console; logs → data/logs/startup.log
+autostart: true              # install-autostart.bat enables logon task when true
+autostart_uv_sync: false     # run uv sync on every logon (usually unnecessary)
+
+# Relative paths are resolved from LocalMediaWeb project root
+medias_dir: "Medias"
+data_dir: "data"
+
+user_agent: "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36"
+# 使用系统/环境代理 (HTTP_PROXY HTTPS_PROXY ALL_PROXY)
+http_trust_env: true
+# 双击 start.bat 时进程常常读不到终端代理 → 请在此写死本地代理（Clash 默认 7897）
+http_proxy: "http://127.0.0.1:7897"
+https_proxy: ""
+# 未配置代理且 env 也没有时，自动探测 7897/7890/10809 等本地端口
+http_proxy_auto_probe: true
+request_timeout_sec: 60
+# 同时下载几个文件（任务级并行）
+download_concurrency: 4
+# 单个大文件 Range 分片连接数（≥2MB 且 CDN 支持 bytes 时生效）
+direct_connections: 4
+max_file_bytes: 0  # 0 = unlimited
+
+# Gopeed CLI：仅「大文件直链」加速（默认开；无二进制则自动跳过）
+# m3u8 / DASH / 截取 永不走 Gopeed。失败自动回退 httpx multi-range。
+gopeed_enabled: true
+gopeed_path: ""              # e.g. C:/Users/you/.grok/bin/gopeed.exe
+gopeed_connections: 16
+gopeed_min_bytes: 5242880    # 5 * 1024 * 1024；HEAD Content-Length 低于此不用
+
+# HLS / m3u8 分片并行
+hls_concurrency: 8
+hls_segment_retries: 3
+hls_max_segment_failure_ratio: 0.02
+hls_max_missing_segments: 5
+hls_partial_strategy: "tolerate"  # strict | tolerate | stop
+hls_max_duration_min: 180
+
+# pc | router (router = lower concurrency hints)
+profile: "pc"

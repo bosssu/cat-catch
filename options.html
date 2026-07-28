@@ -25,6 +25,7 @@
       <li><a href="#anchorCopy" data-i18n="copy" title="copy"></a></li>
       <li><a href="#anchorAria2Rpc" title="Aria2 RPC">Aria2 RPC</a></li>
       <li><a href="#anchorSend2local" data-i18n="send2local" title="send2local"></a></li>
+      <li><a href="#anchorLocalMediaWeb" title="LocalMediaWeb">LocalMediaWeb</a></li>
       <li><a href="#anchorM3u8dl" data-i18n="sideurlprotocol" title="URL Protocol m3u8dl"></a></li>
       <li><a href="#anchorInvokeApp" data-i18n="invokeApp" title="invokeApp"></a></li>
       <li><a href="#anchorReplaceTags" data-i18n="replaceTags" title="replaceTags"></a></li>
@@ -346,6 +347,51 @@
               placeholder='{"header1":"value1","header2":"value2"}'>
           </div>
 
+          <div class="flex-end">
+            <button type="button" class="resetOption" data-i18n="resetSettings"></button>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- LocalMediaWeb -->
+    <section id="anchorLocalMediaWeb">
+      <h1 class="optionsTitle">
+        <p>LocalMediaWeb</p>
+      </h1>
+      <div class="optionBox">
+        <span class="explain">本地媒体聚合服务（默认 http://127.0.0.1:8790 ）。见仓库 LocalMediaWeb/README.md</span>
+        <div class="list">
+          <div class="item">
+            <div><span>启用 LocalMediaWeb 入口</span></div>
+            <div class="switch">
+              <label class="switchLabel switchRadius">
+                <input type="checkbox" id="lmwEnable" save="click" class="switchInput" />
+                <span class="switchRound switchRadius"><em class="switchRoundBtn switchRadius"></em></span>
+              </label>
+            </div>
+          </div>
+          <div class="item">
+            <div><span>服务器地址</span></div>
+            <input id="lmwURL" save="input" type="text" class="width100" placeholder="http://127.0.0.1:8790">
+          </div>
+          <div class="item">
+            <div><span>Token（可选，对应 X-LMW-Token）</span></div>
+            <input id="lmwToken" save="input" type="password" class="width100" autocomplete="off">
+          </div>
+          <div class="item">
+            <div><span>默认分类</span></div>
+            <input id="lmwDefaultCategory" save="input" type="text" class="width100" placeholder="default">
+          </div>
+          <div class="item">
+            <div><span>服务端失败时自动回退上传</span></div>
+            <div class="switch">
+              <label class="switchLabel switchRadius">
+                <input type="checkbox" id="lmwAutoFallback" save="click" class="switchInput" />
+                <span class="switchRound switchRadius"><em class="switchRoundBtn switchRadius"></em></span>
+              </label>
+            </div>
+          </div>
           <div class="flex-end">
             <button type="button" class="resetOption" data-i18n="resetSettings"></button>
           </div>

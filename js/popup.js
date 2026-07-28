@@ -774,6 +774,29 @@ $("#currentPage").click(function () {
     });
 });
 
+// LocalMediaWeb 网格页（底部栏按钮，默认显示）
+function openLocalMediaPage(extraQuery) {
+    let url = `local-media.html?tabId=${G.tabId}`;
+    if (extraQuery) url += "&" + extraQuery;
+    chrome.tabs.create({ url });
+}
+$("#openLocalMedia").click(function () {
+    openLocalMediaPage();
+});
+$("#parsePageImages").click(function () {
+    openLocalMediaPage("auto=images");
+});
+$("#lmwSelect").click(function () {
+    openLocalMediaPage("auto=caught");
+});
+// 仅当明确关闭时隐藏；G 可能尚未从 storage 读完，延迟再判一次
+function applyLmwButtonVisibility() {
+    const show = G.lmwEnable !== false;
+    $("#openLocalMedia, #parsePageImages, #lmwSelect").toggle(show);
+}
+applyLmwButtonVisibility();
+setTimeout(applyLmwButtonVisibility, 300);
+
 // 发送到本地 多个
 $("#send2localSelect").click(function () {
     if (window.confirm(i18n("send2localTips")) && getData().size > 1) {

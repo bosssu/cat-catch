@@ -1,0 +1,99 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>LocalMediaWeb</title>
+  <link rel="stylesheet" href="css/public.css" />
+  <link rel="stylesheet" href="css/local-media.css" />
+  <script src="js/init.js"></script>
+  <script src="lib/jquery.min.js"></script>
+  <script src="lib/hls.min.js"></script>
+  <script src="js/function.js"></script>
+  <script src="js/local-media-web.js"></script>
+</head>
+<body>
+  <header class="lm-header">
+    <div class="lm-title">加入本地媒体库</div>
+    <div class="lm-actions">
+      <button type="button" id="btnParseImages" class="button2">解析页面媒体</button>
+      <button type="button" id="btnLoadCaught" class="button2">载入嗅探资源</button>
+      <button type="button" id="btnSelectAll" class="button2">全选</button>
+      <button type="button" id="btnInvert" class="button2">反选</button>
+      <select id="typeFilter" title="媒体类型">
+        <option value="">全部类型</option>
+        <option value="image">图片</option>
+        <option value="gif">动图</option>
+        <option value="video">视频</option>
+        <option value="m3u8">m3u8</option>
+        <option value="dash">DASH</option>
+      </select>
+      <select id="resFilter" title="分辨率（短边像素 / 视频高度）">
+        <option value="">全部分辨率</option>
+        <option value="min720">≥ 720p</option>
+        <option value="min1080">≥ 1080p</option>
+        <option value="min1440">≥ 1440p</option>
+        <option value="min2160">≥ 4K</option>
+        <option value="lt720">&lt; 720p</option>
+        <option value="unknown">分辨率未知</option>
+      </select>
+      <select id="longFilter" title="长边像素（适合筛大图）">
+        <option value="">全部长边</option>
+        <option value="min800">长边 ≥ 800</option>
+        <option value="min1200">长边 ≥ 1200</option>
+        <option value="min1600">长边 ≥ 1600</option>
+        <option value="min2400">长边 ≥ 2400</option>
+        <option value="lt800">长边 &lt; 800</option>
+      </select>
+      <select id="cookieFilter" title="是否带 Cookie">
+        <option value="">Cookie 不限</option>
+        <option value="yes">有 Cookie</option>
+        <option value="no">无 Cookie</option>
+      </select>
+      <select id="category"></select>
+      <input id="newCategory" type="text" placeholder="新分类名" />
+      <button type="button" id="btnAddCat" class="button2">新建分类</button>
+      <button type="button" id="btnIngest" class="button2 primary">加入选中</button>
+    </div>
+    <div id="status" class="lm-status"></div>
+  </header>
+  <div id="grid" class="lm-grid"></div>
+
+  <!-- 双击资源预览 -->
+  <div id="lmPreview" class="lm-preview hide" aria-hidden="true">
+    <button type="button" id="lmPreviewClose" class="lm-preview-close" title="关闭" aria-label="关闭">×</button>
+    <div class="lm-preview-stage" id="lmPreviewStage"></div>
+    <div class="lm-preview-meta" id="lmPreviewMeta"></div>
+  </div>
+
+  <!-- 卡片悬停详情（真实链接等） -->
+  <div id="lmCardTip" class="lm-card-tip hide" role="tooltip" aria-hidden="true"></div>
+
+  <!-- m3u8 下载范围（首尾时间，参考 m3u8 解析器） -->
+  <div id="lmRangeModal" class="lm-modal hide" aria-hidden="true">
+    <div class="lm-modal-card" role="dialog" aria-labelledby="lmRangeTitle">
+      <div class="lm-modal-head" id="lmRangeTitle">m3u8 截取范围（可多段）</div>
+      <div class="lm-modal-hint" id="lmRangeHint" style="font-size:12px;opacity:.85;margin:4px 0 8px;line-height:1.4;">
+        同一视频可截多段。换一组起止时间再入库；与已入库完全相同的时间段会提示「重复」。
+      </div>
+      <p class="lm-modal-desc">设置首尾时间（默认完整：开头 → 结尾）。格式 <code>HH:MM:SS</code> 或 <code>MM:SS</code> / 秒数。</p>
+      <div class="lm-modal-url" id="lmRangeUrl"></div>
+      <div class="lm-modal-fields">
+        <label>开始时间
+          <input type="text" id="lmRangeStart" spellcheck="false" placeholder="00:00:00" />
+        </label>
+        <label>结束时间
+          <input type="text" id="lmRangeEnd" spellcheck="false" placeholder="结尾（留空=到末尾）" />
+        </label>
+      </div>
+      <div class="lm-modal-actions">
+        <button type="button" id="lmRangeCancel" class="button2">取消</button>
+        <button type="button" id="lmRangeOk" class="button2 primary">确定</button>
+      </div>
+    </div>
+  </div>
+
+  <script src="js/local-media.js"></script>
+</body>
+</html>
+

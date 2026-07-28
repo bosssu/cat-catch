@@ -164,6 +164,13 @@ G.OptionLists = {
     send2localType: 0,
     send2localHeaders: "",
 
+    // LocalMediaWeb 本地媒体库
+    lmwEnable: true,
+    lmwURL: "http://127.0.0.1:8790",
+    lmwToken: "",
+    lmwDefaultCategory: "default",
+    lmwAutoFallback: true,
+
     popup: false,
     popupMode: 0, // 0:preview.html 1:popup.html 2:window preview.html 3: window popup.html
 

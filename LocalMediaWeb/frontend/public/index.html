@@ -1,0 +1,147 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover" />
+  <meta name="theme-color" content="#0c0c12" />
+  <title>LocalMediaWeb</title>
+  <link rel="stylesheet" href="/assets/app.css" />
+</head>
+<body>
+  <div id="app">
+    <nav class="topnav" aria-label="主导航">
+      <div class="brand" title="LocalMediaWeb">
+        <span class="brand-mark" aria-hidden="true">
+          <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2">
+            <rect x="3" y="5" width="18" height="14" rx="2"/>
+            <circle cx="9" cy="11" r="2"/>
+            <path d="M3 16l5-4 4 3 4-5 5 6"/>
+          </svg>
+        </span>
+        <span class="brand-text">LocalMedia</span>
+      </div>
+      <div class="nav-tabs">
+        <button type="button" data-view="feed" class="nav active" title="短视频式浏览">
+          <svg class="ico" viewBox="0 0 24 24" aria-hidden="true"><path fill="currentColor" d="M8 5v14l11-7z"/></svg>
+          <span>Feed</span>
+        </button>
+        <button type="button" data-view="grid" class="nav" title="网格浏览">
+          <svg class="ico" viewBox="0 0 24 24" aria-hidden="true"><path fill="currentColor" d="M3 3h8v8H3V3zm10 0h8v8h-8V3zM3 13h8v8H3v-8zm10 0h8v8h-8v-8z"/></svg>
+          <span>网格</span>
+        </button>
+        <button type="button" data-view="admin" class="nav" title="管理">
+          <svg class="ico" viewBox="0 0 24 24" aria-hidden="true"><path fill="currentColor" d="M19.14 12.94c.04-.31.06-.63.06-.94s-.02-.63-.06-.94l2.03-1.58a.5.5 0 00.12-.64l-1.92-3.32a.5.5 0 00-.6-.22l-2.39.96a7.03 7.03 0 00-1.63-.94l-.36-2.54A.5.5 0 0014.4 2h-3.84a.5.5 0 00-.49.42l-.36 2.54c-.58.23-1.12.54-1.63.94l-2.39-.96a.5.5 0 00-.6.22L2.77 8.48a.5.5 0 00.12.64l2.03 1.58c-.04.31-.06.63-.06.94s.02.63.06.94L2.89 14.5a.5.5 0 00-.12.64l1.92 3.32c.14.24.43.34.68.22l2.39-.96c.5.4 1.05.72 1.63.94l.36 2.54c.05.24.25.42.49.42h3.84c.24 0 .44-.18.49-.42l.36-2.54c.58-.22 1.13-.54 1.63-.94l2.39.96c.25.1.54 0 .68-.22l1.92-3.32a.5.5 0 00-.12-.64l-2.03-1.58zM12 15.5A3.5 3.5 0 1112 8a3.5 3.5 0 010 7.5z"/></svg>
+          <span>管理</span>
+        </button>
+      </div>
+      <div class="nav-filters">
+        <label class="select-wrap" title="分类">
+          <svg class="ico-sm" viewBox="0 0 24 24" aria-hidden="true"><path fill="currentColor" d="M10 4H4c-1.1 0-2 .9-2 2v12c0 1.1.9 2 2 2h16c1.1 0 2-.9 2-2V8c0-1.1-.9-2-2-2h-8l-2-2z"/></svg>
+          <select id="categoryFilter"></select>
+        </label>
+      </div>
+    </nav>
+
+    <section id="view-feed" class="view">
+      <div id="feedEmpty" class="overlay-msg hide">
+        <div class="empty-card">
+          <div class="empty-ico" aria-hidden="true">
+            <svg viewBox="0 0 24 24" width="40" height="40" fill="none" stroke="currentColor" stroke-width="1.5">
+              <rect x="3" y="5" width="18" height="14" rx="2"/>
+              <circle cx="9" cy="11" r="2"/>
+              <path d="M3 16l5-4 4 3 4-5 5 6"/>
+            </svg>
+          </div>
+          <p>暂无媒体</p>
+          <p class="muted">用猫抓入库，或到「管理」扫描目录</p>
+        </div>
+      </div>
+      <div id="feedScroller" class="feed-scroller"></div>
+    </section>
+
+    <section id="view-grid" class="view hide">
+      <div class="page-head">
+        <h1>媒体网格</h1>
+        <p class="muted">单击预览 · 右上角删除</p>
+      </div>
+      <div id="grid" class="grid"></div>
+    </section>
+
+    <section id="view-admin" class="view hide">
+      <div class="page-head">
+        <h1>管理</h1>
+        <p class="muted">设置 · 服务状态 · 媒体删除 · 下载任务</p>
+      </div>
+      <div class="admin-card">
+        <h2>
+          <svg class="ico" viewBox="0 0 24 24" aria-hidden="true"><path fill="currentColor" d="M19.14 12.94c.04-.31.06-.63.06-.94s-.02-.63-.06-.94l2.03-1.58a.5.5 0 00.12-.64l-1.92-3.32a.5.5 0 00-.6-.22l-2.39.96a7.03 7.03 0 00-1.63-.94l-.36-2.54A.5.5 0 0014.4 2h-3.84a.5.5 0 00-.49.42l-.36 2.54c-.58.23-1.12.54-1.63.94l-2.39-.96a.5.5 0 00-.6.22L2.77 8.48a.5.5 0 00.12.64l2.03 1.58c-.04.31-.06.63-.06.94s.02.63.06.94L2.89 14.5a.5.5 0 00-.12.64l1.92 3.32c.14.24.43.34.68.22l2.39-.96c.5.4 1.05.72 1.63.94l.36 2.54c.05.24.25.42.49.42h3.84c.24 0 .44-.18.49-.42l.36-2.54c.58-.22 1.13-.54 1.63-.94l2.39.96c.25.1.54 0 .68-.22l1.92-3.32a.5.5 0 00-.12-.64l-2.03-1.58zM12 15.5A3.5 3.5 0 1112 8a3.5 3.5 0 010 7.5z"/></svg>
+          设置
+        </h2>
+        <label>Feed 推荐机制
+          <select id="feedMode">
+            <option value="recommend">推荐</option>
+            <option value="recent">最新</option>
+            <option value="random">随机</option>
+            <option value="liked">已喜欢</option>
+          </select>
+        </label>
+        <p class="muted tip">影响 Feed 排序：推荐 / 最新 / 随机 / 仅已喜欢。偏好会保存在本机。</p>
+        <label>访问 Token（可选）
+          <input id="tokenInput" type="password" placeholder="X-LMW-Token" autocomplete="off" />
+        </label>
+        <div class="row">
+          <button type="button" id="btnSaveToken" class="btn">
+            <svg class="ico" viewBox="0 0 24 24"><path fill="currentColor" d="M17 3H5a2 2 0 00-2 2v14a2 2 0 002 2h14c1.1 0 2-.9 2-2V7l-4-4zm-5 16c-1.66 0-3-1.34-3-3s1.34-3 3-3 3 1.34 3 3-1.34 3-3 3zm3-10H5V5h10v4z"/></svg>
+            保存 Token
+          </button>
+        </div>
+      </div>
+      <div class="admin-card">
+        <h2>
+          <svg class="ico" viewBox="0 0 24 24" aria-hidden="true"><path fill="currentColor" d="M12 2C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2zm-2 15l-5-5 1.41-1.41L10 14.17l7.59-7.59L19 8l-9 9z"/></svg>
+          状态
+        </h2>
+        <pre id="healthBox">…</pre>
+        <div class="row">
+          <button type="button" id="btnRescan" class="btn">
+            <svg class="ico" viewBox="0 0 24 24"><path fill="currentColor" d="M12 6v3l4-4-4-4v3c-4.42 0-8 3.58-8 8 0 1.57.46 3.03 1.24 4.26L6.7 14.8A5.87 5.87 0 016 12c0-3.31 2.69-6 6-6zm6.76 1.74L17.3 9.2c.44.84.7 1.79.7 2.8 0 3.31-2.69 6-6 6v-3l-4 4 4 4v-3c4.42 0 8-3.58 8-8 0-1.57-.46-3.03-1.24-4.26z"/></svg>
+            扫描 Medias
+          </button>
+          <button type="button" id="btnRefreshJobs" class="btn ghost">刷新任务</button>
+          <button type="button" id="btnRefreshMedia" class="btn ghost">刷新媒体</button>
+        </div>
+        <label>新建分类
+          <span class="row">
+            <input id="newCat" type="text" placeholder="category name" />
+            <button type="button" id="btnNewCat" class="btn primary">创建</button>
+          </span>
+        </label>
+      </div>
+      <div class="admin-card">
+        <h2>
+          <svg class="ico" viewBox="0 0 24 24" aria-hidden="true"><path fill="currentColor" d="M6 19c0 1.1.9 2 2 2h8c1.1 0 2-.9 2-2V7H6v12zM19 4h-3.5l-1-1h-5l-1 1H5v2h14V4z"/></svg>
+          媒体库
+        </h2>
+        <p class="muted tip">删除会移除磁盘文件与索引，不可恢复。</p>
+        <div id="adminMedia" class="admin-media"></div>
+      </div>
+      <div class="admin-card">
+        <h2>
+          <svg class="ico" viewBox="0 0 24 24" aria-hidden="true"><path fill="currentColor" d="M19 3H5c-1.1 0-2 .9-2 2v14l4-4h12c1.1 0 2-.9 2-2V5c0-1.1-.9-2-2-2z"/></svg>
+          任务
+        </h2>
+        <div id="jobs" class="jobs"></div>
+      </div>
+    </section>
+
+    <div id="lightbox" class="lightbox hide" aria-hidden="true">
+      <button type="button" class="lb-close" id="lbClose" title="关闭" aria-label="关闭">
+        <svg viewBox="0 0 24 24" width="22" height="22"><path fill="currentColor" d="M18.3 5.71L12 12l6.3 6.29-1.41 1.42L10.59 13.4 4.3 19.71 2.89 18.3 9.17 12 2.89 5.71 4.3 4.29l6.29 6.3 6.29-6.3z"/></svg>
+      </button>
+      <div class="lb-hint">点击空白或关闭按钮退出</div>
+      <div id="lbBody" class="lb-body"></div>
+    </div>
+  </div>
+  <script src="/assets/app.js"></script>
+</body>
+</html>

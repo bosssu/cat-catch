@@ -125,6 +125,10 @@
       title="Perform deep search"></button>
     <button id="catch" class="button2 hide firefoxHideScript" type="script" data-i18n="cacheCapture"
       title="Capture cached content"></button>
+    <!-- LocalMediaWeb：固定在底部栏，默认可见 -->
+    <button id="openLocalMedia" class="button2" title="打开本地媒体库网格页（解析图片/嗅探入库）">本地库</button>
+    <button id="parsePageImages" class="button2" title="解析当前页图片/动图/视频并打开本地库网格">解析媒体</button>
+    <button id="lmwSelect" class="button2" title="打开本地库并对已选资源入库">加入本地库</button>
     <button id="more" class="button2" panel="features" data-i18n="moreFeatures" title="Show more features"></button>
     <button id="enable" class="button2" data-i18n="pause" title="Pause/Resume capturing"></button>
     <button id="Options" go="options.html" class="button2" data-i18n="settings" title="Open settings"></button>
@@ -135,6 +139,7 @@
   <script src="lib/base64.js"></script>
   <script src="lib/mqtt.min.js"></script>
   <script src="js/popup-utils.js"></script>
+  <script src="js/local-media-web.js"></script>
   <script src="js/popup.js"></script>
   <script src="js/media-control.js"></script>
   <script src="lib/jquery.qrcode.min.js"></script>

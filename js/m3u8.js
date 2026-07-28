@@ -119,6 +119,8 @@ let iframeFFmpegReadyRetryCount = 0;
 
 // 自动合并
 let autoMergeTimer = null;
+// 后台委托下载时，恢复选项的 Promise（autoMerge 需等待完成后再点合并）
+let downloadOptionsReady = Promise.resolve();
 
 /**
  * 初始化函数，界面默认配置 loadSource载入 m3u8 url
@@ -801,29 +803,26 @@ function parseTs(data) {
             }
         }
         // 处理 #EXT-X-MAP 标签
-        let initSegment = null;
-        if (data.fragments[i].initSegment && !initData.get(data.fragments[i].initSegment.url)) {
-            initSegment = data.fragments[i].initSegment;
-            initData.set(data.fragments[i].initSegment.url, true);
+        // 每个切片都保留 initSegment 引用。中间范围下载时，下载队列的第一片也必须能拼上 ftyp/moov，
+        // 否则输出会以 moof 开头，播放器报 Invalid data / trun track id unknown。
+        let initSegment = data.fragments[i].initSegment || null;
+        if (initSegment && !initData.get(initSegment.url)) {
+            initData.set(initSegment.url, true);
 
             const options = {};
-            if (data.fragments[i].initSegment.byteRange && data.fragments[i].initSegment.byteRange.length == 2) {
-                const [start, end] = data.fragments[i].initSegment.byteRange;
+            if (initSegment.byteRange && initSegment.byteRange.length == 2) {
+                const [start, end] = initSegment.byteRange;
                 options.headers = {
                     'Range': `bytes=${start}-${end - 1}`
                 };
             }
-            fetch(data.fragments[i].initSegment.url, options)
+            fetch(initSegment.url, options)
                 .then(response => response.arrayBuffer())
                 .then(function (buffer) {
-                    initData.set(data.fragments[i].initSegment.url, buffer);
+                    initData.set(initSegment.url, buffer);
                     autoMerge();
                 }).catch(function (error) { console.log(error); });
-            $("#tips").append('EXT-X-MAP: <input type="text" class="keyUrl" value="' + data.fragments[i].initSegment.url + '" spellcheck="false" readonly="readonly">');
-        }
-
-        if (data.live && data.fragments[i].initSegment) {
-            initSegment = data.fragments[i].initSegment;
+            $("#tips").append('EXT-X-MAP: <input type="text" class="keyUrl" value="' + initSegment.url + '" spellcheck="false" readonly="readonly">');
         }
 
         // #EXT-X-DISCONTINUITY
@@ -887,7 +886,8 @@ function parseTs(data) {
         $("#retryCount").parent().hide();
     }
     if (autoDown) {
-        restoreDownloadOptions();
+        // 后台委托下载：先恢复范围/选中状态；autoMerge 内会等待本 Promise
+        downloadOptionsReady = Promise.resolve(restoreDownloadOptions());
     }
     if (!_fragments.some(fragment => fragment.initSegment) && autoDown) {
         autoMerge();
@@ -1252,10 +1252,12 @@ $("#recorder").click(function () {
     }
     stopRecorder();
 });
-// 在线下载合并ts
-$("#mergeTs").click(async function () {
-    initDownload(); // 初始化下载变量
-    // 设定起始序号
+/**
+ * 解析下载范围输入为切片序号 (0-based, 闭区间)
+ * 支持时间格式 HH:MM:SS / MM:SS 与 1-based 序号
+ * @returns {{start: number, end: number}|null} 无效时返回 null
+ */
+function parseRangeIndices() {
     let start = $("#rangeStart").val();
     if (start.includes(":")) {
         start = timeToIndex(start);
@@ -1263,7 +1265,6 @@ $("#mergeTs").click(async function () {
         start = parseInt(start);
         start = start ? start - 1 : 0;
     }
-    // 设定结束序号
     let end = $("#rangeEnd").val();
     if (end.includes(":")) {
         end = timeToIndex(end);
@@ -1271,25 +1272,66 @@ $("#mergeTs").click(async function () {
         end = parseInt(end);
         end = end ? end - 1 : _fragments.length - 1;
     }
-    // 检查序号
     if (start == -1 || end == -1) {
         $progress.html(`<b>${i18n.sNumError}</b>`);
-        return;
+        return null;
     }
     if (start > end) {
         $progress.html(`<b>${i18n.startGTend}</b>`);
-        return;
+        return null;
     }
     if (start > _fragments.length - 1 || end > _fragments.length - 1) {
         $progress.html(`<b>${i18n("sNumMax", [_fragments.length])}</b>`);
-        return;
+        return null;
     }
+    return { start, end };
+}
+
+/**
+ * 按切片序号范围更新列表选中状态
+ * @param {number} rangeStart 起始序号 (0-based, 含)
+ * @param {number} rangeEnd 结束序号 (0-based, 含)
+ */
+function applyRangeSelection(rangeStart, rangeEnd) {
+    const list = document.querySelector("#mediaList");
+    list.querySelectorAll(".media-item").forEach((item, index) => {
+        if (index >= rangeStart && index <= rangeEnd) {
+            item.classList.add("selected");
+            _fragments[index].selected = true;
+        } else {
+            item.classList.remove("selected");
+            _fragments[index].selected = false;
+        }
+    });
+}
+
+/**
+ * 按布尔数组恢复列表选中状态
+ * @param {boolean[]} selected
+ */
+function applySelectionState(selected) {
+    if (!Array.isArray(selected) || selected.length !== _fragments.length) return false;
+    const list = document.querySelector("#mediaList");
+    list.querySelectorAll(".media-item").forEach((item, index) => {
+        const isSelected = !!selected[index];
+        _fragments[index].selected = isSelected;
+        item.classList.toggle("selected", isSelected);
+    });
+    return true;
+}
+
+// 在线下载合并ts
+$("#mergeTs").click(async function () {
+    initDownload(); // 初始化下载变量
+    const range = parseRangeIndices();
+    if (!range) { return; }
+    const { start, end } = range;
     // 侧边栏模式：在后台标签页下载，避免切换标签时触发 beforeunload 中断下载
     if (isInSidePanel) {
         if (!$("#StreamSaver").prop("checked") && estimateFileSize > G.chromeLimitSize && confirm(i18n("fileTooLargeStream", ["2G"]))) {
             $("#StreamSaver").prop("checked", true);
         }
-        delegateDownloadToBackgroundTab();
+        await delegateDownloadToBackgroundTab();
         return;
     }
     /* 设定自定义密钥和IV */
@@ -1353,7 +1395,7 @@ $("#mergeTs").click(async function () {
     // 流式下载
     if ($("#StreamSaver").prop("checked")) {
         fileStream = createStreamSaver(_fragments[0].url);
-        downloadNew();
+        downloadNew(start, end);
         $("#ffmpeg").prop("checked", false);
         $("#saveAs").prop("checked", false);
         $("#stopDownload").show();
@@ -1367,7 +1409,7 @@ $("#mergeTs").click(async function () {
         _isMaster == 1 && createIframeFFmpeg();
     }
 
-    downloadNew();
+    downloadNew(start, end);
 });
 
 // 添加ts 参数
@@ -1390,45 +1432,11 @@ $("#tsAddArg").click(function () {
 
 // 确认范围
 $("#rangeConfirm").click(function () {
-    let rangeStart = $("#rangeStart").val();
-    let rangeEnd = $("#rangeEnd").val();
-    if (rangeStart.includes(":")) {
-        rangeStart = timeToIndex(rangeStart);
-    } else {
-        rangeStart = parseInt(rangeStart);
-        rangeStart = rangeStart ? rangeStart - 1 : 0;
-    }
-    if (rangeEnd.includes(":")) {
-        rangeEnd = timeToIndex(rangeEnd);
-    } else {
-        rangeEnd = parseInt(rangeEnd);
-        rangeEnd = rangeEnd ? rangeEnd - 1 : _fragments.length - 1;
-    }
-    if (rangeStart == -1 || rangeEnd == -1) {
-        $progress.html(`<b>${i18n.sNumError}</b>`);
-        return;
-    }
-    if (rangeStart > rangeEnd) {
-        $progress.html(`<b>${i18n.startGTend}</b>`);
-        return;
-    }
-    if (rangeStart > _fragments.length - 1 || rangeEnd > _fragments.length - 1) {
-        $progress.html(`<b>${i18n("sNumMax", [_fragments.length])}</b>`);
-        return;
-    }
+    const range = parseRangeIndices();
+    if (!range) { return; }
     $m3u8dlArg.val(getM3u8DlArg());
-
-    // 便利ts列表 在不再范围的切片上取消选中状态
-    const list = document.querySelector("#mediaList");
-    list.querySelectorAll(".media-item").forEach((item, index) => {
-        if (index >= rangeStart && index <= rangeEnd) {
-            item.classList.add("selected");
-            _fragments[index].selected = true;
-        } else {
-            item.classList.remove("selected");
-            _fragments[index].selected = false;
-        }
-    });
+    // 遍历ts列表 在不在范围的切片上取消选中状态
+    applyRangeSelection(range.start, range.end);
 });
 
 // 设置请求头
@@ -1596,10 +1604,10 @@ $("#searchingForRealKey").click(function () {
 
 /**
  * 调用新下载器的方法
- * @param {number} start 下载范围 开始索引
- * @param {number} end 下载范围 结束索引
+ * @param {number} start 下载范围 开始索引 (0-based, 含)
+ * @param {number} end 下载范围 结束索引 (0-based, 含；录制模式可省略)
  */
-function downloadNew(start = 0, end = _fragments.length) {
+function downloadNew(start = 0, end = _fragments.length - 1) {
 
     $("#video").hide();
     hls.detachMedia($("#video")[0]);
@@ -1608,8 +1616,23 @@ function downloadNew(start = 0, end = _fragments.length) {
     buttonState("#mergeTs", false);
 
     // 切片下载器
-    // 过滤掉未选择的 _fragments
-    const selectedFragments = recorder ? _fragments.slice(start) : _fragments.filter(fragment => fragment.selected);
+    // 录制模式按 start 续下；普通模式同时尊重「选中状态」与「起止范围」
+    // （修复：此前只按 selected 过滤，且 mergeTs 未把 start/end 传入，导致范围截取失效）
+    let selectedFragments;
+    if (recorder) {
+        selectedFragments = _fragments.slice(start);
+    } else {
+        selectedFragments = _fragments.filter((fragment, index) => fragment.selected && index >= start && index <= end);
+        // 若列表全未选中（异常状态），回退为按范围下载
+        if (selectedFragments.length === 0) {
+            selectedFragments = _fragments.slice(start, end + 1);
+        }
+    }
+    if (selectedFragments.length === 0) {
+        $progress.html(`<b>${i18n.sNumError}</b>`);
+        buttonState("#mergeTs", true);
+        return;
+    }
     const down = new Downloader(selectedFragments, parseInt($("#thread").val()));
     $progress.html(`${down.success}/${down.total}`);
     if (!isInSidePanel && tabId > 0) {
@@ -1665,10 +1688,11 @@ function downloadNew(start = 0, end = _fragments.length) {
             // 跳过解密 录制模式 切片不存在加密 跳过解密 直接返回
             if (skipDecrypt || recorder || !fragment.encrypted || !fragment.decryptdata) {
                 /**
-                 * (!fragment.live || fragment.index == 0)
-                 * 如果是直接下载直播流 只有第一个切片才会添加MAP 否则每个切片都添加MAP视频无法播放。
+                 * fMP4 (#EXT-X-MAP) 必须拼在「本次下载」的第一个切片前。
+                 * Downloader 会把选中范围重编号，因此 fragment.index == 0 即输出文件头。
+                 * 每个切片都拼 MAP 会导致无法播放；完全不拼则中间截取文件以 moof 开头无法识别。
                  */
-                if (fragment.initSegment && (!fragment.live || fragment.index == 0)) {
+                if (fragment.initSegment && fragment.index == 0) {
                     buffer = addInitSegmentData(buffer, fragment.initSegment);
                 }
                 resolve(buffer);
@@ -1687,9 +1711,8 @@ function downloadNew(start = 0, end = _fragments.length) {
                 reject(e);
                 return;
             }
-            // 如果存在MAP切片 把MAP整合进buffer
-            // MAP切片不需要解密
-            if (fragment.initSegment) {
+            // MAP 不加密，仅拼到本次下载的首个切片
+            if (fragment.initSegment && fragment.index == 0) {
                 buffer = addInitSegmentData(buffer, fragment.initSegment);
             }
             resolve(buffer);
@@ -1913,14 +1936,27 @@ function downloadNew(start = 0, end = _fragments.length) {
     });
 }
 function addInitSegmentData(buffer, initSegment) {
+    if (!initSegment) { return buffer; }
     let initSegmentData = initData.get(initSegment.url);
-    if (!initSegmentData && initSegment.data) {
-        initSegmentData = initSegment.data.buffer;
+    // initData 在 fetch 完成前可能是占位 true，不能当 ArrayBuffer 用
+    if (!initSegmentData || initSegmentData === true) {
+        if (initSegment.data) {
+            initSegmentData = initSegment.data.buffer ?? initSegment.data;
+        } else {
+            console.warn("EXT-X-MAP not loaded yet:", initSegment.url);
+            return buffer;
+        }
     }
-    const initLength = initSegmentData.byteLength;
-    const newData = new Uint8Array(initLength + buffer.byteLength);
-    newData.set(new Uint8Array(initSegmentData), 0);
-    newData.set(new Uint8Array(buffer), initLength);
+    if (!(initSegmentData instanceof ArrayBuffer) && !ArrayBuffer.isView(initSegmentData)) {
+        console.warn("EXT-X-MAP invalid data:", initSegment.url);
+        return buffer;
+    }
+    const initBytes = initSegmentData instanceof ArrayBuffer
+        ? new Uint8Array(initSegmentData)
+        : new Uint8Array(initSegmentData.buffer, initSegmentData.byteOffset, initSegmentData.byteLength);
+    const newData = new Uint8Array(initBytes.byteLength + buffer.byteLength);
+    newData.set(initBytes, 0);
+    newData.set(new Uint8Array(buffer), initBytes.byteLength);
     return newData.buffer;
 }
 
@@ -2099,12 +2135,21 @@ window.onbeforeunload = function (event) {
 }
 
 /**
- * 保存下载选项到 sessionStorage，供后台标签页恢复
+ * 下载选项在 storage 中的 key（跨标签页共享；sessionStorage 无法从侧边栏传到后台页）
+ */
+function getDownloadOptionsStorageKey() {
+    return `m3u8DownloadOptions_${tabId || 0}`;
+}
+
+/**
+ * 保存下载选项到 chrome.storage，供后台标签页恢复
+ * 必须包含选中状态与起止范围，否则后台页会下载整段视频
  */
 function saveDownloadOptions() {
-    sessionStorage.setItem('m3u8DownloadOptions', JSON.stringify({
+    const opts = {
         rangeStart: $("#rangeStart").val(),
         rangeEnd: $("#rangeEnd").val(),
+        selected: _fragments.map(f => !!f.selected),
         streamSaver: $("#StreamSaver").prop("checked"),
         ffmpeg: $("#ffmpeg").prop("checked"),
         saveAs: $("#saveAs").prop("checked"),
@@ -2118,18 +2163,37 @@ function saveDownloadOptions() {
         customIV: $("#customIV").val(),
         customFilename: $("#customFilename").val(),
         addParam: $("#addParam").prop("checked"),
-    }));
+    };
+    const key = getDownloadOptionsStorageKey();
+    const storage = chrome.storage.session ?? chrome.storage.local;
+    // 同步写入 sessionStorage 作为同页兜底（不依赖 storage 时序）
+    try { sessionStorage.setItem(key, JSON.stringify(opts)); } catch (e) { /* ignore */ }
+    // 统一成 Promise，兼容 callback / Promise 两种 storage API
+    return new Promise((resolve) => {
+        let settled = false;
+        const done = () => { if (!settled) { settled = true; resolve(); } };
+        try {
+            const ret = storage.set({ [key]: opts }, done);
+            if (ret && typeof ret.then === "function") {
+                ret.then(done).catch(done);
+            }
+        } catch (e) {
+            console.log(e);
+            done();
+        }
+    });
 }
 
 /**
- * 从 sessionStorage 恢复下载选项
+ * 从 chrome.storage / sessionStorage 恢复下载选项，并应用选中/范围
+ * @returns {Promise<void>}
  */
 function restoreDownloadOptions() {
-    const saved = sessionStorage.getItem('m3u8DownloadOptions');
-    if (!saved) return;
-    sessionStorage.removeItem('m3u8DownloadOptions');
-    try {
-        const opts = JSON.parse(saved);
+    const key = getDownloadOptionsStorageKey();
+    const storage = chrome.storage.session ?? chrome.storage.local;
+
+    const applyOpts = (opts) => {
+        if (!opts) return;
         if (opts.rangeStart != null) $("#rangeStart").val(opts.rangeStart);
         if (opts.rangeEnd != null) $("#rangeEnd").val(opts.rangeEnd);
         if (opts.streamSaver != null) $("#StreamSaver").prop("checked", opts.streamSaver);
@@ -2145,7 +2209,35 @@ function restoreDownloadOptions() {
         if (opts.customIV != null) $("#customIV").val(opts.customIV);
         if (opts.customFilename != null) $("#customFilename").val(opts.customFilename);
         if (opts.addParam != null) $("#addParam").prop("checked", opts.addParam);
-    } catch (e) { console.log(e); }
+
+        // 优先恢复精确选中状态；否则按起止范围重新勾选
+        if (!applySelectionState(opts.selected)) {
+            const range = parseRangeIndices();
+            if (range) {
+                applyRangeSelection(range.start, range.end);
+            }
+        }
+        $m3u8dlArg.val(getM3u8DlArg());
+    };
+
+    return new Promise((resolve) => {
+        storage.get(key, (result) => {
+            let opts = result?.[key];
+            // storage 未命中时尝试 sessionStorage 兜底
+            if (!opts) {
+                try {
+                    const raw = sessionStorage.getItem(key);
+                    if (raw) opts = JSON.parse(raw);
+                } catch (e) { /* ignore */ }
+            }
+            try { sessionStorage.removeItem(key); } catch (e) { /* ignore */ }
+            storage.remove(key);
+            try {
+                applyOpts(opts);
+            } catch (e) { console.log(e); }
+            resolve();
+        });
+    });
 }
 
 /**
@@ -2221,13 +2313,18 @@ function initSidePanelDownloadMonitor() {
 
 /**
  * 侧边栏下载委托到后台标签页
+ * 先写入选项（含选中切片），再打开 autoDown 后台页
  */
-function delegateDownloadToBackgroundTab() {
-    saveDownloadOptions();
+async function delegateDownloadToBackgroundTab() {
+    await saveDownloadOptions();
     const url = new URL(location.href);
     url.searchParams.delete('sidepanel');
     url.searchParams.set('autoDown', '1');
-    const selectedCount = _fragments.filter(fragment => fragment.selected).length;
+    // 按「选中 ∩ 范围」估算总数，与实际 downloadNew 一致
+    const range = parseRangeIndices();
+    const selectedCount = range
+        ? _fragments.filter((f, i) => f.selected && i >= range.start && i <= range.end).length
+        : _fragments.filter(fragment => fragment.selected).length;
     chrome.tabs.create({ url: url.pathname + url.search, active: false }, (downloadTab) => {
         const status = {
             Message: 'downloadStatus',
@@ -2613,8 +2710,12 @@ function autoMerge() {
     if (!autoDown) { return; }
     clearTimeout(autoMergeTimer);
     autoMergeTimer = setTimeout(() => {
-        autoDown = false;   // 避免重复调用
-        $("#mergeTs").click();
+        // 等待侧边栏传入的下载选项（起止范围/选中切片）恢复完成
+        Promise.resolve(downloadOptionsReady).then(() => {
+            if (!autoDown) { return; }
+            autoDown = false;   // 避免重复调用
+            $("#mergeTs").click();
+        });
     }, 1000);
 }
 
