@@ -236,11 +236,11 @@
                 if (!window.confirm(`确认将录屏入库到媒体库？\n约 ${sizeMb} MB · webm`)) {
                     catCatchRecorderStart.innerHTML = i18n("startRecording", "开始录制");
                 } else {
-                    const tagRaw = window.prompt("标签（最多5个，逗号分隔；取消=中止）", "video, screen");
+                    const tagRaw = window.prompt("标签（逗号分隔；取消=中止）", "video, screen");
                     if (tagRaw === null) {
                         catCatchRecorderStart.innerHTML = i18n("startRecording", "开始录制");
                     } else {
-                    const tags = String(tagRaw).split(/[,，;；\s]+/).map((s) => s.trim().toLowerCase()).filter(Boolean).slice(0, 5);
+                    const tags = String(tagRaw).split(/[,，;；\s]+/).map((s) => s.trim().toLowerCase()).filter(Boolean);
                     catCatchRecorderStart.innerHTML = "入库中…";
                     catCatchIngestBlob(fileBlob, {
                         filename: `${title}.webm`,

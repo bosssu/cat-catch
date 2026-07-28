@@ -391,10 +391,20 @@ body {
   padding: 16px 18px;
   box-shadow: 0 16px 48px rgba(0, 0, 0, 0.45);
 }
+.lm-modal-card.lm-range-card {
+  width: min(460px, 100%);
+}
 .lm-modal-head {
   font-size: 15px;
   font-weight: 600;
   margin-bottom: 8px;
+}
+.lm-modal-hint {
+  font-size: 12px;
+  opacity: 0.85;
+  margin: 4px 0 8px;
+  line-height: 1.4;
+  color: #b8c0d0;
 }
 .lm-modal-desc {
   margin: 0 0 10px;
@@ -434,6 +444,110 @@ body {
   border-radius: 6px;
   padding: 8px 10px;
   font-size: 14px;
+}
+/* start | end | 添加 */
+.lm-range-inputs {
+  grid-template-columns: 1fr 1fr auto;
+  align-items: end;
+  gap: 8px;
+}
+.lm-range-add-btn {
+  height: 36px;
+  padding: 0 14px;
+  white-space: nowrap;
+  background: #2a3a5c;
+  color: #dce6ff;
+  border: 1px solid #4c7cff;
+  border-radius: 6px;
+  cursor: pointer;
+}
+.lm-range-add-btn:hover {
+  background: #3a4f7a;
+}
+.lm-range-list-wrap {
+  margin: 0 0 14px;
+  border: 1px solid #333348;
+  border-radius: 8px;
+  background: #14141e;
+  overflow: hidden;
+}
+.lm-range-list-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 10px;
+  font-size: 12px;
+  color: #9aa;
+  border-bottom: 1px solid #2a2a3a;
+}
+.lm-range-count {
+  display: inline-flex;
+  min-width: 1.4em;
+  justify-content: center;
+  padding: 0 6px;
+  border-radius: 999px;
+  background: #2a3a5c;
+  color: #cde;
+  font-size: 11px;
+}
+.lm-range-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  max-height: 180px;
+  overflow-y: auto;
+}
+.lm-range-list:empty {
+  display: none;
+}
+.lm-range-list-empty {
+  display: none;
+  padding: 14px 12px;
+  font-size: 12px;
+  color: #667;
+  text-align: center;
+}
+.lm-range-list-empty.show {
+  display: block;
+}
+.lm-range-item {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 10px;
+  border-bottom: 1px solid #222232;
+  font-size: 13px;
+  color: #e8e8f0;
+}
+.lm-range-item:last-child {
+  border-bottom: none;
+}
+.lm-range-item-idx {
+  flex: 0 0 auto;
+  width: 1.5em;
+  font-size: 11px;
+  color: #778;
+}
+.lm-range-item-label {
+  flex: 1 1 auto;
+  min-width: 0;
+  font-variant-numeric: tabular-nums;
+}
+.lm-range-item-x {
+  flex: 0 0 auto;
+  width: 28px;
+  height: 28px;
+  border: none;
+  border-radius: 6px;
+  background: transparent;
+  color: #aab;
+  font-size: 16px;
+  line-height: 1;
+  cursor: pointer;
+}
+.lm-range-item-x:hover {
+  background: #3a2020;
+  color: #f88;
 }
 .lm-modal-actions {
   display: flex;

@@ -35,9 +35,15 @@
         </button>
       </div>
       <div class="nav-filters">
-        <button type="button" id="btnSimilar" class="nav-filter-btn" title="根据当前 Feed 媒体的标签推荐相似内容">
-          推荐相似
-        </button>
+        <label class="select-wrap" title="Feed 排序方式">
+          <select id="feedModeNav" aria-label="Feed 排序">
+            <option value="random">随机</option>
+            <option value="similar">相似</option>
+            <option value="recommend">推荐</option>
+            <option value="recent">最新</option>
+            <option value="liked">已喜欢</option>
+          </select>
+        </label>
       </div>
     </nav>
 
@@ -78,13 +84,14 @@
         </h2>
         <label>Feed 推荐机制
           <select id="feedMode">
+            <option value="random">随机</option>
+            <option value="similar">相似</option>
             <option value="recommend">推荐</option>
             <option value="recent">最新</option>
-            <option value="random">随机</option>
             <option value="liked">已喜欢</option>
           </select>
         </label>
-        <p class="muted tip">影响 Feed 排序：推荐 / 最新 / 随机 / 仅已喜欢。偏好会保存在本机。</p>
+        <p class="muted tip">与右上角一致：随机（默认）/ 相似 / 推荐 / 最新 / 已喜欢。偏好保存在本机。</p>
         <label>访问 Token（可选）
           <input id="tokenInput" type="password" placeholder="X-LMW-Token" autocomplete="off" />
         </label>
@@ -119,7 +126,7 @@
           <svg class="ico" viewBox="0 0 24 24" aria-hidden="true"><path fill="currentColor" d="M6 19c0 1.1.9 2 2 2h8c1.1 0 2-.9 2-2V7H6v12zM19 4h-3.5l-1-1h-5l-1 1H5v2h14V4z"/></svg>
           媒体库
         </h2>
-        <p class="muted tip">删除会移除磁盘文件与索引，不可恢复。可勾选后统一打标签（最多 5 个）。</p>
+        <p class="muted tip">删除会移除磁盘文件与索引，不可恢复。可勾选后统一打标签。</p>
         <div class="row" style="margin-bottom:10px;gap:8px;flex-wrap:wrap;">
           <input id="batchTagsInput" type="text" placeholder="标签，逗号分隔" style="flex:1;min-width:140px" />
           <button type="button" id="btnBatchTags" class="btn primary">给选中打标签</button>

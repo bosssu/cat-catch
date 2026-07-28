@@ -1,0 +1,739 @@
+/**
+ * Extension page: LocalMediaWeb server media management.
+ * Depends on init.js (G), local-media-web.js (LMW).
+ */
+(function () {
+    "use strict";
+
+    const PAGE_SIZE = 48;
+    const UPLOAD_CONCURRENCY = 2;
+
+    const state = {
+        items: [],
+        total: 0,
+        offset: 0,
+        loading: false,
+        listAbort: null,
+        selected: new Set(),
+        pendingFiles: [],
+        editId: null,
+        filters: {
+            q: "",
+            type: "",
+            tag: "",
+            liked: "",
+            sort: "new",
+        },
+    };
+
+    const $ = (id) => document.getElementById(id);
+
+    /** Tag autocomplete controllers (batch / upload / edit) */
+    const tagAc = { batch: null, upload: null, edit: null };
+
+    async function refreshAllTagAc() {
+        LMW.invalidateTagLibrary();
+        await Promise.all(
+            [tagAc.batch, tagAc.upload, tagAc.edit]
+                .filter(Boolean)
+                .map((ac) => ac.refresh())
+        );
+    }
+
+    function waitGReady() {
+        return new Promise((resolve) => {
+            const tick = () => {
+                if (G && (G.initSyncComplete || G.lmwURL != null || G.OptionLists)) {
+                    // Prefer filled storage; fall back after short wait if still empty
+                    if (G.initSyncComplete || G.initLocalComplete) {
+                        resolve();
+                        return;
+                    }
+                }
+                if (waitGReady._n > 40) {
+                    resolve();
+                    return;
+                }
+                waitGReady._n = (waitGReady._n || 0) + 1;
+                setTimeout(tick, 50);
+            };
+            tick();
+        });
+    }
+
+    function escapeHtml(s) {
+        return String(s ?? "")
+            .replace(/&/g, "&amp;")
+            .replace(/</g, "&lt;")
+            .replace(/>/g, "&gt;")
+            .replace(/"/g, "&quot;");
+    }
+
+    function formatSize(n) {
+        n = Number(n) || 0;
+        if (n < 1024) return n + " B";
+        if (n < 1024 * 1024) return (n / 1024).toFixed(1) + " KB";
+        if (n < 1024 * 1024 * 1024) return (n / (1024 * 1024)).toFixed(1) + " MB";
+        return (n / (1024 * 1024 * 1024)).toFixed(2) + " GB";
+    }
+
+    function setStatus(msg) {
+        const el = $("mmStatus");
+        if (el) el.textContent = msg || "";
+    }
+
+    function updateSelUi() {
+        $("mmSelCount").textContent = `已选 ${state.selected.size}`;
+        $("mmGrid")
+            .querySelectorAll(".mm-card")
+            .forEach((card) => {
+                const id = Number(card.dataset.id);
+                const on = state.selected.has(id);
+                card.classList.toggle("selected", on);
+                const cb = card.querySelector(".mm-card-check");
+                if (cb) cb.checked = on;
+            });
+    }
+
+    function updateCountUi() {
+        $("mmCount").textContent = `${state.items.length} / ${state.total}`;
+        $("btnMore").disabled = state.loading || state.items.length >= state.total;
+        $("btnMore").textContent =
+            state.items.length >= state.total && state.total > 0 ? "已全部加载" : "加载更多";
+    }
+
+    function readFilters() {
+        state.filters.q = ($("mmQ").value || "").trim();
+        state.filters.type = $("mmType").value || "";
+        state.filters.tag = $("mmTag").value || "";
+        state.filters.liked = $("mmLiked").value || "";
+        state.filters.sort = $("mmSort").value || "new";
+    }
+
+    function listParams(offset) {
+        const p = {
+            offset,
+            limit: PAGE_SIZE,
+            sort: state.filters.sort || "new",
+        };
+        if (state.filters.q) p.q = state.filters.q;
+        if (state.filters.type) p.type = state.filters.type;
+        if (state.filters.tag) p.tag = state.filters.tag;
+        if (state.filters.liked === "1") p.liked = true;
+        if (state.filters.liked === "0") p.liked = false;
+        return p;
+    }
+
+    async function checkHealth() {
+        $("mmBase").textContent = LMW.baseUrl();
+        const el = $("mmHealth");
+        try {
+            const h = await LMW.health();
+            el.textContent = "在线" + (h.version ? ` · v${h.version}` : "");
+            el.className = "mm-health ok";
+            return true;
+        } catch (e) {
+            el.textContent = "离线";
+            el.className = "mm-health bad";
+            setStatus("无法连接 LocalMediaWeb：" + (e.message || e));
+            return false;
+        }
+    }
+
+    async function loadTagOptions() {
+        try {
+            const data = await LMW.listTags();
+            const sel = $("mmTag");
+            const cur = sel.value;
+            const tags = data.tags || [];
+            sel.innerHTML =
+                `<option value="">全部标签</option>` +
+                tags
+                    .map(
+                        (t) =>
+                            `<option value="${escapeHtml(t.name)}">#${escapeHtml(t.name)} (${t.count})</option>`
+                    )
+                    .join("");
+            if (cur) sel.value = cur;
+        } catch (e) {
+            /* ignore */
+        }
+    }
+
+    function cardHtml(m) {
+        const tags = (m.tags || []).map((t) => "#" + t).join(" ");
+        const liked = m.liked ? "♥ " : "";
+        return `<article class="mm-card" data-id="${m.id}" data-type="${escapeHtml(m.media_type || "")}">
+  <input type="checkbox" class="mm-card-check" data-id="${m.id}" aria-label="选择 #${m.id}" />
+  <div class="mm-thumb-wrap" data-preview="${m.id}" title="预览">
+    <div class="mm-thumb-ph" data-thumb-ph="${m.id}">${escapeHtml(m.media_type || "media")}</div>
+    <img alt="" data-thumb="${m.id}" data-src="${escapeHtml(m.thumb_url || "")}" hidden />
+  </div>
+  <div class="mm-card-body">
+    <div class="mm-card-title" title="${escapeHtml(m.title || "")}">${escapeHtml(m.title || "(无标题)")}</div>
+    <div class="mm-card-meta">${liked}#${m.id} · ${escapeHtml(m.media_type || "")} · ${formatSize(m.file_size)}</div>
+    <div class="mm-card-tags">${escapeHtml(tags || "无标签")}</div>
+    <div class="mm-card-actions">
+      <button type="button" data-act="edit" data-id="${m.id}">编辑</button>
+      <button type="button" data-act="like" data-id="${m.id}">${m.liked ? "取消♥" : "喜欢"}</button>
+      <button type="button" data-act="del" data-id="${m.id}">删除</button>
+    </div>
+  </div>
+</article>`;
+    }
+
+    function renderGrid(append) {
+        const grid = $("mmGrid");
+        if (!append) {
+            grid.innerHTML = "";
+            if (!state.items.length) {
+                grid.innerHTML = `<div class="mm-empty">暂无媒体${state.filters.q || state.filters.tag || state.filters.type ? "（试试调整筛选）" : "，可上传本地文件"}</div>`;
+                updateCountUi();
+                updateSelUi();
+                return;
+            }
+        }
+        const start = append ? grid.querySelectorAll(".mm-card").length : 0;
+        const slice = state.items.slice(start);
+        if (!slice.length && !append) return;
+        const frag = document.createDocumentFragment();
+        const wrap = document.createElement("div");
+        wrap.innerHTML = slice.map(cardHtml).join("");
+        while (wrap.firstChild) frag.appendChild(wrap.firstChild);
+        // remove empty placeholder
+        const empty = grid.querySelector(".mm-empty");
+        if (empty) empty.remove();
+        grid.appendChild(frag);
+        observeThumbs(grid);
+        updateCountUi();
+        updateSelUi();
+    }
+
+    let thumbObserver = null;
+    function observeThumbs(root) {
+        if (!thumbObserver) {
+            thumbObserver = new IntersectionObserver(
+                (entries) => {
+                    for (const en of entries) {
+                        if (!en.isIntersecting) continue;
+                        const img = en.target;
+                        thumbObserver.unobserve(img);
+                        loadThumb(img);
+                    }
+                },
+                { rootMargin: "120px", threshold: 0.01 }
+            );
+        }
+        root.querySelectorAll("img[data-thumb][data-src]").forEach((img) => {
+            if (img.dataset.loaded === "1") return;
+            thumbObserver.observe(img);
+        });
+    }
+
+    async function loadThumb(img) {
+        const src = img.dataset.src;
+        if (!src || img.dataset.loaded === "1") return;
+        img.dataset.loaded = "1";
+        const id = img.dataset.thumb;
+        try {
+            const blobUrl = await LMW.fetchAuthedBlobUrl(src);
+            img.src = blobUrl;
+            img.hidden = false;
+            const ph = img.parentElement && img.parentElement.querySelector(`[data-thumb-ph="${id}"]`);
+            if (ph) ph.hidden = true;
+        } catch (e) {
+            img.dataset.loaded = "0";
+            // leave placeholder
+        }
+    }
+
+    async function loadList({ reset = false } = {}) {
+        if (state.loading) return;
+        readFilters();
+        if (reset) {
+            state.offset = 0;
+            state.items = [];
+            state.selected.clear();
+            if (state.listAbort) state.listAbort.abort();
+        }
+        state.listAbort = new AbortController();
+        const offset = state.offset;
+        state.loading = true;
+        setStatus(reset ? "加载中…" : "加载更多…");
+        $("btnMore").disabled = true;
+        try {
+            const data = await LMW.listMedia(listParams(offset), { signal: state.listAbort.signal });
+            const items = data.items || [];
+            state.total = data.total ?? items.length;
+            if (reset) state.items = items;
+            else state.items = state.items.concat(items);
+            state.offset = state.items.length;
+            renderGrid(!reset);
+            setStatus("");
+        } catch (e) {
+            if (e && e.name === "AbortError") return;
+            setStatus("加载失败：" + (e.message || e));
+            if (reset) {
+                state.items = [];
+                state.total = 0;
+                renderGrid(false);
+            }
+        } finally {
+            state.loading = false;
+            updateCountUi();
+        }
+    }
+
+    function debounce(fn, ms) {
+        let t = null;
+        return (...args) => {
+            clearTimeout(t);
+            t = setTimeout(() => fn(...args), ms);
+        };
+    }
+
+    /* ---------- selection / batch ---------- */
+
+    function selectedIds() {
+        return [...state.selected];
+    }
+
+    async function batchTags(mode) {
+        const ids = selectedIds();
+        if (!ids.length) {
+            setStatus("请先勾选媒体");
+            return;
+        }
+        const tags = tagAc.batch
+            ? await tagAc.batch.commit()
+            : await LMW.softNormalizeTags($("mmBatchTags").value);
+        if (!tags.length) {
+            setStatus("请输入批量标签");
+            return;
+        }
+        try {
+            const r = await LMW.batchTags(ids, tags, mode);
+            $("mmBatchTags").value = "";
+            setStatus(`已更新 ${r.updated || 0} 项 · 标签 ${tags.map((t) => "#" + t).join(" ")}`);
+            await refreshAllTagAc();
+            await loadList({ reset: true });
+            await loadTagOptions();
+        } catch (e) {
+            setStatus("打标签失败：" + (e.message || e));
+        }
+    }
+
+    async function batchDelete() {
+        const ids = selectedIds();
+        if (!ids.length) {
+            setStatus("请先勾选媒体");
+            return;
+        }
+        if (!confirm(`确定删除选中的 ${ids.length} 项媒体？\n文件与索引将从服务器移除，不可恢复。`)) return;
+        try {
+            const r = await LMW.batchDelete(ids);
+            setStatus(`已删除 ${r.deleted || 0} 项`);
+            state.selected.clear();
+            await loadList({ reset: true });
+            await loadTagOptions();
+        } catch (e) {
+            setStatus("批量删除失败：" + (e.message || e));
+        }
+    }
+
+    /* ---------- upload ---------- */
+
+    function guessMediaType(file) {
+        const n = (file.name || "").toLowerCase();
+        const t = (file.type || "").toLowerCase();
+        if (t.includes("gif") || n.endsWith(".gif")) return "gif";
+        if (t.startsWith("image/") || /\.(png|jpe?g|webp|avif|bmp)$/i.test(n)) return "image";
+        return "video";
+    }
+
+    function fileKey(f) {
+        return `${f.name || ""}|${f.size || 0}|${f.lastModified || 0}`;
+    }
+
+    function refreshPendingUi() {
+        const files = state.pendingFiles;
+        $("btnUpload").disabled = !files.length;
+        const btnClear = $("btnClearPending");
+        if (btnClear) btnClear.disabled = !files.length;
+        if (!files.length) {
+            $("mmUploadProg").textContent = "";
+            return;
+        }
+        const total = formatSize(files.reduce((s, f) => s + (f.size || 0), 0));
+        const names = files
+            .slice(0, 8)
+            .map((f) => f.name)
+            .join(" · ");
+        const more = files.length > 8 ? ` 等 ${files.length} 个` : "";
+        $("mmUploadProg").textContent = `待上传 ${files.length} 个 · ${total}${names ? " — " + names + more : ""}`;
+    }
+
+    /** Append files (stack). Dedupe by name+size+lastModified. */
+    function addPendingFiles(fileList, { replace = false } = {}) {
+        const incoming = [...(fileList || [])].filter((f) => f && f.size > 0);
+        if (replace) {
+            state.pendingFiles = incoming;
+        } else {
+            const seen = new Set(state.pendingFiles.map(fileKey));
+            for (const f of incoming) {
+                const k = fileKey(f);
+                if (seen.has(k)) continue;
+                seen.add(k);
+                state.pendingFiles.push(f);
+            }
+        }
+        refreshPendingUi();
+    }
+
+    function clearPendingFiles() {
+        state.pendingFiles = [];
+        const input = $("mmFiles");
+        if (input) input.value = "";
+        refreshPendingUi();
+        setStatus("已清除待上传列表");
+    }
+
+    async function runUploadQueue() {
+        const files = state.pendingFiles.slice();
+        if (!files.length) return;
+        const tags = tagAc.upload
+            ? await tagAc.upload.commit()
+            : await LMW.softNormalizeTags($("mmUploadTags").value);
+        $("btnUpload").disabled = true;
+        let done = 0;
+        let failed = 0;
+        const queue = files.slice();
+
+        async function worker() {
+            while (queue.length) {
+                const file = queue.shift();
+                if (!file) break;
+                const title = (file.name || "upload").replace(/\.[^.]+$/, "");
+                $("mmUploadProg").textContent = `上传中 ${done + failed + 1}/${files.length} · ${file.name}`;
+                try {
+                    await LMW.uploadBlob(file, {
+                        title,
+                        filename: file.name,
+                        media_type: guessMediaType(file),
+                        tags,
+                        remux: "1",
+                    });
+                    done++;
+                } catch (e) {
+                    failed++;
+                    console.warn("upload fail", file.name, e);
+                }
+            }
+        }
+
+        const workers = [];
+        for (let i = 0; i < Math.min(UPLOAD_CONCURRENCY, files.length); i++) {
+            workers.push(worker());
+        }
+        await Promise.all(workers);
+        state.pendingFiles = [];
+        $("mmFiles").value = "";
+        refreshPendingUi();
+        $("mmUploadProg").textContent = `完成：成功 ${done}${failed ? ` · 失败 ${failed}` : ""}`;
+        if (done) await refreshAllTagAc();
+        await loadList({ reset: true });
+        await loadTagOptions();
+        setStatus(
+            (failed ? `上传完成（${failed} 失败）` : "上传完成") +
+                (tags.length ? " · 标签 " + tags.map((t) => "#" + t).join(" ") : "")
+        );
+    }
+
+    /* ---------- preview / edit ---------- */
+
+    function closePreview() {
+        const box = $("mmPreview");
+        box.classList.add("hide");
+        box.setAttribute("aria-hidden", "true");
+        const stage = $("mmPreviewStage");
+        stage.querySelectorAll("video").forEach((v) => {
+            try {
+                v.pause();
+                v.removeAttribute("src");
+                v.load();
+            } catch (e) { /* ignore */ }
+        });
+        stage.innerHTML = "";
+        $("mmPreviewMeta").textContent = "";
+    }
+
+    async function openPreview(id) {
+        const m = state.items.find((x) => x.id === id);
+        if (!m) return;
+        const stage = $("mmPreviewStage");
+        stage.innerHTML = `<div class="muted">加载中…</div>`;
+        $("mmPreviewMeta").textContent = `#${m.id} · ${m.title || ""} · ${(m.tags || []).map((t) => "#" + t).join(" ")}`;
+        $("mmPreview").classList.remove("hide");
+        $("mmPreview").setAttribute("aria-hidden", "false");
+        try {
+            const url = await LMW.fetchAuthedBlobUrl(m.file_url);
+            stage.innerHTML = "";
+            if (m.media_type === "image" || m.media_type === "gif") {
+                const img = document.createElement("img");
+                img.src = url;
+                img.alt = m.title || "";
+                stage.appendChild(img);
+            } else {
+                const v = document.createElement("video");
+                v.src = url;
+                v.controls = true;
+                v.autoplay = true;
+                v.playsInline = true;
+                stage.appendChild(v);
+            }
+        } catch (e) {
+            stage.innerHTML = `<div class="muted">预览失败：${escapeHtml(e.message || e)}</div>`;
+        }
+    }
+
+    function openEdit(id) {
+        const m = state.items.find((x) => x.id === id);
+        if (!m) return;
+        state.editId = id;
+        $("mmEditTitleInput").value = m.title || "";
+        $("mmEditTagsInput").value = (m.tags || []).join(", ");
+        $("mmEdit").classList.remove("hide");
+        $("mmEdit").setAttribute("aria-hidden", "false");
+    }
+
+    function closeEdit() {
+        state.editId = null;
+        $("mmEdit").classList.add("hide");
+        $("mmEdit").setAttribute("aria-hidden", "true");
+    }
+
+    async function saveEdit() {
+        const id = state.editId;
+        if (!id) return;
+        const title = ($("mmEditTitleInput").value || "").trim();
+        const tags = tagAc.edit
+            ? await tagAc.edit.commit()
+            : await LMW.softNormalizeTags($("mmEditTagsInput").value);
+        try {
+            const item = await LMW.patchMedia(id, { title, tags });
+            const idx = state.items.findIndex((x) => x.id === id);
+            if (idx >= 0) state.items[idx] = { ...state.items[idx], ...item };
+            closeEdit();
+            // re-render only that card cheaply: full re-render of loaded pages
+            const grid = $("mmGrid");
+            grid.innerHTML = "";
+            renderGrid(false);
+            setStatus(
+                `已保存 #${id}` +
+                    (tags.length ? " · " + tags.map((t) => "#" + t).join(" ") : "")
+            );
+            await refreshAllTagAc();
+            await loadTagOptions();
+        } catch (e) {
+            setStatus("保存失败：" + (e.message || e));
+        }
+    }
+
+    async function onCardAction(act, id) {
+        if (act === "edit") {
+            openEdit(id);
+            return;
+        }
+        if (act === "like") {
+            try {
+                const item = await LMW.toggleLike(id);
+                const idx = state.items.findIndex((x) => x.id === id);
+                if (idx >= 0) state.items[idx] = { ...state.items[idx], ...item };
+                const grid = $("mmGrid");
+                grid.innerHTML = "";
+                renderGrid(false);
+            } catch (e) {
+                setStatus("喜欢失败：" + (e.message || e));
+            }
+            return;
+        }
+        if (act === "del") {
+            if (!confirm(`确定删除媒体 #${id}？不可恢复。`)) return;
+            try {
+                await LMW.deleteMedia(id);
+                state.selected.delete(id);
+                state.items = state.items.filter((x) => x.id !== id);
+                state.total = Math.max(0, state.total - 1);
+                const card = $("mmGrid").querySelector(`.mm-card[data-id="${id}"]`);
+                if (card) card.remove();
+                if (!state.items.length) renderGrid(false);
+                updateCountUi();
+                updateSelUi();
+                setStatus(`已删除 #${id}`);
+                await loadTagOptions();
+            } catch (e) {
+                setStatus("删除失败：" + (e.message || e));
+            }
+        }
+    }
+
+    /* ---------- bind ---------- */
+
+    function bind() {
+        $("btnRefresh").onclick = () => {
+            checkHealth();
+            loadTagOptions();
+            loadList({ reset: true });
+        };
+        $("btnOpenFeed").onclick = () => {
+            chrome.tabs.create({ url: LMW.baseUrl() + "/" });
+        };
+        $("btnMore").onclick = () => loadList({ reset: false });
+
+        const reloadDebounced = debounce(() => loadList({ reset: true }), 300);
+        $("mmQ").addEventListener("input", reloadDebounced);
+        ["mmType", "mmTag", "mmLiked", "mmSort"].forEach((id) => {
+            $(id).addEventListener("change", () => loadList({ reset: true }));
+        });
+
+        $("btnSelPage").onclick = () => {
+            $("mmGrid").querySelectorAll(".mm-card").forEach((c) => {
+                state.selected.add(Number(c.dataset.id));
+            });
+            updateSelUi();
+        };
+        $("btnSelClear").onclick = () => {
+            state.selected.clear();
+            updateSelUi();
+        };
+        $("btnBatchMerge").onclick = () => batchTags("merge");
+        $("btnBatchReplace").onclick = () => batchTags("replace");
+        $("btnBatchDel").onclick = () => batchDelete();
+
+        // Tag library autocomplete: batch bar / upload / edit modal
+        if (typeof LMW.attachTagAutocomplete === "function") {
+            const hintToStatus = (msg) => {
+                if (msg) setStatus(msg);
+            };
+            tagAc.batch = LMW.attachTagAutocomplete($("mmBatchTags"), {
+                onHint: hintToStatus,
+                captureEnter: true,
+            });
+            tagAc.upload = LMW.attachTagAutocomplete($("mmUploadTags"), {
+                onHint: hintToStatus,
+                captureEnter: true,
+            });
+            tagAc.edit = LMW.attachTagAutocomplete($("mmEditTagsInput"), {
+                captureEnter: true,
+                showHint: true,
+            });
+        }
+
+        $("mmFiles").addEventListener("change", (e) => {
+            addPendingFiles(e.target.files);
+            // allow re-selecting the same path later
+            e.target.value = "";
+        });
+        $("btnUpload").onclick = () => runUploadQueue();
+        $("btnClearPending").onclick = () => clearPendingFiles();
+
+        const drop = $("mmDrop");
+        ["dragenter", "dragover"].forEach((ev) => {
+            drop.addEventListener(ev, (e) => {
+                e.preventDefault();
+                e.stopPropagation();
+                drop.classList.add("drag");
+            });
+        });
+        drop.addEventListener("dragleave", (e) => {
+            e.preventDefault();
+            e.stopPropagation();
+            // only clear when leaving the drop zone itself
+            if (!drop.contains(e.relatedTarget)) drop.classList.remove("drag");
+        });
+        drop.addEventListener("drop", (e) => {
+            e.preventDefault();
+            e.stopPropagation();
+            drop.classList.remove("drag");
+            const files = e.dataTransfer && e.dataTransfer.files;
+            if (files && files.length) addPendingFiles(files);
+        });
+
+        $("mmGrid").addEventListener("click", (e) => {
+            const t = e.target;
+            if (t.classList.contains("mm-card-check")) {
+                const id = Number(t.dataset.id);
+                if (t.checked) state.selected.add(id);
+                else state.selected.delete(id);
+                updateSelUi();
+                return;
+            }
+            const btn = t.closest("[data-act]");
+            if (btn) {
+                e.preventDefault();
+                onCardAction(btn.dataset.act, Number(btn.dataset.id));
+                return;
+            }
+            const prev = t.closest("[data-preview]");
+            if (prev) {
+                openPreview(Number(prev.dataset.preview));
+            }
+        });
+        $("mmGrid").addEventListener("change", (e) => {
+            const t = e.target;
+            if (t.classList.contains("mm-card-check")) {
+                const id = Number(t.dataset.id);
+                if (t.checked) state.selected.add(id);
+                else state.selected.delete(id);
+                updateSelUi();
+            }
+        });
+
+        $("mmPreviewClose").onclick = closePreview;
+        $("mmPreview").addEventListener("click", (e) => {
+            if (e.target.id === "mmPreview") closePreview();
+        });
+        $("mmEditCancel").onclick = closeEdit;
+        $("mmEditSave").onclick = saveEdit;
+        $("mmEdit").addEventListener("click", (e) => {
+            if (e.target.id === "mmEdit") closeEdit();
+        });
+
+        window.addEventListener("keydown", (e) => {
+            if (e.key === "Escape") {
+                if (!$("mmEdit").classList.contains("hide")) closeEdit();
+                else if (!$("mmPreview").classList.contains("hide")) closePreview();
+            }
+        });
+
+        // Infinite scroll near bottom
+        window.addEventListener(
+            "scroll",
+            debounce(() => {
+                if (state.loading || state.items.length >= state.total) return;
+                const near =
+                    window.innerHeight + window.scrollY >= document.documentElement.scrollHeight - 400;
+                if (near) loadList({ reset: false });
+            }, 150),
+            { passive: true }
+        );
+
+        window.addEventListener("beforeunload", () => {
+            if (typeof LMW.revokeAllBlobUrls === "function") LMW.revokeAllBlobUrls();
+        });
+    }
+
+    async function main() {
+        await waitGReady();
+        bind();
+        await checkHealth();
+        await loadTagOptions();
+        await loadList({ reset: true });
+    }
+
+    if (document.readyState === "loading") {
+        document.addEventListener("DOMContentLoaded", main);
+    } else {
+        main();
+    }
+})();

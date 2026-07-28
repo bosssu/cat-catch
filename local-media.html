@@ -66,22 +66,28 @@
   <!-- 卡片悬停详情（真实链接等） -->
   <div id="lmCardTip" class="lm-card-tip hide" role="tooltip" aria-hidden="true"></div>
 
-  <!-- m3u8 下载范围（首尾时间，参考 m3u8 解析器） -->
+  <!-- m3u8 下载范围（多组起止时间候选） -->
   <div id="lmRangeModal" class="lm-modal hide" aria-hidden="true">
-    <div class="lm-modal-card" role="dialog" aria-labelledby="lmRangeTitle">
+    <div class="lm-modal-card lm-range-card" role="dialog" aria-labelledby="lmRangeTitle">
       <div class="lm-modal-head" id="lmRangeTitle">m3u8 截取范围（可多段）</div>
-      <div class="lm-modal-hint" id="lmRangeHint" style="font-size:12px;opacity:.85;margin:4px 0 8px;line-height:1.4;">
-        同一视频可截多段。换一组起止时间再入库；与已入库完全相同的时间段会提示「重复」。
+      <div class="lm-modal-hint" id="lmRangeHint">
+        填写一组起止时间后点「添加」加入候选；可添加多组，每组入库为独立条目。完全相同的时间段会提示「重复」。候选为空时按「完整片」处理。
       </div>
-      <p class="lm-modal-desc">设置首尾时间（默认完整：开头 → 结尾）。格式 <code>HH:MM:SS</code> 或 <code>MM:SS</code> / 秒数。</p>
+      <p class="lm-modal-desc">格式 <code>HH:MM:SS</code> / <code>MM:SS</code> / 秒数。结束时间留空 = 到末尾。</p>
       <div class="lm-modal-url" id="lmRangeUrl"></div>
-      <div class="lm-modal-fields">
+      <div class="lm-modal-fields lm-range-inputs">
         <label>开始时间
           <input type="text" id="lmRangeStart" spellcheck="false" placeholder="00:00:00" />
         </label>
         <label>结束时间
           <input type="text" id="lmRangeEnd" spellcheck="false" placeholder="结尾（留空=到末尾）" />
         </label>
+        <button type="button" id="lmRangeAdd" class="button2 lm-range-add-btn">添加</button>
+      </div>
+      <div class="lm-range-list-wrap">
+        <div class="lm-range-list-head">候选时间段 <span id="lmRangeCount" class="lm-range-count">0</span></div>
+        <ul id="lmRangeList" class="lm-range-list" aria-label="候选时间段"></ul>
+        <div id="lmRangeListEmpty" class="lm-range-list-empty">暂无候选 · 直接确定 = 完整片</div>
       </div>
       <div class="lm-modal-actions">
         <button type="button" id="lmRangeCancel" class="button2">取消</button>

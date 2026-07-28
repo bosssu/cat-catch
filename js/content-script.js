@@ -279,7 +279,7 @@
         fd.append("remux", "1");
         if (payload.tags) {
             const tags = Array.isArray(payload.tags) ? payload.tags : String(payload.tags).split(/[,，\s]+/);
-            const cleaned = tags.map((t) => String(t).trim()).filter(Boolean).slice(0, 5);
+            const cleaned = tags.map((t) => String(t).trim()).filter(Boolean);
             if (cleaned.length) fd.append("tags", JSON.stringify(cleaned));
         }
         const name = filename || `${(title || document.title || "capture").slice(0, 40)}.bin`;
@@ -310,7 +310,7 @@
         fd.append("source_url", source_url || location.href || "");
         if (payload.tags) {
             const tags = Array.isArray(payload.tags) ? payload.tags : String(payload.tags).split(/[,，\s]+/);
-            const cleaned = tags.map((t) => String(t).trim()).filter(Boolean).slice(0, 5);
+            const cleaned = tags.map((t) => String(t).trim()).filter(Boolean);
             if (cleaned.length) fd.append("tags", JSON.stringify(cleaned));
         }
         const baseName = (filename || title || document.title || "capture").replace(/\.[^.]+$/, "");

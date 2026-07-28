@@ -4,6 +4,8 @@
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <title>入库标签</title>
+  <script src="js/init.js"></script>
+  <script src="js/local-media-web.js"></script>
   <style>
     * { box-sizing: border-box; }
     html, body {
@@ -41,6 +43,7 @@
       border: 1px solid rgba(120, 160, 255, 0.35);
       font-size: 12px;
     }
+    .chip .cnt { opacity: 0.55; font-size: 10px; }
     .chip button {
       border: 0;
       background: transparent;
@@ -64,7 +67,8 @@
     }
     .sug:hover { border-color: rgba(120, 160, 255, 0.7); background: rgba(90, 130, 255, 0.28); }
     .sug.on { background: rgba(90, 130, 255, 0.4); border-color: rgba(120, 160, 255, 0.8); }
-    .sug:disabled { opacity: 0.45; cursor: not-allowed; }
+    .sug .cnt { opacity: 0.55; font-size: 10px; margin-left: 4px; }
+    .input-wrap { position: relative; margin-top: 4px; }
     input[type="text"] {
       width: 100%;
       padding: 9px 11px;
@@ -73,10 +77,40 @@
       background: #0e0e14;
       color: #fff;
       outline: none;
-      margin-top: 4px;
     }
     input[type="text"]:focus { border-color: rgba(90, 140, 255, 0.7); }
+    .ac {
+      position: absolute;
+      left: 0;
+      right: 0;
+      top: 100%;
+      margin: 2px 0 0;
+      padding: 4px 0;
+      max-height: 180px;
+      overflow: auto;
+      background: #16161f;
+      border: 1px solid rgba(255,255,255,.16);
+      border-radius: 8px;
+      z-index: 20;
+      box-shadow: 0 8px 24px rgba(0,0,0,.45);
+      display: none;
+    }
+    .ac.show { display: block; }
+    .ac-item {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 8px;
+      padding: 7px 12px;
+      font-size: 13px;
+      cursor: pointer;
+      color: #e8eefc;
+    }
+    .ac-item:hover, .ac-item.active { background: rgba(90, 130, 255, 0.28); }
+    .ac-item .ac-cnt { font-size: 11px; opacity: 0.55; }
     .hint { font-size: 11px; opacity: 0.7; margin-top: 6px; }
+    .lib-hint { font-size: 11px; opacity: 0.65; margin-top: 2px; }
+    .soft { font-size: 11px; color: #9cf; min-height: 0; margin-top: 4px; }
     .err { font-size: 11px; color: #f88; min-height: 16px; margin-top: 4px; }
     .actions {
       display: flex;
@@ -103,12 +137,17 @@
   <div class="wrap">
     <h1 id="heading">入库详情</h1>
     <div class="meta" id="meta">加载中…</div>
-    <div class="label">已选标签（最多 5 个）</div>
+    <div class="label">已选标签</div>
     <div class="row" id="chips"></div>
-    <div class="hint">建议标签（点击添加 / 再点取消）</div>
+    <div class="hint">建议标签（规则 + 标签库 · 点击添加）</div>
     <div class="row" id="sug"></div>
-    <div class="hint">或手动输入后回车添加</div>
-    <input type="text" id="input" placeholder="例如: anime, 1080p" maxlength="64" autocomplete="off" spellcheck="false" />
+    <div class="lib-hint" id="libHint">标签库加载中…</div>
+    <div class="hint">输入联想库内标签 · ↑↓ 选择 · Enter/Tab 确认</div>
+    <div class="input-wrap">
+      <input type="text" id="input" placeholder="例如: anime, 1080p" maxlength="64" autocomplete="off" spellcheck="false" />
+      <div class="ac" id="ac" role="listbox"></div>
+    </div>
+    <div class="soft" id="soft"></div>
     <div class="err" id="err"></div>
     <div class="actions">
       <button type="button" class="btn-cancel" id="btnCancel">取消</button>

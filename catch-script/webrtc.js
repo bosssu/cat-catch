@@ -312,11 +312,11 @@
             if (!window.confirm(`确认将 WebRTC 录制入库到媒体库？\n约 ${sizeMb} MB · ${ext}`)) {
                 tips(doDownload ? "已下载，已取消入库" : "已取消入库");
             } else {
-                const tagRaw = window.prompt("标签（最多5个，逗号分隔；取消=中止）", "video, webrtc");
+                const tagRaw = window.prompt("标签（逗号分隔；取消=中止）", "video, webrtc");
                 if (tagRaw === null) {
                     tips("已取消入库");
                 } else {
-                const tags = String(tagRaw).split(/[,，;；\s]+/).map((s) => s.trim().toLowerCase()).filter(Boolean).slice(0, 5);
+                const tags = String(tagRaw).split(/[,，;；\s]+/).map((s) => s.trim().toLowerCase()).filter(Boolean);
                 tips("正在入库…");
                 catCatchIngestBlob(blob, {
                     filename: `${title}.${ext}`,

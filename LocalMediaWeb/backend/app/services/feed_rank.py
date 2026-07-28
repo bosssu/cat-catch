@@ -9,6 +9,7 @@ from datetime import datetime, timezone
 
 from app.models.entities import MediaItem
 from app.services.tags import (
+    canonical_tag,
     strong_tags,
     tag_idf_weights,
     tags_from_json,
@@ -254,3 +255,50 @@ def rank_similar(
             break
         out.append(m)
     return out
+
+
+def rank_by_tag(
+    items: list[MediaItem],
+    tag: str,
+    limit: int = 30,
+    *,
+    exclude_id: int | None = None,
+) -> list[MediaItem]:
+    """
+    Similar-by-tag: only items that carry `tag`, ordered by
+    recency + light personal score (not full multi-tag jaccard).
+    """
+    t = canonical_tag(tag or "")
+    if not t:
+        return []
+    now = time.time()
+    scored: list[tuple[float, MediaItem]] = []
+    for m in items:
+        if exclude_id is not None and m.id == exclude_id:
+            continue
+        mt = _tags(m)
+        if t not in mt:
+            continue
+        created = _ts(getattr(m, "created_at", None))
+        age_days = max(0.0, (now - created) / 86400.0) if created else 30.0
+        recency = 80.0 * math.exp(-age_days / 21.0)
+        # id as stable tie-break toward newer rows
+        id_boost = min(40.0, float(m.id or 0) * 0.001)
+        personal = min(SIMILAR_PERSONAL_CAP, max(0.0, score_item(m, now) * 0.05))
+        # Prefer items where this tag is "strong" content (not alone with only weak tags)
+        strong = strong_tags(mt)
+        purity = 18.0 if t in strong else 6.0
+        s = recency + id_boost + personal + purity + shared_bonus(mt, t)
+        scored.append((s, m))
+    scored.sort(key=lambda x: x[0], reverse=True)
+    return [m for _, m in scored[:limit]]
+
+
+def shared_bonus(tags: list[str], focus: str) -> float:
+    """Slight boost when the focus tag is among few strong tags (more on-topic)."""
+    st = strong_tags(tags)
+    if focus in st and len(st) <= 2:
+        return 12.0
+    if focus in st:
+        return 4.0
+    return 0.0

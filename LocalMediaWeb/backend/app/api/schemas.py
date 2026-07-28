@@ -91,8 +91,21 @@ class TagsBatchUpdate(BaseModel):
     mode: Literal["replace", "merge"] = "merge"
 
 
+class MediaDeleteBatch(BaseModel):
+    ids: list[int] = Field(default_factory=list)
+
+
+class MediaPatch(BaseModel):
+    """Partial update for a single media item."""
+    title: str | None = None
+    tags: list[str] | None = None
+
+
 class TagSuggestRequest(BaseModel):
     title: str = ""
     url: str = ""
     media_type: str = ""
     source_page: str = ""
+    # optional autocomplete query (when set, also returns `matches`)
+    query: str = ""
+    limit: int = 12

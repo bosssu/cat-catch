@@ -27,7 +27,7 @@ class MediaItem(Base):
     thumb_rel: Mapped[str] = mapped_column(String(1024), default="")
     partial: Mapped[bool] = mapped_column(Boolean, default=False)
     warning: Mapped[str] = mapped_column(Text, default="")
-    # JSON array string, e.g. ["video","bilibili"] — max 5 tags (app layer)
+    # JSON array string, e.g. ["video","bilibili"] — unlimited tags (app layer normalize)
     tags_json: Mapped[str] = mapped_column(Text, default="[]")
     # Feed / personalization (single-user LAN; "like" ≈ favorite)
     liked: Mapped[bool] = mapped_column(Boolean, default=False, index=True)

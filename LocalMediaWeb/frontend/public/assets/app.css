@@ -141,33 +141,19 @@ button { cursor: pointer; }
   background: transparent;
   color: var(--fg);
   font-size: 13px;
-  padding: 6px 4px;
-  min-width: 72px;
+  font-weight: 600;
+  padding: 6px 18px 6px 4px;
+  min-width: 88px;
   outline: none;
+  cursor: pointer;
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='12' viewBox='0 0 24 24' fill='none' stroke='%23aab' stroke-width='2'%3E%3Cpath d='M6 9l6 6 6-6'/%3E%3C/svg%3E");
+  background-repeat: no-repeat;
+  background-position: right 2px center;
 }
 .select-wrap select option { background: #1a1a24; color: #fff; }
-
-.nav-filter-btn {
-  appearance: none;
-  border: 1px solid var(--card-border);
-  background: var(--bg-elevated);
-  color: var(--fg);
-  font-size: 13px;
-  font-weight: 600;
-  padding: 8px 14px;
-  border-radius: 999px;
-  cursor: pointer;
-  backdrop-filter: blur(12px);
-  -webkit-backdrop-filter: blur(12px);
-}
-.nav-filter-btn:hover {
+.nav-filters .select-wrap:hover {
   border-color: rgba(120, 160, 255, 0.45);
-  background: rgba(80, 120, 220, 0.18);
-}
-.nav-filter-btn.is-active {
-  border-color: rgba(120, 160, 255, 0.55);
-  background: rgba(80, 120, 220, 0.28);
-  color: #dce8ff;
+  background: rgba(80, 120, 220, 0.12);
 }
 
 /* —— Views —— */
@@ -229,6 +215,60 @@ button { cursor: pointer; }
   -webkit-user-drag: none;
   pointer-events: none; /* 事件落到 stage，双触更稳 */
   transform-origin: center center;
+}
+
+/* 中央暂停/播放：默认隐藏，单击画面与进度条一同显示 */
+.media-play-toggle {
+  position: absolute;
+  left: 50%;
+  top: 50%;
+  z-index: 9;
+  width: 72px;
+  height: 72px;
+  margin: 0;
+  padding: 0;
+  border: none;
+  border-radius: 50%;
+  transform: translate(-50%, -50%) scale(0.88);
+  background: rgba(0, 0, 0, 0.42);
+  color: #fff;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  cursor: pointer;
+  opacity: 0;
+  pointer-events: none;
+  backdrop-filter: blur(4px);
+  -webkit-backdrop-filter: blur(4px);
+  box-shadow: 0 4px 24px rgba(0, 0, 0, 0.35);
+  transition: opacity 0.22s ease, transform 0.22s ease, background 0.15s ease;
+  -webkit-tap-highlight-color: transparent;
+}
+.media-play-toggle svg {
+  width: 34px;
+  height: 34px;
+  display: block;
+  margin-left: 0;
+}
+/* play triangle optical center */
+.media-play-toggle.is-paused svg {
+  margin-left: 3px;
+}
+.media-play-toggle.is-visible {
+  opacity: 1;
+  pointer-events: auto;
+  transform: translate(-50%, -50%) scale(1);
+}
+.media-play-toggle:hover {
+  background: rgba(0, 0, 0, 0.55);
+}
+.media-play-toggle:active {
+  transform: translate(-50%, -50%) scale(0.94);
+  background: rgba(0, 0, 0, 0.6);
+}
+body.is-chrome-hidden .media-play-toggle {
+  opacity: 0 !important;
+  pointer-events: none !important;
 }
 
 /* Feed 进度条：默认隐藏，单击显示，idle 后收起
@@ -360,21 +400,38 @@ body.is-chrome-hidden .lmw-toast {
 .hud .meta {
   max-width: min(72%, 480px);
   word-break: break-word;
+  /* meta stays none so empty padding doesn't block stage taps */
+  pointer-events: none;
 }
 .hud .type {
   display: inline-flex;
   flex-wrap: wrap;
   gap: 6px;
   align-items: center;
+  /* re-enable only the chip row so #tags are clickable */
+  pointer-events: auto;
   color: rgba(255,255,255,0.65);
   font-size: 12px;
   margin-bottom: 6px;
+}
+.hud .type .chip:not(button) {
+  pointer-events: none;
+}
+.hud .type button.chip.tag {
+  pointer-events: auto;
+  position: relative;
+  z-index: 2;
 }
 .hud .title {
   font-size: 15px;
   font-weight: 600;
   line-height: 1.35;
   text-shadow: 0 1px 8px rgba(0,0,0,0.5);
+  /* 左下角标题：超长省略尾部 */
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 .hud .stats {
   display: flex;
@@ -399,7 +456,29 @@ body.is-chrome-hidden .lmw-toast {
   color: rgba(255,255,255,0.85);
 }
 .chip.warn { background: rgba(255, 170, 80, 0.25); color: #ffd09a; }
-.chip.tag { background: rgba(100, 140, 255, 0.22); color: #c8d8ff; }
+.chip.tag {
+  appearance: none;
+  border: 1px solid transparent;
+  background: rgba(100, 140, 255, 0.22);
+  color: #c8d8ff;
+  cursor: pointer;
+  font: inherit;
+  line-height: inherit;
+  margin: 0;
+  transition: background 0.15s, border-color 0.15s, transform 0.1s;
+}
+button.chip.tag:hover {
+  background: rgba(120, 160, 255, 0.38);
+  border-color: rgba(160, 190, 255, 0.45);
+}
+button.chip.tag:active {
+  transform: scale(0.97);
+}
+button.chip.tag.is-active {
+  background: rgba(120, 160, 255, 0.48);
+  border-color: rgba(180, 200, 255, 0.65);
+  color: #eef3ff;
+}
 
 .admin-check {
   display: flex;

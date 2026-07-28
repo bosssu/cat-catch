@@ -524,19 +524,66 @@
         return s.split(":").reduce((acc, t) => 60 * acc + (+t || 0), 0);
     }
 
-    function formatRangeLabel(it) {
-        if (!it) return "";
-        const a = it._startSec;
-        const b = it._endSec;
-        if ((a == null || a === 0) && (b == null || b === "" || b <= 0)) return "";
-        const left = typeof secToTime === "function" ? secToTime(a || 0) : String(a || 0);
+    function formatOneRange(r) {
+        if (!r) return "";
+        const a = r.startSec;
+        const b = r.endSec;
+        if ((a == null || a === 0) && (b == null || b === "" || !(b > 0))) {
+            // full clip still shown when explicitly in list
+            if (r.full) return "完整片";
+        }
+        const left =
+            r.startStr ||
+            (typeof secToTime === "function" ? secToTime(a || 0) : String(a || 0));
         const right =
             b != null && b > 0
-                ? typeof secToTime === "function"
-                    ? secToTime(b)
-                    : String(b)
+                ? r.endStr ||
+                  (typeof secToTime === "function" ? secToTime(b) : String(b))
                 : "末尾";
         return left + " → " + right;
+    }
+
+    function getItemRanges(it) {
+        if (!it) return [];
+        if (Array.isArray(it._ranges) && it._ranges.length) return it._ranges.slice();
+        // legacy single range
+        if (it._startSec != null || (it._endSec != null && it._endSec > 0)) {
+            return [
+                {
+                    startSec: it._startSec || 0,
+                    endSec: it._endSec != null && it._endSec > 0 ? it._endSec : null,
+                    startStr: it._startTimeStr || "",
+                    endStr: it._endTimeStr || "",
+                },
+            ];
+        }
+        return [];
+    }
+
+    function syncLegacyRangeFields(it) {
+        const ranges = getItemRanges(it);
+        if (!ranges.length) {
+            it._startSec = null;
+            it._endSec = null;
+            it._startTimeStr = "";
+            it._endTimeStr = "";
+            return;
+        }
+        const first = ranges[0];
+        it._startSec = first.startSec != null ? first.startSec : 0;
+        it._endSec = first.endSec != null && first.endSec > 0 ? first.endSec : null;
+        it._startTimeStr = first.startStr || "";
+        it._endTimeStr = first.endStr || "";
+    }
+
+    function formatRangeLabel(it) {
+        if (!it) return "";
+        const ranges = getItemRanges(it);
+        if (!ranges.length) return "";
+        if (ranges.length === 1) return formatOneRange(ranges[0]);
+        const parts = ranges.map(formatOneRange).filter(Boolean);
+        if (parts.length <= 2) return parts.join(" · ");
+        return parts[0] + " 等" + parts.length + "段";
     }
 
     function updateRangeBadge($card, it) {
@@ -544,32 +591,114 @@
         $card.find(".lm-range-badge").remove();
         const label = formatRangeLabel(it);
         if (label) {
-            $card.append($("<span class='lm-range-badge'/>").text(label).attr("title", "m3u8 下载范围"));
+            const full = getItemRanges(it).map(formatOneRange).join("\n");
+            $card.append(
+                $("<span class='lm-range-badge'/>")
+                    .text(label)
+                    .attr("title", "m3u8 下载范围\n" + full)
+            );
         }
     }
 
     /**
-     * 选中 m3u8 时弹出首尾时间（参考 m3u8.html rangeStart/rangeEnd）。
-     * 确定后写入 it._startSec / it._endSec；取消则不选中。
+     * 选中 m3u8 时弹出多组起止时间对话框。
+     * 填写一组 → 添加 → 候选列表；确定后写入 it._ranges（及兼容 _startSec/_endSec）。
+     * 候选为空 = 完整片。取消则不选中。
      */
     function promptM3u8Range(it) {
         return new Promise((resolve) => {
             const $m = $("#lmRangeModal");
             const $start = $("#lmRangeStart");
             const $end = $("#lmRangeEnd");
+            const $list = $("#lmRangeList");
+            const $empty = $("#lmRangeListEmpty");
+            const $count = $("#lmRangeCount");
             $("#lmRangeUrl").text(it.url || "");
-            // 提示：同一 m3u8 不同时间段可多次入库；完全相同的起止会显示「重复」
-            const $hint = $("#lmRangeHint");
-            if ($hint.length) {
-                $hint.text(
-                    "同一视频可截多段。换一组起止时间再入库；与已入库完全相同的时间段会提示「重复」。"
-                );
-            }
-            const defStart =
-                it._startTimeStr ||
-                (typeof secToTime === "function" ? secToTime(it._startSec || 0) : "00:00:00");
-            $start.val(defStart || "00:00:00");
-            $end.val(it._endTimeStr || (it._endSec > 0 ? (typeof secToTime === "function" ? secToTime(it._endSec) : String(it._endSec)) : ""));
+
+            /** @type {{startSec:number,endSec:number|null,startStr:string,endStr:string}[]} */
+            let draft = getItemRanges(it).map((r) => ({
+                startSec: r.startSec != null ? r.startSec : 0,
+                endSec: r.endSec != null && r.endSec > 0 ? r.endSec : null,
+                startStr: r.startStr || "",
+                endStr: r.endStr || "",
+            }));
+
+            const rangeKey = (r) => {
+                const a = r.startSec != null ? +r.startSec : 0;
+                const b = r.endSec != null && r.endSec > 0 ? +r.endSec : -1;
+                return a + "|" + b;
+            };
+
+            const renderList = () => {
+                $list.empty();
+                draft.forEach((r, idx) => {
+                    const $li = $("<li class='lm-range-item'/>");
+                    $li.append($("<span class='lm-range-item-idx'/>").text(idx + 1 + "."));
+                    $li.append($("<span class='lm-range-item-label'/>").text(formatOneRange(r)));
+                    $li.append(
+                        $("<button type='button' class='lm-range-item-x' title='删除此段'/>")
+                            .text("×")
+                            .on("click", (e) => {
+                                e.preventDefault();
+                                e.stopPropagation();
+                                draft.splice(idx, 1);
+                                renderList();
+                            })
+                    );
+                    $list.append($li);
+                });
+                $count.text(String(draft.length));
+                $empty.toggleClass("show", draft.length === 0);
+            };
+
+            const readInputRange = () => {
+                const startStr = String($start.val() || "").trim() || "00:00:00";
+                const endStr = String($end.val() || "").trim();
+                const startSec = parseTimeToSeconds(startStr) || 0;
+                let endSec = parseTimeToSeconds(endStr);
+                if (endSec != null && endSec > 0 && endSec <= startSec) {
+                    setStatus("结束时间须大于开始时间");
+                    return null;
+                }
+                if (endSec != null && !(endSec > 0)) endSec = null;
+                return {
+                    startSec,
+                    endSec,
+                    startStr,
+                    endStr,
+                };
+            };
+
+            const tryAddFromInputs = ({ clearOnSuccess } = { clearOnSuccess: true }) => {
+                const r = readInputRange();
+                if (!r) return false;
+                // 若输入全是默认开头且结束为空，且已有候选，则不重复加「完整片」
+                const isDefaultFull =
+                    (r.startSec === 0 || !r.startSec) &&
+                    (r.endSec == null || !(r.endSec > 0));
+                if (isDefaultFull && draft.length > 0) {
+                    // 用户可能只想点确定，不强制加
+                    return true;
+                }
+                const key = rangeKey(r);
+                if (draft.some((x) => rangeKey(x) === key)) {
+                    setStatus("该时间段已在候选中");
+                    return false;
+                }
+                draft.push(r);
+                renderList();
+                if (clearOnSuccess) {
+                    $start.val("00:00:00");
+                    $end.val("");
+                    setTimeout(() => $start.trigger("focus").select(), 20);
+                }
+                setStatus("已添加候选 " + formatOneRange(r));
+                return true;
+            };
+
+            $start.val("00:00:00");
+            $end.val("");
+            renderList();
             $m.removeClass("hide").attr("aria-hidden", "false");
             setTimeout(() => $start.trigger("focus").select(), 30);
 
@@ -577,25 +706,46 @@
                 $m.addClass("hide").attr("aria-hidden", "true");
                 $("#lmRangeOk").off("click.range");
                 $("#lmRangeCancel").off("click.range");
+                $("#lmRangeAdd").off("click.range");
                 $m.off("click.range");
                 $(document).off("keydown.range");
             };
             const finish = (ok) => {
                 if (ok) {
-                    const startSec = parseTimeToSeconds($start.val()) || 0;
-                    let endSec = parseTimeToSeconds($end.val());
-                    if (endSec != null && endSec > 0 && endSec <= startSec) {
-                        setStatus("结束时间须大于开始时间");
-                        return;
+                    // 若输入框里还有有效一段且不在列表中，自动并入
+                    const pending = readInputRange();
+                    if (pending) {
+                        const isDefaultFull =
+                            (pending.startSec === 0 || !pending.startSec) &&
+                            (pending.endSec == null || !(pending.endSec > 0));
+                        if (!isDefaultFull || draft.length === 0) {
+                            const key = rangeKey(pending);
+                            if (!draft.some((x) => rangeKey(x) === key)) {
+                                if (!isDefaultFull) draft.push(pending);
+                            }
+                        }
                     }
-                    it._startSec = startSec;
-                    it._endSec = endSec != null && endSec > 0 ? endSec : null;
-                    it._startTimeStr = String($start.val() || "").trim() || "00:00:00";
-                    it._endTimeStr = String($end.val() || "").trim();
+                    // draft 空 = 完整片（不写 clip）
+                    it._ranges = draft.map((r) => ({
+                        startSec: r.startSec,
+                        endSec: r.endSec,
+                        startStr: r.startStr,
+                        endStr: r.endStr,
+                    }));
+                    syncLegacyRangeFields(it);
+                    if (!it._ranges.length) {
+                        it._startSec = null;
+                        it._endSec = null;
+                        it._startTimeStr = "";
+                        it._endTimeStr = "";
+                    }
                 }
                 cleanup();
                 resolve(!!ok);
             };
+            $("#lmRangeAdd").on("click.range", () => {
+                tryAddFromInputs({ clearOnSuccess: true });
+            });
             $("#lmRangeOk").on("click.range", () => finish(true));
             $("#lmRangeCancel").on("click.range", () => finish(false));
             $m.on("click.range", (e) => {
@@ -605,7 +755,17 @@
                 if (e.key === "Escape") finish(false);
                 if (e.key === "Enter" && !e.shiftKey) {
                     e.preventDefault();
-                    finish(true);
+                    // Enter：有内容时优先「添加」，否则确定
+                    const endFilled = String($end.val() || "").trim();
+                    const startRaw = String($start.val() || "").trim();
+                    const wantsAdd =
+                        endFilled ||
+                        (startRaw && startRaw !== "00:00:00" && startRaw !== "0");
+                    if (wantsAdd) {
+                        tryAddFromInputs({ clearOnSuccess: true });
+                    } else {
+                        finish(true);
+                    }
                 }
             });
         });
@@ -1058,8 +1218,17 @@
         if (it.thumb && it.thumb !== it.url) $tip.append(row("封面", it.thumb, true));
         if (ref) $tip.append(row("Referer", ref, true));
         $tip.append(row("Cookie", hasCookie ? "有" : "无"));
-        const rangeLabel = formatRangeLabel(it);
-        if (rangeLabel) $tip.append(row("下载范围", rangeLabel));
+        const ranges = getItemRanges(it);
+        if (ranges.length) {
+            $tip.append(
+                row(
+                    "下载范围",
+                    ranges.length === 1
+                        ? formatOneRange(ranges[0])
+                        : ranges.map((r, i) => i + 1 + ". " + formatOneRange(r)).join(" | ")
+                )
+            );
+        }
         const $acts = $("<div class='tip-actions'/>");
         if (type === "m3u8") {
             $acts.append(
@@ -1071,7 +1240,12 @@
                         const ok = await promptM3u8Range(it);
                         if (ok) {
                             updateRangeBadge($card, it);
-                            setStatus("已保存范围 " + (formatRangeLabel(it) || "完整"));
+                            const n = getItemRanges(it).length;
+                            setStatus(
+                                n
+                                    ? "已保存 " + n + " 个时间段 · " + (formatRangeLabel(it) || "")
+                                    : "已设为完整片"
+                            );
                         }
                     })
             );
@@ -2536,23 +2710,42 @@
             return;
         }
         const tags = dlg.tags || [];
-        setStatus(`提交 ${chosen.length} 项…${tags.length ? " 标签 " + tags.join(",") : ""}`);
         try {
             const payload = [];
+            let clipCount = 0;
             for (const it of chosen) {
-                const row = await LMW.itemToIngest(it, pageUrl, tags);
-                if (it._headers) row.headers = Object.assign({}, row.headers, it._headers);
-                if (it._startSec != null) row.start_sec = it._startSec;
-                if (it._endSec != null && it._endSec > 0) row.end_sec = it._endSec;
-                payload.push(row);
+                const ranges = getItemRanges(it);
+                // 无候选 = 完整片 1 条；多段 = 每段各 1 条入库任务
+                const clips =
+                    ranges.length > 0
+                        ? ranges
+                        : [{ startSec: null, endSec: null, startStr: "", endStr: "" }];
+                for (const r of clips) {
+                    const row = await LMW.itemToIngest(it, pageUrl, tags);
+                    if (it._headers) row.headers = Object.assign({}, row.headers, it._headers);
+                    const hasStart = r.startSec != null && !Number.isNaN(+r.startSec);
+                    const hasEnd = r.endSec != null && +r.endSec > 0;
+                    if (hasStart || hasEnd) {
+                        row.start_sec = hasStart ? Math.max(0, +r.startSec) : 0;
+                        if (hasEnd) row.end_sec = +r.endSec;
+                        clipCount++;
+                    }
+                    payload.push(row);
+                }
             }
+            setStatus(
+                `提交 ${payload.length} 项…` +
+                    (clipCount ? `（含 ${clipCount} 个时间段）` : "") +
+                    (tags.length ? " 标签 " + tags.join(",") : "")
+            );
             const result = await LMW.pushItems(payload, "default", { tags });
             const rangeHints = chosen
                 .map((it) => formatRangeLabel(it))
                 .filter(Boolean)
                 .join("；");
             let msg =
-                `完成: 成功 ${result.success || 0}, 重复 ${result.duplicates || 0}, 回退上传 ${result.fallbackOk || 0}, 失败 ${result.failed || 0}`;
+                `完成: 成功 ${result.success || 0}, 重复 ${result.duplicates || 0}, 回退上传 ${result.fallbackOk || 0}, 失败 ${result.failed || 0}` +
+                `（任务 ${payload.length}）`;
             if (result.duplicates > 0) {
                 msg +=
                     "（「重复」= 同一链接+相同起止时间段已入库；要截另一段请改时间后重选再提交）";

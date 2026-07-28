@@ -5,8 +5,10 @@
   const soundKey = "lmw_want_sound";
   const state = {
     view: "feed",
-    mode: localStorage.getItem(feedModeKey) || "recommend",
+    mode: localStorage.getItem(feedModeKey) || "random",
     similarTo: null,
+    /** when mode=similar and set, rank by this tag (not whole media) */
+    similarTag: null,
     items: [],
     feedIndex: 0,
     dwellStart: 0,
@@ -15,8 +17,16 @@
     libFp: "",
     libPollTimer: null,
     libRefreshing: false,
+    /** tail prefetch in flight */
+    feedPrefetching: false,
+    /** true when library grew; next prefetch will pull new items */
+    libDirty: false,
     /** first load muted; becomes true after user unmutes */
     wantSound: sessionStorage.getItem(soundKey) === "1",
+    /** currently active feed slide id (string); exclusivity for video audio */
+    activeFeedId: null,
+    /** monotinic token so stale play/load races abort */
+    playEpoch: 0,
   };
 
   const ICO = {
@@ -27,6 +37,10 @@
     x: `<svg viewBox="0 0 24 24" aria-hidden="true"><path fill="currentColor" d="M18.3 5.71L12 12l6.3 6.29-1.41 1.42L10.59 13.4 4.3 19.71 2.89 18.3 9.17 12 2.89 5.71 4.3 4.29l6.29 6.3 6.29-6.3z"/></svg>`,
     volOn: `<svg viewBox="0 0 24 24" aria-hidden="true"><path fill="currentColor" d="M3 9v6h4l5 5V4L7 9H3zm13.5 3c0-1.77-1.02-3.29-2.5-4.03v8.05c1.48-.73 2.5-2.25 2.5-4.02zM14 3.23v2.06c2.89.86 5 3.54 5 6.71s-2.11 5.85-5 6.71v2.06c4.01-.91 7-4.49 7-8.77s-2.99-7.86-7-8.77z"/></svg>`,
     volOff: `<svg viewBox="0 0 24 24" aria-hidden="true"><path fill="currentColor" d="M16.5 12c0-1.77-1.02-3.29-2.5-4.03v2.21l2.45 2.45c.03-.2.05-.41.05-.63zm2.5 0c0 .94-.2 1.82-.54 2.64l1.51 1.51C20.63 14.91 21 13.5 21 12c0-4.28-2.99-7.86-7-8.77v2.06c2.89.86 5 3.54 5 6.71zM4.27 3L3 4.27 7.73 9H3v6h4l5 5v-6.73l4.25 4.25c-.67.52-1.42.93-2.25 1.18v2.06a8.99 8.99 0 003.69-1.81L19.73 21 21 19.73l-9-9L4.27 3zM12 4L9.91 6.09 12 8.18V4z"/></svg>`,
+    /** center overlay: pause while playing */
+    pause: `<svg viewBox="0 0 24 24" aria-hidden="true"><path fill="currentColor" d="M6 5h4v14H6V5zm8 0h4v14h-4V5z"/></svg>`,
+    /** center overlay: play while paused */
+    play: `<svg viewBox="0 0 24 24" aria-hidden="true"><path fill="currentColor" d="M8 5v14l11-7L8 5z"/></svg>`,
   };
 
   function setWantSound(on) {
@@ -115,9 +129,12 @@
 
   function setChromeHidden(on) {
     document.body.classList.toggle("is-chrome-hidden", !!on);
-    // drop visible progress when entering immersive
+    // drop visible progress / center play when entering immersive
     if (on) {
       document.querySelectorAll(".feed-progress.is-visible").forEach((el) => {
+        el.classList.remove("is-visible");
+      });
+      document.querySelectorAll(".media-play-toggle.is-visible").forEach((el) => {
         el.classList.remove("is-visible");
       });
     }
@@ -234,115 +251,357 @@
     );
   }
 
-  async function loadFeed(opts = {}) {
-    const keepId = opts.keepCurrentId;
-    const quiet = !!opts.quiet;
-    if (!quiet) clearChromeHidden();
-    const q = new URLSearchParams({
-      mode: state.mode || "recommend",
-      limit: "80",
-    });
-    if (state.mode === "similar" && state.similarTo) {
-      q.set("similar_to", String(state.similarTo));
-    }
-    const data = await api(`/api/feed?${q}`);
-    state.items = data.items || [];
-    state.viewedIds = new Set();
-    renderFeed();
-    renderGrid();
-    // Soft refresh: try stay on the same item after library grows
-    if (keepId != null) {
-      const idx = state.items.findIndex((x) => x.id === keepId);
-      if (idx >= 0) {
-        state.feedIndex = idx;
-        requestAnimationFrame(() => {
-          const slide = document.querySelector(`.snap-slide[data-id="${keepId}"]`);
-          if (slide) slide.scrollIntoView({ block: "nearest", behavior: "auto" });
-        });
+  function feedModeSelects() {
+    return [$("#feedModeNav"), $("#feedMode")].filter(Boolean);
+  }
+
+  function syncFeedModeSelects() {
+    const v = state.mode || "random";
+    for (const sel of feedModeSelects()) {
+      if ([...sel.options].some((o) => o.value === v)) {
+        sel.value = v;
       }
     }
   }
 
-  function ensureFeedModeOption(value, label) {
-    const modeSel = $("#feedMode");
-    if (!modeSel) return;
-    if (![...modeSel.options].some((o) => o.value === value)) {
-      const opt = document.createElement("option");
-      opt.value = value;
-      opt.textContent = label;
-      modeSel.appendChild(opt);
-    }
-    modeSel.value = value;
+  function playlistIds() {
+    return state.items.map((x) => x.id).filter((id) => id != null);
   }
 
-  function syncSimilarBtn() {
-    const btn = $("#btnSimilar");
-    if (!btn) return;
+  /**
+   * Fetch a ranked batch. exclude playlist so next-decision never repeats
+   * what's already on screen (history + current + queued tail).
+   */
+  async function fetchFeedBatch({ limit = 24, exclude = null, includeSeed = true } = {}) {
+    const q = new URLSearchParams({
+      mode: state.mode || "random",
+      limit: String(limit),
+    });
     if (state.mode === "similar") {
-      btn.textContent = "推荐随机";
-      btn.title = "退出相似推荐，切换为随机 Feed";
-      btn.classList.add("is-active");
+      if (state.similarTag) {
+        q.set("tag", String(state.similarTag));
+      }
+      if (state.similarTo && !state.similarTag) {
+        q.set("similar_to", String(state.similarTo));
+        q.set("include_seed", includeSeed ? "true" : "false");
+      }
+    }
+    const ex = exclude != null ? exclude : playlistIds();
+    if (ex.length) q.set("exclude_ids", ex.join(","));
+    const data = await api(`/api/feed?${q}`);
+    return data.items || [];
+  }
+
+  /**
+   * Hard rebuild of the whole feed (first load / delete / admin rescan).
+   * Prefer softModeSwitch + ensureFeedAhead for mode / library changes.
+   */
+  async function loadFeed(opts = {}) {
+    const keepId = opts.keepCurrentId;
+    const quiet = !!opts.quiet;
+    if (!quiet) clearChromeHidden();
+    const items = await fetchFeedBatch({
+      limit: 40,
+      exclude: keepId != null ? [keepId] : [],
+      includeSeed: true,
+    });
+    // When keeping current, put it first then append ranked others
+    if (keepId != null) {
+      const cur =
+        state.items.find((x) => x.id === keepId) ||
+        items.find((x) => x.id === keepId);
+      const rest = items.filter((x) => x.id !== keepId);
+      if (cur) {
+        state.items = [cur, ...rest];
+      } else {
+        state.items = items;
+      }
     } else {
-      btn.textContent = "推荐相似";
-      btn.title = "根据当前 Feed 媒体的标签推荐相似内容";
-      btn.classList.remove("is-active");
+      state.items = items;
+    }
+    state.viewedIds = new Set();
+    state.feedIndex = 0;
+    if (keepId != null) {
+      const idx = state.items.findIndex((x) => x.id === keepId);
+      if (idx >= 0) state.feedIndex = idx;
+    }
+    renderFeed();
+    renderGrid();
+    if (keepId != null) {
+      requestAnimationFrame(() => {
+        const slide = document.querySelector(`.snap-slide[data-id="${keepId}"]`);
+        if (slide) slide.scrollIntoView({ block: "nearest", behavior: "auto" });
+      });
+    }
+    state.libDirty = false;
+  }
+
+  function _removeSlideEl(el) {
+    if (!el) return;
+    try {
+      state._feedIo?.unobserve(el);
+    } catch (_) {}
+    const v = el.querySelector("video");
+    if (v) silenceFeedVideo(v, { unload: true });
+    el.remove();
+  }
+
+  /** Drop queued slides after the current one (DOM + state). Keeps playing item. */
+  function trimFeedTail() {
+    const keep = Math.max(0, (state.feedIndex | 0) + 1);
+    if (state.items.length <= keep) return;
+    state.items = state.items.slice(0, keep);
+    const scroller = $("#feedScroller");
+    if (!scroller) return;
+    scroller.querySelectorAll(".snap-slide").forEach((el) => {
+      const i = Number(el.dataset.index);
+      if (i >= keep) _removeSlideEl(el);
+    });
+  }
+
+  /**
+   * For ordered modes (recent / liked): drop history above current so the
+   * next batch is true global order, not "whatever is left after a long random run".
+   * Does not remount the current slide (playback continues).
+   */
+  function keepOnlyCurrentSlide() {
+    const cur = currentItem();
+    if (!cur) {
+      trimFeedTail();
+      return;
+    }
+    const scroller = $("#feedScroller");
+    const curEl = scroller && scroller.querySelector(`.snap-slide[data-id="${cur.id}"]`);
+    state.items = [cur];
+    state.feedIndex = 0;
+    if (!scroller || !curEl) {
+      renderFeed();
+      return;
+    }
+    scroller.querySelectorAll(".snap-slide").forEach((el) => {
+      if (el !== curEl) _removeSlideEl(el);
+    });
+    curEl.dataset.index = "0";
+  }
+
+  function slideHtml(item, i) {
+    const liked = item.liked ? "on" : "";
+    const isImg = item.media_type === "image" || item.media_type === "gif";
+    const muteAttr = state.wantSound ? "" : " muted";
+    const poster = !isImg && item.thumb_url ? ` poster="${thumbUrl(item)}"` : "";
+    const media = isImg
+      ? `<img data-src="${fileUrl(item)}" alt="" draggable="false" />`
+      : `<video data-src="${fileUrl(item)}"${poster} playsinline webkit-playsinline${muteAttr} loop preload="metadata"></video>
+          <button type="button" class="media-play-toggle" aria-label="暂停" title="暂停/播放" tabindex="-1">${ICO.pause}</button>
+          <div class="feed-progress" aria-hidden="true">
+            <div class="feed-progress-track">
+              <div class="feed-progress-fill"></div>
+              <div class="feed-progress-knob"></div>
+            </div>
+            <div class="feed-progress-time"><span class="cur">0:00</span><span class="sep">/</span><span class="dur">0:00</span></div>
+          </div>`;
+    return `<section class="snap-slide" data-index="${i}" data-id="${item.id}">
+          <div class="media-stage" title="单击显示进度 · 双击隐藏/恢复界面">${media}</div>
+          <div class="hud">
+            <div class="meta">
+              <div class="type">${typeChip(item)}</div>
+              <div class="title">${escapeHtml(item.title || item.source_url || "未命名")}</div>
+              <div class="stats">
+                <span>${ICO.heart} ${item.like_count || 0}</span>
+                <span>${ICO.eye} ${item.view_count || 0}</span>
+              </div>
+            </div>
+            <div class="actions">
+              <button type="button" class="round mute-btn" data-act="mute" data-id="${item.id}" title="取消静音（播放声音）">${state.wantSound ? ICO.volOn : ICO.volOff}</button>
+              <button type="button" class="round like ${liked}" data-act="like" data-id="${item.id}" title="喜欢 (L)">${ICO.heart}</button>
+              <button type="button" class="round danger" data-act="del" data-id="${item.id}" title="删除">${ICO.trash}</button>
+            </div>
+          </div>
+        </section>`;
+  }
+
+  function bindSlideEl(el, { observe = true } = {}) {
+    if (!el) return;
+    el.querySelectorAll("[data-act]").forEach((btn) => {
+      btn.addEventListener("click", (e) => {
+        e.stopPropagation();
+        handleAction(btn.dataset.act, Number(btn.dataset.id), btn);
+      });
+    });
+    el.querySelectorAll("button.chip.tag[data-tag]").forEach((btn) => {
+      btn.addEventListener("click", (e) => {
+        e.preventDefault();
+        e.stopPropagation();
+        loadSimilarFromTag(btn.dataset.tag);
+      });
+    });
+    const stage = el.querySelector(".media-stage");
+    if (stage) {
+      bindImmersiveToggle(stage);
+      bindFeedProgress(stage);
+    }
+    el.querySelectorAll("video").forEach(applySoundToVideo);
+    el.querySelectorAll("[data-act='mute']").forEach(syncMuteBtn);
+    if (observe) {
+      try {
+        state._feedIo?.observe(el);
+      } catch (_) {}
     }
   }
 
-  async function loadRandomFeed() {
-    state.mode = "random";
-    state.similarTo = null;
-    localStorage.setItem(feedModeKey, "random");
-    ensureFeedModeOption("random", "随机");
-    syncSimilarBtn();
-    showToast("随机推荐");
-    await loadFeed();
-    setView("feed");
+  /** Append ranked items without rebuilding the current slide (no playback interrupt). */
+  function appendFeedItems(items) {
+    if (!items || !items.length) return 0;
+    const scroller = $("#feedScroller");
+    const empty = $("#feedEmpty");
+    if (!scroller) return 0;
+    const have = new Set(playlistIds());
+    const add = items.filter((x) => x && x.id != null && !have.has(x.id));
+    if (!add.length) return 0;
+    if (empty) empty.classList.add("hide");
+    const start = state.items.length;
+    state.items.push(...add);
+    const frag = document.createDocumentFragment();
+    const tmp = document.createElement("div");
+    for (let j = 0; j < add.length; j++) {
+      tmp.innerHTML = slideHtml(add[j], start + j);
+      const el = tmp.firstElementChild;
+      if (el) frag.appendChild(el);
+    }
+    scroller.appendChild(frag);
+    for (let j = 0; j < add.length; j++) {
+      const el = scroller.querySelector(`.snap-slide[data-index="${start + j}"]`);
+      bindSlideEl(el);
+    }
+    return add.length;
+  }
+
+  /**
+   * Ensure enough slides after the current one, ranked by active mode
+   * (instant next-decision; does not touch earlier history).
+   */
+  async function ensureFeedAhead(minAhead = 8) {
+    if (state.feedPrefetching) return;
+    const ahead = state.items.length - (state.feedIndex | 0) - 1;
+    if (ahead >= minAhead && !state.libDirty) return;
+    state.feedPrefetching = true;
+    try {
+      const need = Math.max(12, minAhead - Math.max(0, ahead) + 4);
+      const batch = await fetchFeedBatch({
+        limit: need,
+        exclude: playlistIds(),
+        includeSeed: false,
+      });
+      appendFeedItems(batch);
+      state.libDirty = false;
+    } catch (e) {
+      console.debug("ensureFeedAhead", e);
+    } finally {
+      state.feedPrefetching = false;
+    }
+  }
+
+  /**
+   * Switch mode without rebuilding the playing slide:
+   * keep history + current (or only current for ordered modes),
+   * discard old-mode queue, prefetch new-mode tail.
+   */
+  async function softModeSwitch(mode, { toast, clearSimilar = true } = {}) {
+    const next = mode || "random";
+    state.mode = next;
+    if (next !== "similar" && clearSimilar) {
+      state.similarTo = null;
+      state.similarTag = null;
+    }
+    localStorage.setItem(feedModeKey, next);
+    syncFeedModeSelects();
+
+    // Empty library / first open — hard load
+    if (!state.items.length) {
+      await loadFeed({ quiet: true });
+      if (toast) showToast(toast);
+      return;
+    }
+
+    // recent/liked need a clean stream or "next" is polluted by long random history
+    if (next === "recent" || next === "liked") {
+      keepOnlyCurrentSlide();
+    } else {
+      trimFeedTail();
+    }
+    await ensureFeedAhead(12);
+    if (toast) showToast(toast);
   }
 
   async function loadSimilarFromCurrent() {
     const it = currentItem();
     if (!it) {
-      showToast("暂无当前媒体");
+      showToast("暂无当前媒体，已切回随机");
+      await softModeSwitch("random");
       return;
     }
     const tags = it.tags || [];
     if (!tags.length) {
-      showToast("当前媒体无标签，已按推荐模式刷新");
-      state.mode = "recommend";
-      state.similarTo = null;
-      localStorage.setItem(feedModeKey, state.mode);
-      ensureFeedModeOption(state.mode, "推荐");
-      syncSimilarBtn();
-      await loadFeed();
+      showToast("当前媒体无标签，已切回随机");
+      await softModeSwitch("random");
       return;
     }
-    state.mode = "similar";
     state.similarTo = it.id;
-    localStorage.setItem(feedModeKey, "similar");
-    ensureFeedModeOption("similar", "相似");
-    syncSimilarBtn();
-    showToast(`相似推荐 · 基于 #${it.id} · ${tags.slice(0, 5).join(", ")}`);
-    await loadFeed();
-    setView("feed");
+    state.similarTag = null;
+    await softModeSwitch("similar", {
+      toast: `相似推荐 · 基于 #${it.id} · ${tags.join(", ")}（下一条起生效）`,
+      clearSimilar: false,
+    });
+    if (state.view !== "feed") setView("feed");
   }
 
-  async function toggleSimilarOrRandom() {
-    if (state.mode === "similar") {
-      await loadRandomFeed();
+  /** Click a #tag chip → similar mode ranked by that tag only. */
+  async function loadSimilarFromTag(tag) {
+    const t = String(tag || "")
+      .trim()
+      .toLowerCase()
+      .replace(/^#/, "");
+    if (!t) return;
+    state.similarTag = t;
+    state.similarTo = null;
+    await softModeSwitch("similar", {
+      toast: `相似推荐 · 标签 #${t}（下一条起生效）`,
+      clearSimilar: false,
+    });
+    if (state.view !== "feed") setView("feed");
+  }
+
+  async function applyFeedMode(mode) {
+    const next = mode || "random";
+    if (next === "similar") {
+      // dropdown "相似": media-based if no active tag focus
+      if (state.similarTag) {
+        await softModeSwitch("similar", {
+          toast: `相似推荐 · 标签 #${state.similarTag}（下一条起生效）`,
+          clearSimilar: false,
+        });
+        return;
+      }
+      await loadSimilarFromCurrent();
       return;
     }
-    await loadSimilarFromCurrent();
+    const labels = {
+      random: "随机",
+      recommend: "推荐",
+      recent: "最新",
+      liked: "已喜欢",
+    };
+    await softModeSwitch(next, {
+      toast: `${labels[next] || next} · 下一条起生效`,
+    });
   }
 
   /**
-   * Poll media total + newest id. When a batch finishes on the server,
-   * fingerprint changes → reload feed/grid (and admin list if open).
+   * Library grew/shrank: do NOT rebuild Feed (keeps current playback).
+   * Mark dirty so the next ensureFeedAhead can pull new items.
    */
   async function pollLibraryChange() {
     if (document.hidden || state.libRefreshing) return;
-    // Don't yank the UI while user is in immersive (chrome hidden)
-    if (isChromeHidden()) return;
     try {
       const data = await api("/api/media?limit=1&sort=new");
       const newestId = (data.items && data.items[0] && data.items[0].id) || 0;
@@ -354,20 +613,36 @@
       }
       if (state.libFp === fp) return;
       state.libFp = fp;
+      state.libDirty = true;
       state.libRefreshing = true;
-      const keepId = currentItem()?.id;
       try {
-        await loadFeed({ keepCurrentId: keepId, quiet: true });
+        // Feed: only top-up the tail under current mode (no full re-render)
+        if (state.view === "feed" && state.items.length) {
+          await ensureFeedAhead(10);
+        } else if (state.view === "grid") {
+          await renderGridQuiet();
+        }
         if (state.view === "admin") {
           await refreshAdmin().catch(() => {});
         }
-        showToast(`库已更新 · ${total} 项`);
+        showToast(`库已更新 · ${total} 项 · 下一条可刷到新内容`);
       } finally {
         state.libRefreshing = false;
       }
     } catch (e) {
-      // offline / auth — silent
       console.debug("lib poll", e);
+    }
+  }
+
+  async function renderGridQuiet() {
+    try {
+      const data = await api("/api/media?limit=200&sort=new");
+      state._gridCache = data.items || [];
+      renderGrid(state._gridCache);
+    } catch (_) {
+      try {
+        renderGrid();
+      } catch (__) {}
     }
   }
 
@@ -435,13 +710,20 @@
       state.viewedIds.add(item.id);
       postInteract(item.id, "view");
     }
+    // Decision for upcoming items is live — top up when near the end
+    const ahead = state.items.length - index - 1;
+    if (ahead < 6 || state.libDirty) {
+      ensureFeedAhead(10);
+    }
   }
 
   function typeChip(item) {
     const partial = item.partial ? `<span class="chip warn">不完整</span>` : "";
     const tags = (item.tags || [])
-      .slice(0, 5)
-      .map((t) => `<span class="chip tag">#${escapeHtml(t)}</span>`)
+      .map((t) => {
+        const active = state.mode === "similar" && state.similarTag === t ? " is-active" : "";
+        return `<button type="button" class="chip tag${active}" data-tag="${escapeHtml(t)}" title="按标签 #${escapeHtml(t)} 相似推荐">#${escapeHtml(t)}</button>`;
+      })
       .join("");
     return `<span class="chip">${escapeHtml(item.media_type)}</span>
       <span class="chip">#${item.id}</span>${tags}${partial}`;
@@ -450,61 +732,17 @@
   function renderFeed() {
     const scroller = $("#feedScroller");
     const empty = $("#feedEmpty");
+    state.activeFeedId = null;
+    state.playEpoch += 1;
     if (!state.items.length) {
       scroller.innerHTML = "";
       empty.classList.remove("hide");
       return;
     }
     empty.classList.add("hide");
-    scroller.innerHTML = state.items
-      .map((item, i) => {
-        const liked = item.liked ? "on" : "";
-        const isImg = item.media_type === "image" || item.media_type === "gif";
-        // 首次默认静音（autoplay 策略）；用户取消静音后 state.wantSound 生效
-        const muteAttr = state.wantSound ? "" : " muted";
-        const media = isImg
-          ? `<img data-src="${fileUrl(item)}" alt="" draggable="false" />`
-          : `<video data-src="${fileUrl(item)}" playsinline webkit-playsinline${muteAttr} loop preload="metadata"></video>
-          <div class="feed-progress" aria-hidden="true">
-            <div class="feed-progress-track">
-              <div class="feed-progress-fill"></div>
-              <div class="feed-progress-knob"></div>
-            </div>
-            <div class="feed-progress-time"><span class="cur">0:00</span><span class="sep">/</span><span class="dur">0:00</span></div>
-          </div>`;
-        return `<section class="snap-slide" data-index="${i}" data-id="${item.id}">
-          <div class="media-stage" title="点在画面上暂停/播放 · 双击隐藏/恢复界面">${media}</div>
-          <div class="hud">
-            <div class="meta">
-              <div class="type">${typeChip(item)}</div>
-              <div class="title">${escapeHtml(item.title || item.source_url || "未命名")}</div>
-              <div class="stats">
-                <span>${ICO.heart} ${item.like_count || 0}</span>
-                <span>${ICO.eye} ${item.view_count || 0}</span>
-              </div>
-            </div>
-            <div class="actions">
-              <button type="button" class="round mute-btn" data-act="mute" data-id="${item.id}" title="取消静音（播放声音）">${state.wantSound ? ICO.volOn : ICO.volOff}</button>
-              <button type="button" class="round like ${liked}" data-act="like" data-id="${item.id}" title="喜欢 (L)">${ICO.heart}</button>
-              <button type="button" class="round danger" data-act="del" data-id="${item.id}" title="删除">${ICO.trash}</button>
-            </div>
-          </div>
-        </section>`;
-      })
-      .join("");
+    scroller.innerHTML = state.items.map((item, i) => slideHtml(item, i)).join("");
 
-    scroller.querySelectorAll("[data-act]").forEach((btn) => {
-      btn.addEventListener("click", (e) => {
-        e.stopPropagation();
-        handleAction(btn.dataset.act, Number(btn.dataset.id), btn);
-      });
-    });
-    scroller.querySelectorAll(".media-stage").forEach((stage) => {
-      bindImmersiveToggle(stage);
-      bindFeedProgress(stage);
-    });
-    scroller.querySelectorAll("video").forEach(applySoundToVideo);
-    scroller.querySelectorAll("[data-act='mute']").forEach(syncMuteBtn);
+    scroller.querySelectorAll(".snap-slide").forEach((el) => bindSlideEl(el, { observe: false }));
     observeFeedMedia();
     state.dwellStart = Date.now();
   }
@@ -521,8 +759,10 @@
   }
 
   /**
-   * Short-video style progress: hidden by default, show on tap/click,
-   * auto-hide after idle; drag/seek on the bar.
+   * Short-video style progress + center play/pause:
+   * tap stage → show bar & center button (no pause);
+   * tap center button → pause / resume;
+   * auto-hide after idle (while paused, keep center button for resume).
    */
   function bindFeedProgress(stage) {
     if (!stage || stage.dataset.progressBound === "1") return;
@@ -536,23 +776,58 @@
     const curEl = bar.querySelector(".cur");
     const durEl = bar.querySelector(".dur");
     const track = bar.querySelector(".feed-progress-track");
+    let toggleBtn = stage.querySelector(".media-play-toggle");
+    if (!toggleBtn) {
+      toggleBtn = document.createElement("button");
+      toggleBtn.type = "button";
+      toggleBtn.className = "media-play-toggle";
+      toggleBtn.setAttribute("aria-label", "暂停");
+      toggleBtn.title = "暂停/播放";
+      toggleBtn.tabIndex = -1;
+      toggleBtn.innerHTML = ICO.pause;
+      stage.insertBefore(toggleBtn, bar);
+    }
+
     let hideTimer = null;
     let seeking = false;
     const HIDE_MS = 2800;
 
-    const showBar = () => {
+    const syncToggleIcon = () => {
+      const paused = video.paused;
+      toggleBtn.innerHTML = paused ? ICO.play : ICO.pause;
+      toggleBtn.setAttribute("aria-label", paused ? "播放" : "暂停");
+      toggleBtn.classList.toggle("is-paused", paused);
+    };
+
+    const isUserPaused = () => video.dataset.userPaused === "1";
+
+    const hideChrome = () => {
+      bar.classList.remove("is-visible");
+      // only keep center control after *user* pause (not scroll/autoplay pause)
+      if (video.paused && isUserPaused()) {
+        toggleBtn.classList.add("is-visible");
+      } else {
+        toggleBtn.classList.remove("is-visible");
+      }
+    };
+
+    const showChrome = () => {
+      if (isChromeHidden()) return;
       bar.classList.add("is-visible");
+      toggleBtn.classList.add("is-visible");
+      syncToggleIcon();
       clearTimeout(hideTimer);
       if (!seeking) {
         hideTimer = setTimeout(() => {
-          if (!seeking) bar.classList.remove("is-visible");
+          if (!seeking) hideChrome();
         }, HIDE_MS);
       }
     };
+
     const hideBarSoon = () => {
       clearTimeout(hideTimer);
       hideTimer = setTimeout(() => {
-        if (!seeking) bar.classList.remove("is-visible");
+        if (!seeking) hideChrome();
       }, HIDE_MS);
     };
 
@@ -571,10 +846,26 @@
     video.addEventListener("durationchange", paint);
     video.addEventListener("seeked", paint);
     video.addEventListener("play", () => {
-      // keep hidden while playing unless user opened it
+      syncToggleIcon();
+      // autoplay / resume: never leave center button open unless user opened the bar
+      if (bar.classList.contains("is-visible")) {
+        hideBarSoon();
+      } else {
+        toggleBtn.classList.remove("is-visible");
+      }
+    });
+    video.addEventListener("pause", () => {
+      syncToggleIcon();
+      // programmatic pause (slide leave / load) must NOT flash the control
+      if (!isChromeHidden() && isUserPaused()) {
+        toggleBtn.classList.add("is-visible");
+      } else {
+        toggleBtn.classList.remove("is-visible");
+      }
     });
 
-    // Only clicks that hit the video's drawn box (not letterbox / empty stage) toggle play
+    // Only clicks that hit the video's drawn box (not letterbox / empty stage)
+    // show progress + center control; do NOT toggle play on stage tap.
     // dblclick immersive handled separately; delay click so double-tap still works
     const pointHitsVideo = (clientX, clientY) => {
       const r = video.getBoundingClientRect();
@@ -590,21 +881,15 @@
     let tapTimer = null;
     stage.addEventListener("click", (e) => {
       if (e.target.closest(".feed-progress")) return;
+      if (e.target.closest(".media-play-toggle")) return;
       if (e.target.closest(".hud")) return;
       if (Date.now() < (stage._uiCooldownUntil || 0)) return;
       if (!pointHitsVideo(e.clientX, e.clientY)) return;
       if (tapTimer) clearTimeout(tapTimer);
       tapTimer = setTimeout(() => {
         tapTimer = null;
-        if (video.paused) {
-          video.dataset.userPaused = "0";
-          video.play().catch(() => {});
-        } else {
-          video.dataset.userPaused = "1";
-          video.pause();
-        }
-        // immersive: don't pop chrome/progress back when UI is hidden
-        if (!isChromeHidden()) showBar();
+        // immersive: don't pop chrome when UI is hidden
+        if (!isChromeHidden()) showChrome();
       }, 260);
     });
     stage.addEventListener("dblclick", () => {
@@ -612,6 +897,29 @@
         clearTimeout(tapTimer);
         tapTimer = null;
       }
+    });
+
+    toggleBtn.addEventListener("click", (e) => {
+      e.preventDefault();
+      e.stopPropagation();
+      if (Date.now() < (stage._uiCooldownUntil || 0)) return;
+      if (video.paused) {
+        video.dataset.userPaused = "0";
+        pauseOtherFeedVideos(video);
+        const gen = bumpVideoPlayGen(video);
+        playVideoRobust(video, gen).then(() => syncToggleIcon());
+      } else {
+        video.dataset.userPaused = "1";
+        try {
+          video.pause();
+        } catch (_) {}
+      }
+      syncToggleIcon();
+      if (!isChromeHidden()) showChrome();
+    });
+    toggleBtn.addEventListener("dblclick", (e) => {
+      e.preventDefault();
+      e.stopPropagation();
     });
 
     const seekFromEvent = (clientX) => {
@@ -626,7 +934,7 @@
     const onPointerDown = (e) => {
       if (!e.isPrimary && e.pointerType === "touch") return;
       seeking = true;
-      showBar();
+      showChrome();
       bar.classList.add("is-seeking");
       track.setPointerCapture?.(e.pointerId);
       seekFromEvent(e.clientX);
@@ -656,6 +964,7 @@
     bar.addEventListener("click", (e) => e.stopPropagation());
     bar.addEventListener("dblclick", (e) => e.stopPropagation());
 
+    syncToggleIcon();
     paint();
   }
 
@@ -668,7 +977,11 @@
         || document.querySelector(`.snap-slide[data-index="${state.feedIndex}"] video`);
       if (slide) {
         applySoundToVideo(slide);
-        slide.play().catch(() => {});
+        if (slide.dataset.userPaused !== "1") {
+          pauseOtherFeedVideos(slide);
+          const gen = bumpVideoPlayGen(slide);
+          playVideoRobust(slide, gen);
+        }
       }
       return;
     }
@@ -699,23 +1012,296 @@
     }
   }
 
-  function tryAutoplayVideo(media) {
-    if (!media || media.tagName !== "VIDEO") return;
-    if (media.dataset.userPaused === "1") return;
-    applySoundToVideo(media);
-    const p = media.play();
-    if (p && typeof p.catch === "function") {
-      p.catch(() => {
-        // autoplay blocked or not ready — retry once after canplay
-        const once = () => {
-          media.removeEventListener("canplay", once);
-          if (media.dataset.userPaused === "1") return;
-          applySoundToVideo(media);
-          media.play().catch(() => {});
-        };
-        media.addEventListener("canplay", once);
-      });
+  /** Invalidate in-flight play/load for this element. */
+  function bumpVideoPlayGen(v) {
+    if (!v) return 0;
+    const n = (Number(v.dataset.playGen) || 0) + 1;
+    v.dataset.playGen = String(n);
+    return n;
+  }
+
+  function hideSlideVideoChrome(slideEl) {
+    if (!slideEl) return;
+    const tgl = slideEl.querySelector(".media-play-toggle");
+    if (tgl) tgl.classList.remove("is-visible");
+    const pbar = slideEl.querySelector(".feed-progress");
+    if (pbar) pbar.classList.remove("is-visible");
+  }
+
+  /** Hard-stop a feed video (no chrome flash). Keeps buffer unless unload=true. */
+  function silenceFeedVideo(v, { unload = false } = {}) {
+    if (!v || v.tagName !== "VIDEO") return;
+    bumpVideoPlayGen(v);
+    v.dataset.userPaused = "0";
+    try {
+      v.pause();
+    } catch (_) {}
+    if (unload) {
+      try {
+        delete v.dataset.loadedSrc;
+        v.removeAttribute("src");
+        v.load?.();
+      } catch (_) {}
     }
+    hideSlideVideoChrome(v.closest(".snap-slide"));
+  }
+
+  /** Only one feed video may audibly play — pause every other. */
+  function pauseOtherFeedVideos(except) {
+    document.querySelectorAll("#feedScroller video").forEach((v) => {
+      if (v === except) return;
+      silenceFeedVideo(v);
+    });
+  }
+
+  function mediaSrcLoaded(el, url) {
+    if (!el || !url) return false;
+    return el.dataset.loadedSrc === url;
+  }
+
+  /**
+   * Wait until video has a decodable frame (or timeout).
+   * readyState: 2=HAVE_CURRENT_DATA, 3=HAVE_FUTURE_DATA, 4=HAVE_ENOUGH_DATA
+   */
+  function waitVideoReady(video, timeoutMs = 10000) {
+    if (!video) return Promise.resolve(false);
+    if (video.readyState >= 2 && video.videoWidth > 0) return Promise.resolve(true);
+    return new Promise((resolve) => {
+      let done = false;
+      const fin = (ok) => {
+        if (done) return;
+        done = true;
+        events.forEach((ev) => video.removeEventListener(ev, onReady));
+        video.removeEventListener("error", onErr);
+        clearTimeout(timer);
+        resolve(ok);
+      };
+      const onReady = () => {
+        if (video.readyState >= 2) fin(true);
+      };
+      const onErr = () => fin(false);
+      const events = ["loadeddata", "canplay", "canplaythrough", "loadedmetadata"];
+      events.forEach((ev) => video.addEventListener(ev, onReady));
+      video.addEventListener("error", onErr);
+      const timer = setTimeout(() => fin(video.readyState >= 2), timeoutMs);
+      // already progressing
+      onReady();
+    });
+  }
+
+  async function playVideoRobust(media, gen) {
+    if (!media || media.tagName !== "VIDEO") return false;
+    const alive = () =>
+      media.isConnected &&
+      String(media.dataset.playGen || "0") === String(gen) &&
+      media.dataset.userPaused !== "1";
+
+    if (!alive()) return false;
+    applySoundToVideo(media);
+
+    const attempt = async () => {
+      if (!alive()) return false;
+      try {
+        await media.play();
+        return alive() && !media.paused;
+      } catch (_) {
+        return false;
+      }
+    };
+
+    // 1) preferred (may fail unmuted on mobile autoplay policy)
+    if (await attempt()) return true;
+    if (!alive()) return false;
+
+    // 2) not ready yet — wait then retry
+    await waitVideoReady(media, 8000);
+    if (!alive()) return false;
+    if (await attempt()) return true;
+    if (!alive()) return false;
+
+    // 3) autoplay policy: force muted play, then try restore sound
+    const want = state.wantSound;
+    media.muted = true;
+    if (await attempt()) {
+      if (want && alive()) {
+        try {
+          media.muted = false;
+          if (media.muted) applySoundToVideo(media); // still blocked — keep muted until gesture
+        } catch (_) {}
+      } else {
+        applySoundToVideo(media);
+      }
+      return alive() && !media.paused;
+    }
+    if (!alive()) return false;
+
+    // 4) last resort: reload same src once (Edge/mobile stuck decoder)
+    const src = media.getAttribute("data-src") || media.dataset.loadedSrc;
+    if (src && alive()) {
+      try {
+        delete media.dataset.loadedSrc;
+        await loadMediaEl(media, src, { force: true });
+        await waitVideoReady(media, 8000);
+        if (!alive()) return false;
+        media.muted = true;
+        if (await attempt()) {
+          if (want && alive()) {
+            try {
+              media.muted = false;
+            } catch (_) {}
+          }
+          applySoundToVideo(media);
+          return alive() && !media.paused;
+        }
+      } catch (_) {}
+    }
+    return false;
+  }
+
+  /**
+   * Activate a feed slide: exclusive audio, load+wait+play for video,
+   * prefetch next. Safe against IntersectionObserver races.
+   */
+  async function activateFeedSlide(slideEl) {
+    if (!slideEl || !slideEl.isConnected) return;
+    const id = String(slideEl.dataset.id || "");
+    const index = Number(slideEl.dataset.index || 0);
+    const media = slideEl.querySelector(".media-stage img, .media-stage video");
+    if (!media) return;
+
+    const epoch = ++state.playEpoch;
+    state.activeFeedId = id;
+    onSlideActive(index);
+
+    if (media.tagName === "VIDEO") {
+      // exclusive: stop every other video immediately (fixes "上一条声音")
+      pauseOtherFeedVideos(media);
+
+      if (media.dataset.userPaused === "1") return;
+
+      const gen = bumpVideoPlayGen(media);
+      media.preload = "auto";
+
+      const src = media.getAttribute("data-src");
+      if (src && !mediaSrcLoaded(media, src)) {
+        const ok = await loadMediaEl(media, src);
+        // only abort self; never silence if a newer activation owns this slide
+        if (!ok || epoch !== state.playEpoch || state.activeFeedId !== id) return;
+      }
+
+      // stale activation (user already swiped away)
+      if (epoch !== state.playEpoch || state.activeFeedId !== id) {
+        if (state.activeFeedId !== id) silenceFeedVideo(media);
+        return;
+      }
+      if (String(media.dataset.playGen) !== String(gen)) return;
+
+      const played = await playVideoRobust(media, gen);
+      if (epoch !== state.playEpoch || state.activeFeedId !== id) {
+        if (state.activeFeedId !== id) silenceFeedVideo(media);
+        return;
+      }
+      // black-frame recovery: playing but no pixels yet
+      if (played && media.videoWidth === 0) {
+        await new Promise((r) => setTimeout(r, 200));
+        if (epoch === state.playEpoch && state.activeFeedId === id && media.videoWidth === 0) {
+          const g2 = bumpVideoPlayGen(media);
+          await playVideoRobust(media, g2);
+        }
+      }
+    } else {
+      // image
+      pauseOtherFeedVideos(null);
+      const src = media.getAttribute("data-src");
+      if (src && !mediaSrcLoaded(media, src) && media.getAttribute("src") !== src) {
+        await loadMediaEl(media, src);
+      }
+    }
+
+    if (epoch === state.playEpoch) {
+      prefetchFeedAround(index);
+    }
+  }
+
+  /** Warm next/prev video buffers without playing. */
+  function prefetchFeedAround(index) {
+    const scroller = $("#feedScroller");
+    if (!scroller) return;
+    for (const j of [index + 1, index + 2, index - 1]) {
+      if (j < 0) continue;
+      const slide = scroller.querySelector(`.snap-slide[data-index="${j}"]`);
+      if (!slide) continue;
+      const v = slide.querySelector("video");
+      if (!v) continue;
+      const src = v.getAttribute("data-src");
+      if (!src || mediaSrcLoaded(v, src)) {
+        // already have data — ensure preload stays warm
+        if (v.preload !== "auto") v.preload = "auto";
+        continue;
+      }
+      v.preload = "auto";
+      // fire-and-forget; never play
+      loadMediaEl(v, src).catch(() => {});
+    }
+  }
+
+  /**
+   * Pick the slide closest to the scroller viewport center.
+   * Fallback when IntersectionObserver misses threshold edges (Edge mobile).
+   */
+  function syncActiveFromScroll() {
+    const scroller = $("#feedScroller");
+    if (!scroller || state.view !== "feed") return;
+    const slides = scroller.querySelectorAll(".snap-slide");
+    if (!slides.length) return;
+    const root = scroller.getBoundingClientRect();
+    const mid = root.top + root.height * 0.5;
+    let best = null;
+    let bestDist = Infinity;
+    slides.forEach((el) => {
+      const r = el.getBoundingClientRect();
+      const c = r.top + r.height * 0.5;
+      const d = Math.abs(c - mid);
+      if (d < bestDist) {
+        bestDist = d;
+        best = el;
+      }
+    });
+    if (!best) return;
+    // only switch when clearly centered (avoid mid-fling thrash)
+    if (bestDist > root.height * 0.35) return;
+    const id = String(best.dataset.id || "");
+    const media = best.querySelector("video");
+    const needsPlay =
+      media &&
+      media.dataset.userPaused !== "1" &&
+      (media.paused || !mediaSrcLoaded(media, media.getAttribute("data-src") || ""));
+    if (state.activeFeedId === id && !needsPlay) return;
+    activateFeedSlide(best);
+  }
+
+  function bindFeedScrollSync() {
+    const scroller = $("#feedScroller");
+    if (!scroller || scroller.dataset.scrollSyncBound === "1") return;
+    scroller.dataset.scrollSyncBound = "1";
+    let t = null;
+    scroller.addEventListener(
+      "scroll",
+      () => {
+        clearTimeout(t);
+        t = setTimeout(syncActiveFromScroll, 90);
+      },
+      { passive: true }
+    );
+    // iOS/Edge: snap settle
+    scroller.addEventListener(
+      "scrollend",
+      () => {
+        clearTimeout(t);
+        syncActiveFromScroll();
+      },
+      { passive: true }
+    );
   }
 
   function observeFeedMedia() {
@@ -725,54 +1311,81 @@
         state._feedIo.disconnect();
       } catch (_) {}
     }
+    bindFeedScrollSync();
     const io = new IntersectionObserver(
       (entries) => {
+        // Prefer highest intersection ratio among newly-visible slides
+        let bestEnter = null;
+        let bestRatio = 0;
         for (const en of entries) {
           const el = en.target;
           const media = el.querySelector(".media-stage img, .media-stage video");
           if (!media) continue;
-          if (en.isIntersecting && en.intersectionRatio > 0.5) {
-            const src = media.getAttribute("data-src");
-            // 必须等 src 加载完成再 play，否则会出现「刷到暂停、要点一下才播」
-            if (src && media.getAttribute("src") !== src) {
-              loadMediaEl(media, src).then(() => {
-                tryAutoplayVideo(media);
-              });
-            } else {
-              tryAutoplayVideo(media);
+          if (en.isIntersecting && en.intersectionRatio >= 0.55) {
+            if (en.intersectionRatio >= bestRatio) {
+              bestRatio = en.intersectionRatio;
+              bestEnter = el;
             }
-            onSlideActive(Number(el.dataset.index || 0));
-          } else if (media.tagName === "VIDEO") {
-            media.pause();
-            // 滑走后清除 userPaused，回来可自动播
-            media.dataset.userPaused = "0";
+          } else if (!en.isIntersecting || en.intersectionRatio < 0.35) {
+            if (media.tagName === "VIDEO") {
+              // only silence if this slide is no longer the active one
+              if (String(el.dataset.id) !== String(state.activeFeedId)) {
+                silenceFeedVideo(media);
+              }
+            }
           }
         }
+        if (bestEnter) {
+          activateFeedSlide(bestEnter);
+        }
       },
-      { root: $("#feedScroller"), threshold: [0.5, 0.75] }
+      { root: $("#feedScroller"), threshold: [0, 0.25, 0.35, 0.55, 0.75, 1] }
     );
     state._feedIo = io;
     slides.forEach((s) => io.observe(s));
+    // first paint: activate centered slide (F5 cold start)
+    requestAnimationFrame(() => {
+      syncActiveFromScroll();
+      // if still nothing (empty layout), try first slide
+      if (!state.activeFeedId) {
+        const first = document.querySelector("#feedScroller .snap-slide");
+        if (first) activateFeedSlide(first);
+      }
+    });
   }
 
-  async function loadMediaEl(el, url) {
+  async function loadMediaEl(el, url, opts = {}) {
     if (!url) return false;
     const authed = withAuthQuery(url);
+    const force = !!opts.force;
 
     // VIDEO: never fetch-as-blob (breaks Range / OOM on mobile). Use native src + Range.
     if (el.tagName === "VIDEO") {
       try {
+        if (!force && mediaSrcLoaded(el, url) && el.readyState >= 2) {
+          return true;
+        }
         if (el.src && el.src.startsWith("blob:")) {
           try {
             URL.revokeObjectURL(el.src);
           } catch (_) {}
         }
-        el.src = authed;
+        // Avoid redundant load() when same logical URL already set
+        if (!force && mediaSrcLoaded(el, url) && el.getAttribute("src")) {
+          return true;
+        }
         el.setAttribute("playsinline", "");
         el.setAttribute("webkit-playsinline", "");
         el.playsInline = true;
+        if (!el.getAttribute("preload") || el.preload === "none") {
+          el.preload = "auto";
+        }
+        el.src = authed;
+        el.dataset.loadedSrc = url;
         if (typeof el.load === "function") el.load();
-        return true;
+        // Wait for first frame data so callers don't play black
+        await waitVideoReady(el, 12000);
+        return el.readyState >= 1 || !!el.getAttribute("src");
       } catch (_) {
         return false;
       }
@@ -782,10 +1395,12 @@
     const t = token();
     if (!t) {
       el.src = url;
+      el.dataset.loadedSrc = url;
       return true;
     }
     try {
       el.src = authed;
+      el.dataset.loadedSrc = url;
       return true;
     } catch {
       try {
@@ -793,6 +1408,7 @@
         if (!res.ok) return false;
         const blob = await res.blob();
         el.src = URL.createObjectURL(blob);
+        el.dataset.loadedSrc = url;
         return true;
       } catch (_) {
         return false;
@@ -1039,11 +1655,12 @@
     });
   }
 
-  function renderGrid() {
+  function renderGrid(list) {
     const grid = $("#grid");
     if (!grid) return;
+    const items = list || state._gridCache || state.items;
     stopAllGridPreviews();
-    grid.innerHTML = state.items
+    grid.innerHTML = items
       .map((item) => {
         const motion = isGridMotionType(item.media_type) ? " cell-has-motion" : "";
         const tip = isGridMotionType(item.media_type) ? "悬停预览 · 单击打开" : "单击打开";
@@ -1076,6 +1693,10 @@
         if (!confirm(`删除 #${id}？`)) return;
         await api(`/api/media/${id}`, { method: "DELETE" });
         state.items = state.items.filter((x) => x.id !== id);
+        if (state._gridCache) {
+          state._gridCache = state._gridCache.filter((x) => x.id !== id);
+        }
+        // delete: rebuild feed is acceptable (item gone)
         renderFeed();
         renderGrid();
       });
@@ -1237,30 +1858,22 @@
     document.querySelectorAll(".topnav .nav").forEach((b) => {
       b.addEventListener("click", () => setView(b.dataset.view));
     });
-    const btnSimilar = $("#btnSimilar");
-    if (btnSimilar) {
-      btnSimilar.addEventListener("click", () => toggleSimilarOrRandom());
+    // Event delegation: tag chips inside HUD (pointer-events fixed in CSS)
+    const feedScroller = $("#feedScroller");
+    if (feedScroller && feedScroller.dataset.tagDelegate !== "1") {
+      feedScroller.dataset.tagDelegate = "1";
+      feedScroller.addEventListener("click", (e) => {
+        const btn = e.target.closest("button.chip.tag[data-tag]");
+        if (!btn || !feedScroller.contains(btn)) return;
+        e.preventDefault();
+        e.stopPropagation();
+        loadSimilarFromTag(btn.getAttribute("data-tag") || btn.dataset.tag);
+      });
     }
-    syncSimilarBtn();
-    const modeSel = $("#feedMode");
-    if (modeSel) {
-      if (![...modeSel.options].some((o) => o.value === "similar")) {
-        const opt = document.createElement("option");
-        opt.value = "similar";
-        opt.textContent = "相似";
-        modeSel.appendChild(opt);
-      }
-      modeSel.value = state.mode === "similar" ? "similar" : state.mode;
-      modeSel.addEventListener("change", async (e) => {
-        state.mode = e.target.value;
-        if (state.mode !== "similar") state.similarTo = null;
-        localStorage.setItem(feedModeKey, state.mode);
-        syncSimilarBtn();
-        if (state.mode === "similar" && !state.similarTo) {
-          await loadSimilarFromCurrent();
-          return;
-        }
-        await loadFeed();
+    syncFeedModeSelects();
+    for (const sel of feedModeSelects()) {
+      sel.addEventListener("change", async (e) => {
+        await applyFeedMode(e.target.value);
       });
     }
     $("#btnSaveToken").onclick = () => {
@@ -1310,8 +1923,7 @@
         const tags = raw
           .split(/[,，;；\s]+/)
           .map((s) => s.trim())
-          .filter(Boolean)
-          .slice(0, 5);
+          .filter(Boolean);
         if (!tags.length) {
           alert("请输入至少一个标签");
           return;

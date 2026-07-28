@@ -631,23 +631,22 @@
             }
         }
 
-        /** 入库前标签：建议 video + 站点，用户可改（最多5） */
+        /** 入库前标签：建议 video + 站点，用户可改 */
         askIngestTags(baseTitle) {
             let host = "";
             try {
                 host = location.hostname.replace(/^www\./, "").split(".").slice(-2, -1)[0] || "";
             } catch (e) { /* ignore */ }
-            const def = ["video", host].filter(Boolean).slice(0, 5).join(", ");
+            const def = ["video", host].filter(Boolean).join(", ");
             const raw = window.prompt(
-                `入库标签（最多5个，逗号分隔）\n${(baseTitle || "").slice(0, 60)}\n留空=不打标签；点取消=中止入库`,
+                `入库标签（逗号分隔）\n${(baseTitle || "").slice(0, 60)}\n留空=不打标签；点取消=中止入库`,
                 def
             );
             if (raw === null) return null; // cancel
             return String(raw)
                 .split(/[,，;；\s]+/)
                 .map((s) => s.trim().toLowerCase().replace(/^#/, ""))
-                .filter(Boolean)
-                .slice(0, 5);
+                .filter(Boolean);
         }
 
         /**

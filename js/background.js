@@ -427,7 +427,6 @@ function lmwNormalizeTags(raw) {
         if (!name || seen.has(name)) continue;
         seen.add(name);
         out.push(name);
-        if (out.length >= 5) break;
     }
     return out;
 }
@@ -687,8 +686,8 @@ function lmwOpenTagDialogWindow(payload) {
                 {
                     url,
                     type: "popup",
-                    width: 440,
-                    height: 520,
+                    width: 460,
+                    height: 580,
                     focused: true,
                 },
                 (win) => {

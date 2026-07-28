@@ -783,6 +783,9 @@ function openLocalMediaPage(extraQuery) {
 $("#openLocalMedia").click(function () {
     openLocalMediaPage();
 });
+$("#openLmwManage").click(function () {
+    chrome.tabs.create({ url: chrome.runtime.getURL("lmw-media-manage.html") });
+});
 $("#parsePageImages").click(function () {
     openLocalMediaPage("auto=images");
 });
@@ -882,7 +885,7 @@ $("#lmwSelect").click(function () {
 // 仅当明确关闭时隐藏；G 可能尚未从 storage 读完，延迟再判一次
 function applyLmwButtonVisibility() {
     const show = G.lmwEnable !== false;
-    $("#openLocalMedia, #parsePageImages, #lmwSelect, #lmwFloatToggle").toggle(show);
+    $("#openLocalMedia, #openLmwManage, #parsePageImages, #lmwSelect, #lmwFloatToggle").toggle(show);
     const on = G.lmwFloatIngest !== false;
     $("#lmwFloatToggle").text(on ? "页面入库:开" : "页面入库:关")
         .attr("title", on

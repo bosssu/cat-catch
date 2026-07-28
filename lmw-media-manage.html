@@ -1,0 +1,111 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>服务器媒体管理 · LocalMediaWeb</title>
+  <link rel="stylesheet" href="css/public.css" />
+  <link rel="stylesheet" href="css/lmw-media-manage.css" />
+  <script src="js/init.js"></script>
+  <script src="js/function.js"></script>
+  <script src="js/local-media-web.js"></script>
+</head>
+<body class="mm-body">
+  <header class="mm-header">
+    <div class="mm-header-top">
+      <div class="mm-title">服务器媒体管理</div>
+      <div class="mm-conn">
+        <span id="mmBase" class="mm-base muted"></span>
+        <span id="mmHealth" class="mm-health" title="服务健康">…</span>
+        <button type="button" id="btnOpenFeed" class="button2" title="在浏览器打开 LocalMediaWeb Feed">打开 Feed</button>
+        <button type="button" id="btnRefresh" class="button2" title="刷新列表">刷新</button>
+      </div>
+    </div>
+
+    <div class="mm-toolbar">
+      <input type="search" id="mmQ" class="mm-input" placeholder="搜索标题 / URL" autocomplete="off" />
+      <select id="mmType" class="mm-select" title="类型">
+        <option value="">全部类型</option>
+        <option value="video">视频</option>
+        <option value="image">图片</option>
+        <option value="gif">动图</option>
+      </select>
+      <select id="mmTag" class="mm-select" title="标签">
+        <option value="">全部标签</option>
+      </select>
+      <select id="mmLiked" class="mm-select" title="喜欢">
+        <option value="">喜欢不限</option>
+        <option value="1">仅喜欢</option>
+        <option value="0">未喜欢</option>
+      </select>
+      <select id="mmSort" class="mm-select" title="排序">
+        <option value="new">最新</option>
+        <option value="old">最旧</option>
+      </select>
+    </div>
+
+    <div class="mm-upload" id="mmDrop">
+      <div class="mm-upload-main">
+        <div class="mm-upload-icon" aria-hidden="true">⬇</div>
+        <div class="mm-upload-title">拖放文件到此处，或选择本地文件</div>
+        <div class="muted mm-drop-hint">可多次拖入叠加；相同文件（名+大小）会自动去重</div>
+        <div class="mm-upload-row">
+          <label class="button2 mm-file-label">
+            选择本地文件
+            <input type="file" id="mmFiles" multiple accept="video/*,image/*,.mp4,.webm,.mkv,.mov,.gif,.png,.jpg,.jpeg,.webp" hidden />
+          </label>
+          <input type="text" id="mmUploadTags" class="mm-input mm-tags-input" placeholder="本批标签（输入联想库）" autocomplete="off" spellcheck="false" />
+          <button type="button" id="btnUpload" class="button2 primary" disabled>开始上传</button>
+          <button type="button" id="btnClearPending" class="button2" disabled title="清空当前待上传列表">清除</button>
+        </div>
+        <div id="mmUploadProg" class="mm-upload-prog muted"></div>
+      </div>
+    </div>
+
+    <div class="mm-batch" id="mmBatchBar">
+      <span id="mmSelCount" class="mm-sel-count">已选 0</span>
+      <button type="button" id="btnSelPage" class="button2">全选本页</button>
+      <button type="button" id="btnSelClear" class="button2">清除选择</button>
+      <input type="text" id="mmBatchTags" class="mm-input mm-tags-input" placeholder="批量标签（输入联想库）…" autocomplete="off" spellcheck="false" />
+      <button type="button" id="btnBatchMerge" class="button2">合并标签</button>
+      <button type="button" id="btnBatchReplace" class="button2">覆盖标签</button>
+      <button type="button" id="btnBatchDel" class="button2 danger">批量删除</button>
+      <span id="mmStatus" class="mm-status muted"></span>
+    </div>
+  </header>
+
+  <main class="mm-main">
+    <div id="mmGrid" class="mm-grid" aria-live="polite"></div>
+    <div class="mm-footer">
+      <button type="button" id="btnMore" class="button2" disabled>加载更多</button>
+      <span id="mmCount" class="muted">0 / 0</span>
+    </div>
+  </main>
+
+  <!-- 预览 -->
+  <div id="mmPreview" class="mm-preview hide" aria-hidden="true">
+    <button type="button" id="mmPreviewClose" class="mm-preview-close" aria-label="关闭">×</button>
+    <div class="mm-preview-stage" id="mmPreviewStage"></div>
+    <div class="mm-preview-meta" id="mmPreviewMeta"></div>
+  </div>
+
+  <!-- 编辑 -->
+  <div id="mmEdit" class="mm-modal hide" aria-hidden="true">
+    <div class="mm-modal-card" role="dialog" aria-labelledby="mmEditTitle">
+      <div class="mm-modal-head" id="mmEditTitle">编辑媒体</div>
+      <label class="mm-field">标题
+        <input type="text" id="mmEditTitleInput" class="mm-input" maxlength="500" />
+      </label>
+      <label class="mm-field">标签（逗号分隔，输入时从标签库联想）
+        <input type="text" id="mmEditTagsInput" class="mm-input" autocomplete="off" spellcheck="false" />
+      </label>
+      <div class="mm-modal-actions">
+        <button type="button" id="mmEditCancel" class="button2">取消</button>
+        <button type="button" id="mmEditSave" class="button2 primary">保存</button>
+      </div>
+    </div>
+  </div>
+
+  <script src="js/lmw-media-manage.js"></script>
+</body>
+</html>

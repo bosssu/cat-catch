@@ -9,7 +9,29 @@ const LMW = {
         lmwDefaultCategory: "default",
         lmwAutoFallback: true,
     },
-    MAX_TAGS: 5,
+    /** No hard cap on tags per item (server normalize also unlimited). */
+    MAX_TAGS: 0,
+    /** Mirror of server TAG_ALIASES for client-side normalize. */
+    TAG_ALIASES: {
+        yt: "youtube",
+        youtu: "youtube",
+        bili: "bilibili",
+        "bilibili.com": "bilibili",
+        x: "twitter",
+        二次元: "anime",
+        动漫: "anime",
+        动画: "anime",
+        漫画: "manga",
+        插画: "illustration",
+        美图: "photo",
+        照片: "photo",
+        图片: "image",
+        影片: "video",
+        视频: "video",
+    },
+    /** In-memory tag library cache: { tags: [{name,count}], ts, total } */
+    _tagLibCache: null,
+    TAG_LIB_TTL_MS: 3 * 60 * 1000,
 
     baseUrl() {
         const u = (G.lmwURL || this.defaults.lmwURL || "").replace(/\/+$/, "");
@@ -64,6 +86,17 @@ const LMW = {
         });
     },
 
+    canonicalTag(name) {
+        let n = String(name || "")
+            .trim()
+            .toLowerCase()
+            .replace(/^#/, "")
+            .replace(/\s+/g, "-");
+        n = n.replace(/[^\w\u4e00-\u9fff\-+.#]/gi, "").slice(0, 32);
+        if (!n) return "";
+        return this.TAG_ALIASES[n] || n;
+    },
+
     normalizeTags(raw) {
         if (!raw) return [];
         let list = raw;
@@ -79,19 +112,204 @@ const LMW = {
         const out = [];
         const seen = new Set();
         for (const t of list) {
-            let name = String(t || "")
-                .trim()
-                .toLowerCase()
-                .replace(/^#/, "")
-                .replace(/\s+/g, "-");
-            if (!name || seen.has(name)) continue;
-            name = name.replace(/[^\w\u4e00-\u9fff\-+.#]/gi, "").slice(0, 32);
+            const name = this.canonicalTag(t);
             if (!name || seen.has(name)) continue;
             seen.add(name);
             out.push(name);
-            if (out.length >= this.MAX_TAGS) break;
         }
         return out;
+    },
+
+    /** Levenshtein distance for short tags. */
+    _editDistance(a, b) {
+        a = String(a || "");
+        b = String(b || "");
+        if (a === b) return 0;
+        if (!a) return b.length;
+        if (!b) return a.length;
+        if (Math.abs(a.length - b.length) > 3) return 99;
+        let prev = Array.from({ length: b.length + 1 }, (_, i) => i);
+        for (let i = 0; i < a.length; i++) {
+            const cur = [i + 1];
+            for (let j = 0; j < b.length; j++) {
+                const cost = a[i] === b[j] ? 0 : 1;
+                cur.push(Math.min(cur[j] + 1, prev[j + 1] + 1, prev[j] + cost));
+            }
+            prev = cur;
+        }
+        return prev[b.length];
+    },
+
+    /**
+     * Fetch / cache server tag library (aggregated from all media).
+     * @returns {Promise<{tags: {name:string,count:number}[], total:number}>}
+     */
+    async getTagLibrary({ force = false } = {}) {
+        const now = Date.now();
+        if (
+            !force &&
+            this._tagLibCache &&
+            now - this._tagLibCache.ts < this.TAG_LIB_TTL_MS
+        ) {
+            return this._tagLibCache;
+        }
+        try {
+            const res = await this.listTags();
+            const tags = (res.tags || [])
+                .map((t) =>
+                    typeof t === "string"
+                        ? { name: this.canonicalTag(t), count: 1 }
+                        : {
+                              name: this.canonicalTag(t.name || t.tag || ""),
+                              count: Number(t.count) || 0,
+                          }
+                )
+                .filter((t) => t.name);
+            const pack = {
+                tags,
+                total: res.total != null ? res.total : tags.length,
+                ts: now,
+            };
+            this._tagLibCache = pack;
+            return pack;
+        } catch (e) {
+            if (this._tagLibCache) return this._tagLibCache;
+            return { tags: [], total: 0, ts: now };
+        }
+    },
+
+    invalidateTagLibrary() {
+        this._tagLibCache = null;
+    },
+
+    /**
+     * Autocomplete match against tag library.
+     * @returns {{name:string,count:number,score:number}[]}
+     */
+    matchTags(query, libraryTags, { limit = 8, exclude = [] } = {}) {
+        const q = this.canonicalTag(query);
+        if (!q) return [];
+        const ex = new Set((exclude || []).map((t) => this.canonicalTag(t)));
+        const scored = [];
+        for (const row of libraryTags || []) {
+            const n = this.canonicalTag(row.name || row);
+            if (!n || ex.has(n)) continue;
+            const cnt = Number(row.count) || 0;
+            let sc = 0;
+            if (n === q) sc = 1000;
+            else if (n.startsWith(q)) sc = 500 - n.length * 0.1;
+            else if (n.includes(q)) sc = 300 - n.indexOf(q) * 2;
+            else if (q.includes(n) && n.length >= 2) sc = 200;
+            else {
+                const d = this._editDistance(n, q);
+                const maxD = q.length < 5 ? 1 : 2;
+                if (d <= maxD) sc = 150 - d * 40;
+                else continue;
+            }
+            sc += Math.min(40, Math.log1p(cnt) * 6);
+            scored.push({ name: n, count: cnt, score: sc });
+        }
+        scored.sort((a, b) => b.score - a.score || b.count - a.count || a.name.localeCompare(b.name));
+        const out = [];
+        const seen = new Set();
+        for (const s of scored) {
+            if (seen.has(s.name)) continue;
+            seen.add(s.name);
+            out.push(s);
+            if (out.length >= limit) break;
+        }
+        return out;
+    },
+
+    /**
+     * Soft-correct a typed tag to a frequent library near-duplicate.
+     * @returns {string|null} library tag name, or null
+     */
+    nearDuplicateTag(name, libraryTags, { minCount = 2 } = {}) {
+        const t = this.canonicalTag(name);
+        if (!t || !libraryTags || !libraryTags.length) return null;
+        const byName = new Map();
+        for (const row of libraryTags) {
+            const n = this.canonicalTag(row.name || row);
+            if (n) byName.set(n, Number(row.count) || 0);
+        }
+        if (byName.has(t)) return null;
+        let best = null;
+        for (const [n, cnt] of byName) {
+            if (cnt < minCount) continue;
+            const d = this._editDistance(t, n);
+            const maxD = Math.max(t.length, n.length) < 6 ? 1 : 2;
+            if (d === 0 || d > maxD) continue;
+            const rank = cnt / (1 + d);
+            if (!best || rank > best.rank) best = { rank, name: n };
+        }
+        return best ? best.name : null;
+    },
+
+    /**
+     * Merge rule suggestions + library hits for a media context.
+     */
+    mergeTagSuggestions({
+        title = "",
+        url = "",
+        media_type = "",
+        source_page = "",
+        local = [],
+        remote = [],
+        libraryTags = [],
+        limit = 14,
+    } = {}) {
+        const blob = `${title} ${url} ${source_page}`.toLowerCase();
+        const titleToks =
+            String(title || "").match(/[\u4e00-\u9fff]{2,6}|[A-Za-z][A-Za-z0-9_-]{2,20}/g) ||
+            [];
+        const toks = titleToks.map((t) => this.canonicalTag(t)).filter(Boolean);
+        const scored = new Map(); // name -> score
+
+        const bump = (name, sc) => {
+            const n = this.canonicalTag(name);
+            if (!n) return;
+            scored.set(n, Math.max(scored.get(n) || 0, sc));
+        };
+
+        for (const t of local || []) bump(t, 80);
+        for (const t of remote || []) bump(t, 90);
+
+        for (const row of libraryTags || []) {
+            const n = this.canonicalTag(row.name || row);
+            if (!n) continue;
+            const cnt = Number(row.count) || 0;
+            let sc = 0;
+            if (blob.includes(n)) sc = 120;
+            for (const tok of toks) {
+                if (n === tok) sc = Math.max(sc, 110);
+                else if (n.includes(tok) || tok.includes(n)) sc = Math.max(sc, 60);
+                else if (n.startsWith(tok) || tok.startsWith(n)) sc = Math.max(sc, 40);
+                else if (tok.length >= 3 && this._editDistance(n, tok) <= 1) sc = Math.max(sc, 35);
+            }
+            if (sc > 0) {
+                sc += Math.min(25, Math.log1p(cnt) * 4);
+                bump(n, sc);
+            }
+        }
+
+        // Hot library tags (count≥5) that share a char prefix with title tokens
+        for (const row of libraryTags || []) {
+            const n = this.canonicalTag(row.name || row);
+            const cnt = Number(row.count) || 0;
+            if (!n || cnt < 5 || scored.has(n)) continue;
+            for (const tok of toks) {
+                if (tok.length >= 2 && (n.startsWith(tok.slice(0, 2)) || tok.startsWith(n.slice(0, 2)))) {
+                    bump(n, 20 + Math.min(15, cnt));
+                    break;
+                }
+            }
+        }
+
+        return [...scored.entries()]
+            .sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]))
+            .map(([n]) => n)
+            .slice(0, limit);
     },
 
     /** Rule-based tag suggestions (offline). */
@@ -184,12 +402,145 @@ const LMW = {
         return res.json();
     },
 
+    /** Absolute API URL for relative paths like /api/media/1/thumb */
+    absUrl(path) {
+        if (!path) return "";
+        if (/^https?:\/\//i.test(path)) return path;
+        return this.baseUrl() + (path.startsWith("/") ? path : "/" + path);
+    },
+
+    listMedia(params = {}, options = {}) {
+        const q = new URLSearchParams();
+        if (params.q) q.set("q", params.q);
+        if (params.type) q.set("type", params.type);
+        if (params.tag) q.set("tag", params.tag);
+        if (params.sort) q.set("sort", params.sort);
+        if (params.liked === true || params.liked === false) q.set("liked", String(params.liked));
+        q.set("offset", String(params.offset ?? 0));
+        q.set("limit", String(params.limit ?? 48));
+        const qs = q.toString();
+        return this.request(`/api/media?${qs}`, {
+            headers: this.headers(false),
+            signal: options.signal,
+        });
+    },
+
+    listTags(params = {}) {
+        const q = new URLSearchParams();
+        if (params.q) q.set("q", params.q);
+        if (params.limit) q.set("limit", String(params.limit));
+        const qs = q.toString();
+        return this.request(`/api/tags${qs ? "?" + qs : ""}`, {
+            headers: this.headers(false),
+        });
+    },
+
+    deleteMedia(id) {
+        return this.request(`/api/media/${id}`, {
+            method: "DELETE",
+            headers: this.headers(false),
+        });
+    },
+
+    batchDelete(ids) {
+        return this.request("/api/media/delete-batch", {
+            method: "POST",
+            headers: this.headers(true),
+            body: JSON.stringify({ ids: (ids || []).slice(0, 200) }),
+        });
+    },
+
+    batchTags(ids, tags, mode = "merge") {
+        return this.request("/api/media/tags/batch", {
+            method: "POST",
+            headers: this.headers(true),
+            body: JSON.stringify({
+                ids: (ids || []).slice(0, 200),
+                tags: this.normalizeTags(tags),
+                mode: mode === "replace" ? "replace" : "merge",
+            }),
+        });
+    },
+
+    setMediaTags(id, tags) {
+        return this.request(`/api/media/${id}/tags`, {
+            method: "POST",
+            headers: this.headers(true),
+            body: JSON.stringify({ tags: this.normalizeTags(tags) }),
+        });
+    },
+
+    patchMedia(id, body = {}) {
+        const payload = {};
+        if (body.title != null) payload.title = body.title;
+        if (body.tags != null) payload.tags = this.normalizeTags(body.tags);
+        return this.request(`/api/media/${id}`, {
+            method: "PATCH",
+            headers: this.headers(true),
+            body: JSON.stringify(payload),
+        });
+    },
+
+    toggleLike(id) {
+        return this.request(`/api/media/${id}/like`, {
+            method: "POST",
+            headers: this.headers(false),
+        });
+    },
+
+    suggestTagsRemote(body = {}) {
+        return this.request("/api/tags/suggest", {
+            method: "POST",
+            headers: this.headers(true),
+            body: JSON.stringify({
+                title: body.title || "",
+                url: body.url || "",
+                media_type: body.media_type || "",
+                source_page: body.source_page || "",
+                query: body.query || "",
+                limit: body.limit || 12,
+            }),
+        });
+    },
+
     /**
-     * Modal: media detail + tags (max 5).
-     * - 建议标签单独列出，点击即可加入（同步到输入框与已选 chips）
-     * - 默认不把全部建议预填为已选，避免「没有待选」
+     * Fetch media/thumb/file with auth headers as blob URL.
+     * Cache key is the absolute URL; call revokeBlobUrl when done.
+     */
+    _blobCache: new Map(),
+    async fetchAuthedBlobUrl(pathOrUrl, options = {}) {
+        const url = this.absUrl(pathOrUrl);
+        if (!url) return "";
+        if (!options.force && this._blobCache.has(url)) {
+            return this._blobCache.get(url);
+        }
+        const res = await fetch(url, {
+            headers: this.headers(false),
+            signal: options.signal,
+        });
+        if (!res.ok) throw new Error(`${res.status} ${res.statusText}`);
+        const blob = await res.blob();
+        const obj = URL.createObjectURL(blob);
+        const prev = this._blobCache.get(url);
+        if (prev) URL.revokeObjectURL(prev);
+        this._blobCache.set(url, obj);
+        return obj;
+    },
+
+    revokeAllBlobUrls() {
+        for (const u of this._blobCache.values()) {
+            try {
+                URL.revokeObjectURL(u);
+            } catch (e) { /* ignore */ }
+        }
+        this._blobCache.clear();
+    },
+
+    /**
+     * Modal: media detail + tags (unlimited count).
+     * - 标签库（服务端聚合）+ 规则/远程建议
+     * - 输入时前缀/包含/编辑距离联想；近重复软纠正
      * opts: { title, url, media_type, source_page, count, tags, suggest, prefillSuggest }
-     *   prefillSuggest: true 时预选前 2 个建议（默认 false，只展示待选）
      */
     openIngestDialog(opts = {}) {
         const self = this;
@@ -197,21 +548,26 @@ const LMW = {
             const title = opts.title || "媒体";
             const url = opts.url || "";
             const mtype = opts.media_type || "";
+            const sourcePage = opts.source_page || "";
             const count = opts.count || 1;
-            const suggestions = self.normalizeTags([
+            let libraryTags = [];
+            let librarySize = 0;
+            let suggestions = self.normalizeTags([
                 ...self.suggestTags({
                     title,
                     url,
                     media_type: mtype,
-                    source_page: opts.source_page || "",
+                    source_page: sourcePage,
                 }),
                 ...(opts.suggest || []),
             ]);
-            // 已选：仅显式传入的 tags；可选预填前 2 个建议
             let tags = self.normalizeTags(opts.tags || []);
             if (!tags.length && opts.prefillSuggest) {
                 tags = suggestions.slice(0, 2);
             }
+            /** autocomplete state */
+            let acItems = [];
+            let acIndex = -1;
 
             function escapeHtml(s) {
                 return String(s)
@@ -230,7 +586,7 @@ const LMW = {
 <style>
 #lmw-ingest-dlg-root{position:fixed;inset:0;z-index:2147483646;display:flex;align-items:center;justify-content:center;background:rgba(0,0,0,.55);font-family:"Segoe UI","Microsoft YaHei",sans-serif;pointer-events:auto}
 #lmw-ingest-dlg-root *{pointer-events:auto;box-sizing:border-box}
-#lmw-ingest-dlg-root .card{background:#1e1e28;color:#f0f0f5;border-radius:14px;padding:16px 18px;width:min(420px,94vw);max-height:90vh;overflow:auto;box-shadow:0 12px 40px rgba(0,0,0,.45);border:1px solid rgba(255,255,255,.08)}
+#lmw-ingest-dlg-root .card{background:#1e1e28;color:#f0f0f5;border-radius:14px;padding:16px 18px;width:min(440px,94vw);max-height:90vh;overflow:auto;box-shadow:0 12px 40px rgba(0,0,0,.45);border:1px solid rgba(255,255,255,.08)}
 #lmw-ingest-dlg-root h3{margin:0 0 8px;font-size:16px}
 #lmw-ingest-dlg-root .meta{font-size:12px;opacity:.8;word-break:break-all;line-height:1.4;margin-bottom:10px}
 #lmw-ingest-dlg-root .row{display:flex;flex-wrap:wrap;gap:6px;margin:8px 0}
@@ -239,15 +595,23 @@ const LMW = {
 #lmw-ingest-dlg-root .sug{appearance:none;display:inline-flex;align-items:center;padding:5px 12px;border-radius:999px;background:rgba(255,255,255,.1);color:#e8eefc;font-size:12px;cursor:pointer;border:1px solid rgba(255,255,255,.18);user-select:none}
 #lmw-ingest-dlg-root .sug:hover{border-color:rgba(120,160,255,.7);background:rgba(90,130,255,.28)}
 #lmw-ingest-dlg-root .sug.on{background:rgba(90,130,255,.4);border-color:rgba(120,160,255,.8)}
-#lmw-ingest-dlg-root .sug:disabled{opacity:.45;cursor:not-allowed}
-#lmw-ingest-dlg-root input[type=text]{width:100%;padding:8px 10px;border-radius:8px;border:1px solid rgba(255,255,255,.15);background:#12121a;color:#fff;margin-top:6px}
+#lmw-ingest-dlg-root .sug .cnt{opacity:.55;font-size:10px;margin-left:4px}
+#lmw-ingest-dlg-root .input-wrap{position:relative;margin-top:6px}
+#lmw-ingest-dlg-root input[type=text]{width:100%;padding:8px 10px;border-radius:8px;border:1px solid rgba(255,255,255,.15);background:#12121a;color:#fff}
+#lmw-ingest-dlg-root .ac{position:absolute;left:0;right:0;top:100%;margin:2px 0 0;padding:4px 0;max-height:180px;overflow:auto;background:#16161f;border:1px solid rgba(255,255,255,.14);border-radius:8px;z-index:5;box-shadow:0 8px 24px rgba(0,0,0,.4);display:none}
+#lmw-ingest-dlg-root .ac.show{display:block}
+#lmw-ingest-dlg-root .ac-item{display:flex;align-items:center;justify-content:space-between;gap:8px;padding:7px 12px;font-size:13px;cursor:pointer;color:#e8eefc}
+#lmw-ingest-dlg-root .ac-item:hover,#lmw-ingest-dlg-root .ac-item.active{background:rgba(90,130,255,.28)}
+#lmw-ingest-dlg-root .ac-item .ac-cnt{font-size:11px;opacity:.55}
 #lmw-ingest-dlg-root .actions{display:flex;gap:8px;justify-content:flex-end;margin-top:14px;flex-wrap:wrap}
 #lmw-ingest-dlg-root .actions button{border:0;border-radius:8px;padding:8px 14px;cursor:pointer;font-weight:600}
 #lmw-ingest-dlg-root .btn-ok{background:#3b82f6;color:#fff}
 #lmw-ingest-dlg-root .btn-skip{background:rgba(255,255,255,.12);color:#fff}
 #lmw-ingest-dlg-root .btn-cancel{background:transparent;color:#aaa}
 #lmw-ingest-dlg-root .hint{font-size:11px;opacity:.75;margin-top:6px}
+#lmw-ingest-dlg-root .lib-hint{font-size:11px;opacity:.65;margin-top:2px}
 #lmw-ingest-dlg-root .err{font-size:11px;color:#f88;min-height:16px;margin-top:4px}
+#lmw-ingest-dlg-root .soft{font-size:11px;color:#9cf;min-height:0;margin-top:4px}
 </style>
 <div class="card" role="dialog" aria-modal="true">
   <h3>${count > 1 ? `入库 ${count} 项媒体` : "入库详情"}</h3>
@@ -256,12 +620,17 @@ const LMW = {
     <div><b>类型</b> ${escapeHtml(mtype || "—")}${count > 1 ? " · 将共用标签" : ""}</div>
     <div><b>地址</b> ${escapeHtml(String(url).slice(0, 160))}</div>
   </div>
-  <div><b>已选标签</b>（最多 ${self.MAX_TAGS} 个，点 × 移除）</div>
+  <div><b>已选标签</b>（点 × 移除）</div>
   <div class="row" id="lmwTagChips"></div>
-  <div class="hint">建议标签（点击添加 / 再次点击取消）</div>
+  <div class="hint">建议标签（规则 + 标签库匹配 · 点击添加）</div>
   <div class="row" id="lmwTagSug"></div>
-  <div class="hint">或手动输入后回车添加</div>
-  <input type="text" id="lmwTagInput" placeholder="例如: anime, 1080p" maxlength="32" autocomplete="off" />
+  <div class="lib-hint" id="lmwLibHint">标签库加载中…</div>
+  <div class="hint">输入时自动联想库内标签 · ↑↓ 选择 · Enter/Tab 确认 · 逗号分隔多项</div>
+  <div class="input-wrap">
+    <input type="text" id="lmwTagInput" placeholder="例如: anime, 1080p" maxlength="64" autocomplete="off" spellcheck="false" />
+    <div class="ac" id="lmwTagAc" role="listbox"></div>
+  </div>
+  <div class="soft" id="lmwTagSoft"></div>
   <div class="err" id="lmwTagErr"></div>
   <div class="actions">
     <button type="button" class="btn-cancel" id="lmwDlgCancel">取消</button>
@@ -275,26 +644,111 @@ const LMW = {
             const chipsEl = root.querySelector("#lmwTagChips");
             const sugEl = root.querySelector("#lmwTagSug");
             const input = root.querySelector("#lmwTagInput");
+            const acEl = root.querySelector("#lmwTagAc");
             const errEl = root.querySelector("#lmwTagErr");
+            const softEl = root.querySelector("#lmwTagSoft");
+            const libHint = root.querySelector("#lmwLibHint");
+            const countMap = () => {
+                const m = new Map();
+                for (const row of libraryTags) {
+                    m.set(self.canonicalTag(row.name), Number(row.count) || 0);
+                }
+                return m;
+            };
 
             function setErr(msg) {
                 errEl.textContent = msg || "";
             }
+            function setSoft(msg) {
+                softEl.textContent = msg || "";
+            }
 
-            function syncInputFromTags() {
-                // 输入框展示当前已选，方便看到/编辑
-                input.placeholder = tags.length
-                    ? `已选: ${tags.join(", ")}（回车继续添加）`
-                    : "例如: anime, 1080p";
+            function hideAc() {
+                acItems = [];
+                acIndex = -1;
+                acEl.classList.remove("show");
+                acEl.innerHTML = "";
+            }
+
+            function renderAc() {
+                if (!acItems.length) {
+                    hideAc();
+                    return;
+                }
+                acEl.innerHTML = acItems
+                    .map((it, i) => {
+                        const active = i === acIndex ? " active" : "";
+                        const cnt =
+                            it.count > 0
+                                ? `<span class="ac-cnt">×${it.count}</span>`
+                                : "";
+                        return `<div class="ac-item${active}" data-ac="${i}" role="option">#${escapeHtml(it.name)}${cnt}</div>`;
+                    })
+                    .join("");
+                acEl.classList.add("show");
+            }
+
+            function updateAcFromInput() {
+                const raw = input.value.trim();
+                // only last segment when comma-typing
+                const parts = raw.split(/[,，;；]/);
+                const q = (parts[parts.length - 1] || "").trim().replace(/^#/, "");
+                if (!q || q.length < 1) {
+                    hideAc();
+                    setSoft("");
+                    return;
+                }
+                acItems = self.matchTags(q, libraryTags, {
+                    limit: 8,
+                    exclude: tags,
+                });
+                acIndex = acItems.length ? 0 : -1;
+                renderAc();
+                // soft hint for near-duplicate of current query
+                const nd = self.nearDuplicateTag(q, libraryTags, { minCount: 2 });
+                if (nd && nd !== self.canonicalTag(q) && !tags.includes(nd)) {
+                    const c = countMap().get(nd) || 0;
+                    setSoft(`库中相似：#${nd}${c ? `（${c} 次）` : ""} · Tab/↑↓ 选用`);
+                } else {
+                    setSoft("");
+                }
+            }
+
+            function applyAcSelection(idx) {
+                if (idx < 0 || idx >= acItems.length) return false;
+                const name = acItems[idx].name;
+                const raw = input.value;
+                const seps = /[,，;；]/;
+                if (seps.test(raw)) {
+                    const parts = raw.split(seps);
+                    parts[parts.length - 1] = "";
+                    const head = parts
+                        .map((s) => s.trim())
+                        .filter(Boolean);
+                    for (const p of head) addTag(p, { softCorrect: true });
+                    addTag(name, { softCorrect: false });
+                } else {
+                    addTag(name, { softCorrect: false });
+                }
+                input.value = "";
+                hideAc();
+                setSoft("");
+                render();
+                return true;
             }
 
             function render() {
+                const cmap = countMap();
                 chipsEl.innerHTML = tags.length
                     ? tags
-                          .map(
-                              (t, i) =>
-                                  `<span class="chip">#${escapeHtml(t)}<button type="button" class="rm" data-rm="${i}" aria-label="移除">×</button></span>`
-                          )
+                          .map((t, i) => {
+                              const c = cmap.get(t);
+                              const badge =
+                                  c > 0
+                                      ? `<span style="opacity:.55;font-size:10px">×${c}</span>`
+                                      : "";
+                              return `<span class="chip">#${escapeHtml(t)}${badge}<button type="button" class="rm" data-rm="${i}" aria-label="移除">×</button></span>`;
+                          })
                           .join("")
                     : `<span style="opacity:.5;font-size:12px">暂无，请点击下方建议或输入</span>`;
 
@@ -302,27 +756,42 @@ const LMW = {
                     ? suggestions
                           .map((s) => {
                               const on = tags.includes(s);
-                              const dis = !on && tags.length >= self.MAX_TAGS;
-                              return `<button type="button" class="sug${on ? " on" : ""}" data-tag="${escapeHtml(s)}" ${dis ? "disabled" : ""}>${on ? "✓ " : "+ "}#${escapeHtml(s)}</button>`;
+                              const c = cmap.get(s);
+                              const cnt =
+                                  c > 0 ? `<span class="cnt">×${c}</span>` : "";
+                              return `<button type="button" class="sug${on ? " on" : ""}" data-tag="${escapeHtml(s)}">${on ? "✓ " : "+ "}#${escapeHtml(s)}${cnt}</button>`;
                           })
                           .join("")
                     : `<span style="opacity:.5;font-size:12px">无自动建议</span>`;
-                syncInputFromTags();
+
+                input.placeholder = tags.length
+                    ? `已选 ${tags.length} 个 · 继续输入联想`
+                    : "输入标签，从库中联想…";
             }
 
-            function addTag(raw) {
-                const next = self.normalizeTags([raw]);
+            /**
+             * @param {string} raw
+             * @param {{softCorrect?: boolean}} options
+             */
+            function addTag(raw, options = {}) {
+                const softCorrect = options.softCorrect !== false;
+                let next = self.normalizeTags([raw]);
                 if (!next.length) {
                     setErr("无效标签");
                     return false;
                 }
-                const t = next[0];
+                let t = next[0];
+                if (softCorrect) {
+                    const nd = self.nearDuplicateTag(t, libraryTags, {
+                        minCount: 2,
+                    });
+                    if (nd && nd !== t) {
+                        setSoft(`已将 #${t} 规范为库内 #${nd}`);
+                        t = nd;
+                    }
+                }
                 if (tags.includes(t)) {
                     setErr(`已包含 #${t}`);
-                    return false;
-                }
-                if (tags.length >= self.MAX_TAGS) {
-                    setErr(`最多 ${self.MAX_TAGS} 个标签`);
                     return false;
                 }
                 tags = self.normalizeTags([...tags, t]);
@@ -339,17 +808,23 @@ const LMW = {
             }
 
             function toggleTag(t) {
-                const i = tags.indexOf(t);
+                const name = self.canonicalTag(t);
+                const i = tags.indexOf(name);
                 if (i >= 0) {
                     removeTag(i);
                     return;
                 }
-                addTag(t);
+                addTag(name, { softCorrect: false });
             }
 
-            // 事件委托：避免重绘后监听丢失，且不被页面其它样式影响
             card.addEventListener("click", (e) => {
                 e.stopPropagation();
+                const acHit = e.target.closest("[data-ac]");
+                if (acHit) {
+                    e.preventDefault();
+                    applyAcSelection(Number(acHit.getAttribute("data-ac")));
+                    return;
+                }
                 const rm = e.target.closest("[data-rm]");
                 if (rm) {
                     e.preventDefault();
@@ -363,24 +838,55 @@ const LMW = {
                 }
             });
 
+            input.addEventListener("input", () => updateAcFromInput());
             input.addEventListener("keydown", (e) => {
+                if (acItems.length && (e.key === "ArrowDown" || e.key === "ArrowUp")) {
+                    e.preventDefault();
+                    if (e.key === "ArrowDown") {
+                        acIndex = (acIndex + 1) % acItems.length;
+                    } else {
+                        acIndex =
+                            acIndex <= 0 ? acItems.length - 1 : acIndex - 1;
+                    }
+                    renderAc();
+                    return;
+                }
+                if (e.key === "Tab" && acItems.length && acIndex >= 0) {
+                    e.preventDefault();
+                    applyAcSelection(acIndex);
+                    return;
+                }
+                if (e.key === "Escape" && acItems.length) {
+                    e.preventDefault();
+                    hideAc();
+                    return;
+                }
                 if (e.key === "Enter") {
                     e.preventDefault();
                     e.stopPropagation();
+                    if (acItems.length && acIndex >= 0) {
+                        applyAcSelection(acIndex);
+                        return;
+                    }
                     const v = input.value.trim();
                     if (!v) return;
-                    // 支持一次输入多个，逗号分隔
-                    const parts = v.split(/[,，;；]+/).map((s) => s.trim()).filter(Boolean);
+                    const parts = v
+                        .split(/[,，;；]+/)
+                        .map((s) => s.trim())
+                        .filter(Boolean);
                     for (const p of parts) {
-                        if (!addTag(p)) break;
+                        if (!addTag(p, { softCorrect: true })) break;
                     }
                     input.value = "";
+                    hideAc();
                     render();
                 }
             });
 
             function finish(result) {
                 root.remove();
+                // 入库后标签库可能变化，下次强制刷新
+                if (result && result.ok) self.invalidateTagLibrary();
                 resolve(result);
             }
             root.querySelector("#lmwDlgCancel").onclick = (e) => {
@@ -393,20 +899,364 @@ const LMW = {
             };
             root.querySelector("#lmwDlgOk").onclick = (e) => {
                 e.stopPropagation();
-                // 若输入框还有未提交内容，一并加入
                 const leftover = input.value.trim();
                 if (leftover) {
-                    leftover.split(/[,，;；]+/).forEach((p) => addTag(p.trim()));
+                    leftover.split(/[,，;；]+/).forEach((p) => {
+                        if (p.trim()) addTag(p.trim(), { softCorrect: true });
+                    });
                     input.value = "";
                 }
-                finish({ ok: true, tags: self.normalizeTags(tags) });
+                // final soft-correct pass for any remaining near-dupes
+                tags = tags.map((t) => {
+                    const nd = self.nearDuplicateTag(t, libraryTags, {
+                        minCount: 2,
+                    });
+                    return nd || t;
+                });
+                tags = self.normalizeTags(tags);
+                finish({ ok: true, tags });
             };
             root.addEventListener("click", (e) => {
-                if (e.target === root) finish({ ok: false, cancelled: true, tags: [] });
+                if (e.target === root)
+                    finish({ ok: false, cancelled: true, tags: [] });
             });
             render();
             setTimeout(() => input.focus(), 50);
+
+            // Async: load tag library + remote suggest, then re-merge
+            (async () => {
+                try {
+                    const [lib, remoteRes] = await Promise.all([
+                        self.getTagLibrary().catch(() => ({ tags: [], total: 0 })),
+                        self
+                            .suggestTagsRemote({
+                                title,
+                                url,
+                                media_type: mtype,
+                                source_page: sourcePage,
+                                limit: 14,
+                            })
+                            .catch(() => null),
+                    ]);
+                    libraryTags = lib.tags || [];
+                    librarySize = lib.total || libraryTags.length;
+                    const remoteTags = remoteRes && remoteRes.tags ? remoteRes.tags : [];
+                    suggestions = self.mergeTagSuggestions({
+                        title,
+                        url,
+                        media_type: mtype,
+                        source_page: sourcePage,
+                        local: self.suggestTags({
+                            title,
+                            url,
+                            media_type: mtype,
+                            source_page: sourcePage,
+                        }),
+                        remote: remoteTags,
+                        libraryTags,
+                        limit: 14,
+                    });
+                    if (opts.suggest && opts.suggest.length) {
+                        suggestions = self.normalizeTags([
+                            ...opts.suggest,
+                            ...suggestions,
+                        ]).slice(0, 16);
+                    }
+                    if (libHint) {
+                        libHint.textContent = librarySize
+                            ? `标签库 ${librarySize} 个（按媒体频次聚合）· 输入时自动匹配`
+                            : "标签库为空或服务端不可达 · 仍可手动输入 / 使用离线建议";
+                    }
+                    render();
+                    if (input.value.trim()) updateAcFromInput();
+                } catch (err) {
+                    if (libHint) {
+                        libHint.textContent =
+                            "标签库加载失败 · 使用离线建议";
+                    }
+                }
+            })();
         });
+    },
+
+    /**
+     * Normalize raw tag text and soft-correct near-duplicates against library.
+     * @returns {Promise<string[]>}
+     */
+    async softNormalizeTags(raw, { minCount = 2, libraryTags = null } = {}) {
+        const lib =
+            libraryTags ||
+            (await this.getTagLibrary().catch(() => ({ tags: [] }))).tags ||
+            [];
+        const tags = this.normalizeTags(raw);
+        return this.normalizeTags(
+            tags.map((t) => this.nearDuplicateTag(t, lib, { minCount }) || t)
+        );
+    },
+
+    /**
+     * Attach tag-library autocomplete to a plain text input (comma-separated).
+     * Shared by ingest dialog patterns, manage page batch/upload/edit fields.
+     *
+     * @param {HTMLInputElement|string} inputEl
+     * @param {{ onHint?: (msg:string)=>void, softCorrectEnter?: boolean }} [options]
+     * @returns {{ destroy:()=>void, refresh:()=>Promise<void>, commit:()=>Promise<string[]> }}
+     */
+    attachTagAutocomplete(inputEl, options = {}) {
+        const self = this;
+        const input =
+            typeof inputEl === "string" ? document.getElementById(inputEl) : inputEl;
+        if (!input || input.nodeType !== 1) {
+            return {
+                destroy() {},
+                async refresh() {},
+                async commit() {
+                    return self.normalizeTags(
+                        typeof inputEl === "string" ? "" : ""
+                    );
+                },
+            };
+        }
+
+        // Inject shared styles once
+        if (!document.getElementById("lmw-tag-ac-styles")) {
+            const st = document.createElement("style");
+            st.id = "lmw-tag-ac-styles";
+            st.textContent = `
+.lmw-tag-ac-wrap{position:relative;display:inline-block;vertical-align:middle}
+.lmw-tag-ac-wrap.lmw-tag-ac-block{display:block;width:100%}
+.lmw-tag-ac-wrap .lmw-tag-ac-input{width:100%}
+.lmw-tag-ac{position:absolute;left:0;right:0;top:100%;margin:2px 0 0;padding:4px 0;max-height:200px;overflow:auto;background:#16161f;border:1px solid rgba(255,255,255,.16);border-radius:8px;z-index:10050;box-shadow:0 8px 24px rgba(0,0,0,.45);display:none;font-family:"Segoe UI","Microsoft YaHei",sans-serif}
+.lmw-tag-ac.show{display:block}
+.lmw-tag-ac-item{display:flex;align-items:center;justify-content:space-between;gap:8px;padding:7px 12px;font-size:13px;cursor:pointer;color:#e8eefc}
+.lmw-tag-ac-item:hover,.lmw-tag-ac-item.active{background:rgba(90,130,255,.28)}
+.lmw-tag-ac-item .lmw-tag-ac-cnt{font-size:11px;opacity:.55}
+.lmw-tag-ac-hint{font-size:11px;color:#9cf;margin-top:2px;min-height:0;line-height:1.3}
+`;
+            document.documentElement.appendChild(st);
+        }
+
+        // Wrap input if needed
+        let wrap = input.closest(".lmw-tag-ac-wrap");
+        if (!wrap) {
+            wrap = document.createElement("span");
+            wrap.className = "lmw-tag-ac-wrap";
+            // block layout if input is full-width field
+            if (
+                input.classList.contains("mm-input") &&
+                input.parentElement &&
+                input.parentElement.classList.contains("mm-field")
+            ) {
+                wrap.classList.add("lmw-tag-ac-block");
+            }
+            input.parentNode.insertBefore(wrap, input);
+            wrap.appendChild(input);
+            input.classList.add("lmw-tag-ac-input");
+        }
+
+        let acEl = wrap.querySelector(".lmw-tag-ac");
+        if (!acEl) {
+            acEl = document.createElement("div");
+            acEl.className = "lmw-tag-ac";
+            acEl.setAttribute("role", "listbox");
+            wrap.appendChild(acEl);
+        }
+
+        let hintEl = wrap.querySelector(".lmw-tag-ac-hint");
+        if (!hintEl && options.showHint !== false) {
+            hintEl = document.createElement("div");
+            hintEl.className = "lmw-tag-ac-hint";
+            wrap.appendChild(hintEl);
+        }
+
+        let libraryTags = [];
+        let acItems = [];
+        let acIndex = -1;
+        let destroyed = false;
+
+        const escapeHtml = (s) =>
+            String(s)
+                .replace(/&/g, "&amp;")
+                .replace(/</g, "&lt;")
+                .replace(/>/g, "&gt;")
+                .replace(/"/g, "&quot;");
+
+        const setHint = (msg) => {
+            if (hintEl) hintEl.textContent = msg || "";
+            if (typeof options.onHint === "function") options.onHint(msg || "");
+        };
+
+        const hideAc = () => {
+            acItems = [];
+            acIndex = -1;
+            acEl.classList.remove("show");
+            acEl.innerHTML = "";
+        };
+
+        const currentExclude = () => {
+            const raw = input.value || "";
+            const parts = raw.split(/[,，;；]/).map((s) => s.trim()).filter(Boolean);
+            // exclude all but last segment (being typed)
+            return self.normalizeTags(parts.slice(0, -1));
+        };
+
+        const lastSegment = () => {
+            const raw = input.value || "";
+            const parts = raw.split(/[,，;；]/);
+            return (parts[parts.length - 1] || "").trim().replace(/^#/, "");
+        };
+
+        const renderAc = () => {
+            if (!acItems.length) {
+                hideAc();
+                return;
+            }
+            acEl.innerHTML = acItems
+                .map((it, i) => {
+                    const active = i === acIndex ? " active" : "";
+                    const cnt =
+                        it.count > 0
+                            ? `<span class="lmw-tag-ac-cnt">×${it.count}</span>`
+                            : "";
+                    return `<div class="lmw-tag-ac-item${active}" data-lmw-ac="${i}" role="option">#${escapeHtml(it.name)}${cnt}</div>`;
+                })
+                .join("");
+            acEl.classList.add("show");
+        };
+
+        const updateAc = () => {
+            if (destroyed) return;
+            const q = lastSegment();
+            if (!q) {
+                hideAc();
+                setHint("");
+                return;
+            }
+            acItems = self.matchTags(q, libraryTags, {
+                limit: 8,
+                exclude: currentExclude(),
+            });
+            acIndex = acItems.length ? 0 : -1;
+            renderAc();
+            const nd = self.nearDuplicateTag(q, libraryTags, { minCount: 2 });
+            const cq = self.canonicalTag(q);
+            if (nd && nd !== cq) {
+                setHint(`库中相似 #${nd} · Tab/↑↓ 选用`);
+            } else if (acItems.length) {
+                setHint("↑↓ 选择 · Enter/Tab 填入 · 逗号继续");
+            } else {
+                setHint("");
+            }
+        };
+
+        const replaceLastSegment = (name) => {
+            const raw = input.value || "";
+            const seps = /[,，;；]/;
+            if (!seps.test(raw)) {
+                input.value = name;
+                return;
+            }
+            const parts = raw.split(seps);
+            parts[parts.length - 1] = " " + name;
+            // normalize: keep previous segments, last becomes selected tag + trailing ", "
+            const head = parts
+                .slice(0, -1)
+                .map((s) => s.trim())
+                .filter(Boolean);
+            input.value = head.length ? head.join(", ") + ", " + name : name;
+        };
+
+        const applyAc = (idx) => {
+            if (idx < 0 || idx >= acItems.length) return false;
+            replaceLastSegment(acItems[idx].name);
+            // leave trailing comma for multi-entry convenience
+            if (!input.value.endsWith(", ") && !input.value.endsWith(",")) {
+                input.value = input.value + ", ";
+            }
+            hideAc();
+            setHint("");
+            // move caret to end
+            try {
+                const len = input.value.length;
+                input.setSelectionRange(len, len);
+            } catch (_) { /* ignore */ }
+            return true;
+        };
+
+        const onInput = () => updateAc();
+        const onKeydown = (e) => {
+            if (acItems.length && (e.key === "ArrowDown" || e.key === "ArrowUp")) {
+                e.preventDefault();
+                if (e.key === "ArrowDown") {
+                    acIndex = (acIndex + 1) % acItems.length;
+                } else {
+                    acIndex = acIndex <= 0 ? acItems.length - 1 : acIndex - 1;
+                }
+                renderAc();
+                return;
+            }
+            if ((e.key === "Tab" || e.key === "Enter") && acItems.length && acIndex >= 0) {
+                // Enter: if ac open, pick; else let form handlers work unless softCorrect
+                if (e.key === "Tab" || options.captureEnter !== false) {
+                    e.preventDefault();
+                    applyAc(acIndex);
+                    return;
+                }
+            }
+            if (e.key === "Escape" && acItems.length) {
+                e.preventDefault();
+                hideAc();
+            }
+        };
+        const onAcClick = (e) => {
+            const hit = e.target.closest("[data-lmw-ac]");
+            if (!hit) return;
+            e.preventDefault();
+            e.stopPropagation();
+            applyAc(Number(hit.getAttribute("data-lmw-ac")));
+            input.focus();
+        };
+        const onBlur = () => {
+            // delay so click on ac item can fire
+            setTimeout(() => {
+                if (destroyed) return;
+                if (!wrap.contains(document.activeElement)) hideAc();
+            }, 150);
+        };
+
+        input.addEventListener("input", onInput);
+        input.addEventListener("keydown", onKeydown);
+        input.addEventListener("focus", onInput);
+        input.addEventListener("blur", onBlur);
+        acEl.addEventListener("mousedown", onAcClick);
+
+        const refresh = async () => {
+            const lib = await self.getTagLibrary().catch(() => ({ tags: [] }));
+            libraryTags = lib.tags || [];
+            if (document.activeElement === input) updateAc();
+        };
+        refresh();
+
+        return {
+            destroy() {
+                destroyed = true;
+                input.removeEventListener("input", onInput);
+                input.removeEventListener("keydown", onKeydown);
+                input.removeEventListener("focus", onInput);
+                input.removeEventListener("blur", onBlur);
+                acEl.removeEventListener("mousedown", onAcClick);
+                hideAc();
+            },
+            refresh,
+            async commit() {
+                return self.softNormalizeTags(input.value, {
+                    libraryTags,
+                });
+            },
+            getLibrary() {
+                return libraryTags;
+            },
+        };
     },
 
     /**

@@ -314,12 +314,12 @@
                     }
                     let host = "";
                     try { host = location.hostname.replace(/^www\./, "").split(".").slice(-2, -1)[0] || ""; } catch (e) {}
-                    const tagRaw = window.prompt("标签（最多5个，逗号分隔；取消=中止）", ["video", "record", host].filter(Boolean).join(", "));
+                    const tagRaw = window.prompt("标签（逗号分隔；取消=中止）", ["video", "record", host].filter(Boolean).join(", "));
                     if (tagRaw === null) {
                         $tips.innerHTML = "已取消入库";
                         return;
                     }
-                    const tags = String(tagRaw).split(/[,，;；\s]+/).map((s) => s.trim().toLowerCase()).filter(Boolean).slice(0, 5);
+                    const tags = String(tagRaw).split(/[,，;；\s]+/).map((s) => s.trim().toLowerCase()).filter(Boolean);
                     $tips.innerHTML = "正在入库…";
                     catCatchIngestBlob(blob, {
                         filename: `${title}.${ext}`,
