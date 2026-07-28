@@ -1,0 +1,28 @@
+{
+  "name": "utools_zdblnfxa_video_detect_scenes",
+  "description": "检测视频中的场景切换点 [utools:utools.zdblnfxa.video_detect_scenes]",
+  "inputSchema": {
+    "$schema": "http://json-schema.org/draft-07/schema#",
+    "type": "object",
+    "properties": {
+      "inputPath": {
+        "type": "string",
+        "description": "输入视频文件绝对路径"
+      },
+      "threshold": {
+        "default": 0.3,
+        "type": "number",
+        "description": "场景变化阈值 (0-1)"
+      },
+      "minSceneDuration": {
+        "default": 1,
+        "type": "number",
+        "description": "最小场景时长（秒）"
+      }
+    },
+    "required": [
+      "inputPath"
+    ],
+    "additionalProperties": false
+  }
+}

@@ -1,0 +1,53 @@
+{
+  "name": "utools_zypiuj0v_image_merge_to_pdf",
+  "description": "将多张图片合并为一个PDF文件，支持多种页面大小和边距设置。 [utools:utools.zypiuj0v.image_merge_to_pdf]",
+  "inputSchema": {
+    "$schema": "http://json-schema.org/draft-07/schema#",
+    "type": "object",
+    "properties": {
+      "inputPaths": {
+        "minItems": 2,
+        "type": "array",
+        "items": {
+          "type": "string",
+          "format": "uri"
+        },
+        "description": "图片文件路径数组，至少需要2张图片"
+      },
+      "pageSize": {
+        "default": "A4",
+        "type": "string",
+        "enum": [
+          "A4",
+          "A3",
+          "A5",
+          "Letter",
+          "auto"
+        ],
+        "description": "页面大小：A4、A3、A5、Letter或auto（自适应图片大小）, 可选，默认A4"
+      },
+      "padding": {
+        "default": 0,
+        "anyOf": [
+          {
+            "type": "number",
+            "const": 0
+          },
+          {
+            "type": "number",
+            "const": 18
+          },
+          {
+            "type": "number",
+            "const": 36
+          }
+        ],
+        "description": "页面边距（像素）：0（无边距）、18（窄边距）、36（宽边距）, 可选，默认0"
+      }
+    },
+    "required": [
+      "inputPaths"
+    ],
+    "additionalProperties": false
+  }
+}

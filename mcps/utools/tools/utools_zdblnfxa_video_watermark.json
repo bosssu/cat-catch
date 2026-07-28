@@ -1,0 +1,88 @@
+{
+  "name": "utools_zdblnfxa_video_watermark",
+  "description": "在视频上添加水印，支持图片或文字水印，可自定义字体、颜色、大小、位置、透明度、旋转角度和留白间距，并支持平铺水印。 [utools:utools.zdblnfxa.video_watermark]",
+  "inputSchema": {
+    "$schema": "http://json-schema.org/draft-07/schema#",
+    "type": "object",
+    "properties": {
+      "inputPath": {
+        "type": "string",
+        "description": "输入视频文件绝对路径"
+      },
+      "watermarkType": {
+        "type": "string",
+        "enum": [
+          "image",
+          "text"
+        ],
+        "description": "水印类型：image 为图片水印，text 为文字水印"
+      },
+      "imagePath": {
+        "type": "string",
+        "description": "水印图片路径，仅在 watermarkType 为 image 时必填"
+      },
+      "text": {
+        "type": "string",
+        "description": "文字水印内容，仅在 watermarkType 为 text 时必填"
+      },
+      "fontSize": {
+        "default": 24,
+        "type": "integer",
+        "minimum": 10,
+        "maximum": 200,
+        "description": "文字水印字体大小（px），仅 text 类型有效"
+      },
+      "fontColor": {
+        "default": "#597ef7",
+        "type": "string",
+        "description": "文字水印颜色（16 进制或英文名），仅 text 类型有效"
+      },
+      "position": {
+        "default": "right-bottom",
+        "type": "string",
+        "enum": [
+          "center",
+          "top",
+          "bottom",
+          "left",
+          "right",
+          "left-top",
+          "right-top",
+          "left-bottom",
+          "right-bottom"
+        ],
+        "description": "水印位置（九宫格）。当 tile=true 时该参数会被忽略"
+      },
+      "opacity": {
+        "default": 0.5,
+        "type": "number",
+        "minimum": 0,
+        "maximum": 1,
+        "description": "水印透明度（0~1）"
+      },
+      "padding": {
+        "default": 20,
+        "type": "number",
+        "minimum": 0,
+        "description": "水印外部留白间距（px）。tile=false 时表示水印与视频边缘的距离；tile=true 时表示水印之间的间距"
+      },
+      "angle": {
+        "default": 0,
+        "type": "number",
+        "minimum": -180,
+        "maximum": 180,
+        "description": "水印旋转角度（度）。旋转发生在生成水印图阶段"
+      },
+      "tile": {
+        "default": false,
+        "type": "boolean",
+        "description": "是否平铺水印。true 时水印会在整个视频画面中重复铺满"
+      }
+    },
+    "required": [
+      "inputPath",
+      "watermarkType"
+    ],
+    "additionalProperties": false
+  }
+}

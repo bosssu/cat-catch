@@ -1,0 +1,60 @@
+{
+  "name": "search_with_filters",
+  "description": "\n    Search files with advanced filters.\n    \n    Args:\n        query: Search query (optional if using other filters)\n        extension: File extension filter (e.g., \"py\", \"txt\", \"pdf\")\n        folder_path: Limit search to specific folder path\n        min_size: Minimum file size (e.g., \"1mb\", \"500kb\", \"1gb\")\n        max_size: Maximum file size (e.g., \"10mb\", \"1gb\")\n        max_results: Maximum number of results (default 50)\n        match_case: Enable case-sensitive search\n        files_only: Return only files, not folders\n        folders_only: Return only folders, not files\n        sort_by: Sort by: name, path, size, extension, date-modified, date-created\n    ",
+  "inputSchema": {
+    "properties": {
+      "query": {
+        "default": "",
+        "title": "Query",
+        "type": "string"
+      },
+      "extension": {
+        "default": "",
+        "title": "Extension",
+        "type": "string"
+      },
+      "folder_path": {
+        "default": "",
+        "title": "Folder Path",
+        "type": "string"
+      },
+      "min_size": {
+        "default": "",
+        "title": "Min Size",
+        "type": "string"
+      },
+      "max_size": {
+        "default": "",
+        "title": "Max Size",
+        "type": "string"
+      },
+      "max_results": {
+        "default": 50,
+        "title": "Max Results",
+        "type": "integer"
+      },
+      "match_case": {
+        "default": false,
+        "title": "Match Case",
+        "type": "boolean"
+      },
+      "files_only": {
+        "default": false,
+        "title": "Files Only",
+        "type": "boolean"
+      },
+      "folders_only": {
+        "default": false,
+        "title": "Folders Only",
+        "type": "boolean"
+      },
+      "sort_by": {
+        "default": "",
+        "title": "Sort By",
+        "type": "string"
+      }
+    },
+    "title": "search_with_filtersArguments",
+    "type": "object"
+  }
+}

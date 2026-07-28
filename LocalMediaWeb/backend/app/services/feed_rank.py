@@ -8,10 +8,23 @@ import time
 from datetime import datetime, timezone
 
 from app.models.entities import MediaItem
+from app.services.tags import (
+    strong_tags,
+    tag_idf_weights,
+    tags_from_json,
+    title_overlap,
+    title_tokens,
+    url_host,
+    weighted_jaccard,
+)
 
 # Higher → more shuffle; scores stay preferred via softmax/Gumbel.
-# ~22 keeps liked/recency meaningful while order varies across refreshes.
 RECOMMEND_TEMPERATURE = 22.0
+
+# Personal score only breaks ties in "similar" mode (must not drown tag mismatch).
+SIMILAR_PERSONAL_CAP = 12.0
+# Title token Jaccard must clear this when used as sole similarity gate.
+SIMILAR_TITLE_MIN = 0.18
 
 
 def _ts(dt: datetime | None) -> float:
@@ -20,6 +33,10 @@ def _ts(dt: datetime | None) -> float:
     if dt.tzinfo is None:
         return dt.replace(tzinfo=timezone.utc).timestamp()
     return dt.timestamp()
+
+
+def _tags(m: MediaItem) -> list[str]:
+    return tags_from_json(getattr(m, "tags_json", None) or "[]")
 
 
 def score_item(m: MediaItem, now: float | None = None) -> float:
@@ -36,35 +53,33 @@ def score_item(m: MediaItem, now: float | None = None) -> float:
     created = _ts(getattr(m, "created_at", None))
     last_view = _ts(getattr(m, "last_viewed_at", None))
 
-    # Prefer liked; penalize repeatedly skipped
     s = 0.0
     s += liked * 120.0
     s += math.log1p(views) * 8.0
     s += math.log1p(dwell / 1000.0) * 6.0
     s -= skips * 35.0
 
-    # Recency: newer items a bit higher (half-life ~14 days)
     age_days = max(0.0, (now - created) / 86400.0) if created else 30.0
     s += 40.0 * math.exp(-age_days / 14.0)
 
-    # Soft exploration: not seen recently
     if last_view:
         hours = max(0.0, (now - last_view) / 3600.0)
         s += min(25.0, hours * 0.5)
     else:
-        s += 15.0  # never viewed
+        s += 15.0
 
     return s
 
 
 def _gumbel_noise(temperature: float) -> float:
-    """Gumbel(0, T) via inverse CDF (stdlib random has no gumbelvariate)."""
     t = max(1e-6, float(temperature))
-    # U ~ Uniform(0,1); Gumbel = -T * log(-log(U))
     u = random.random()
-    # clamp away from 0/1 so log is stable
     u = min(max(u, 1e-12), 1.0 - 1e-12)
     return -t * math.log(-math.log(u))
+
+
+def _tag_set(m: MediaItem) -> frozenset[str]:
+    return frozenset(_tags(m))
 
 
 def _softmax_rank(
@@ -73,9 +88,7 @@ def _softmax_rank(
     temperature: float = RECOMMEND_TEMPERATURE,
 ) -> list[MediaItem]:
     """
-    Rank by score + Gumbel noise, then light category diversity.
-    Each call yields a different order while high-score items still appear
-    more often (softmax sampling / Plackett–Luce style).
+    Rank by score + Gumbel noise, then light tag diversity.
     """
     if not scored:
         return []
@@ -87,14 +100,17 @@ def _softmax_rank(
         if len(out) < 2:
             out.append(rest.pop(0))
             continue
-        last_cat = out[-1].category
-        # Among top candidates, prefer a different category with ~70% chance
+        last_tags = _tag_set(out[-1])
         window = rest[: min(14, len(rest))]
-        alt = [i for i, m in enumerate(window) if m.category != last_cat]
+        # Prefer different tag set when possible
+        alt = [
+            i
+            for i, m in enumerate(window)
+            if last_tags and _tag_set(m) != last_tags
+        ]
         if alt and random.random() < 0.72:
             pick_i = random.choice(alt)
         else:
-            # Soft random among top-3 instead of always #0
             k = min(3, len(window))
             pick_i = random.randrange(k)
         out.append(rest.pop(pick_i))
@@ -107,25 +123,134 @@ def rank_recommend(items: list[MediaItem], limit: int = 30) -> list[MediaItem]:
     return _softmax_rank(scored, limit)
 
 
-def category_affinity(items: list[MediaItem]) -> dict[str, float]:
-    """How much user likes each category from liked/views."""
+def tag_affinity(items: list[MediaItem]) -> dict[str, float]:
+    """How much user likes each tag from liked/views."""
     aff: dict[str, float] = {}
     for m in items:
-        c = m.category or "default"
-        aff.setdefault(c, 0.0)
-        if getattr(m, "liked", False):
-            aff[c] += 5.0
-        aff[c] += math.log1p(int(getattr(m, "view_count", 0) or 0)) * 0.5
-        aff[c] -= int(getattr(m, "skip_count", 0) or 0) * 0.8
+        for t in _tags(m):
+            aff.setdefault(t, 0.0)
+            if getattr(m, "liked", False):
+                aff[t] += 5.0
+            aff[t] += math.log1p(int(getattr(m, "view_count", 0) or 0)) * 0.5
+            aff[t] -= int(getattr(m, "skip_count", 0) or 0) * 0.8
     return aff
 
 
 def rank_recommend_with_affinity(items: list[MediaItem], limit: int = 30) -> list[MediaItem]:
-    aff = category_affinity(items)
+    aff = tag_affinity(items)
     now = time.time()
     scored: list[tuple[float, MediaItem]] = []
     for m in items:
         base = score_item(m, now)
-        base += aff.get(m.category or "default", 0.0) * 2.0
+        for t in _tags(m):
+            base += aff.get(t, 0.0) * 1.2
         scored.append((base, m))
     return _softmax_rank(scored, limit)
+
+
+def _similar_related(
+    seed_tags: list[str],
+    cand_tags: list[str],
+    seed_title: str,
+    cand_title: str,
+    seed_host: str,
+    cand_host: str,
+    title_sim: float,
+) -> bool:
+    """
+    Hard gate: do not surface items that only share weak format/site tags
+    or personal popularity. Content must share strong tags, title tokens,
+    or (when seed has no strong tags) a clear host/title signal.
+    """
+    seed_strong = set(strong_tags(seed_tags))
+    cand_strong = set(strong_tags(cand_tags))
+    shared_strong = seed_strong & cand_strong
+
+    if shared_strong:
+        return True
+    if title_sim >= SIMILAR_TITLE_MIN:
+        return True
+
+    # Seed has semantic tags but candidate shares none → not similar.
+    if seed_strong:
+        return False
+
+    # Seed has only weak/no tags: allow same host or title token hit.
+    if seed_host and cand_host and seed_host == cand_host:
+        return True
+    if title_tokens(seed_title) and title_tokens(cand_title):
+        # any shared token even if jaccard is low (different length titles)
+        if set(title_tokens(seed_title)) & set(title_tokens(cand_title)):
+            return True
+    return False
+
+
+def rank_similar(
+    items: list[MediaItem],
+    seed: MediaItem,
+    limit: int = 30,
+) -> list[MediaItem]:
+    """
+    Similar feed: content signals only (IDF tags, title, host, type).
+    Personal score is capped and used only as a light tie-break so
+    popular but unrelated items cannot crowd out true tag matches.
+    """
+    seed_tags = _tags(seed)
+    seed_id = seed.id
+    seed_title = getattr(seed, "title", "") or ""
+    seed_host = url_host(getattr(seed, "source_url", "") or "")
+    seed_type = (getattr(seed, "media_type", "") or "").lower().strip()
+    now = time.time()
+
+    corpus = [_tags(m) for m in items]
+    weights = tag_idf_weights(corpus)
+
+    scored: list[tuple[float, MediaItem]] = []
+    for m in items:
+        if m.id == seed_id:
+            continue
+        mt = _tags(m)
+        cand_title = getattr(m, "title", "") or ""
+        cand_host = url_host(getattr(m, "source_url", "") or "")
+        t_sim = title_overlap(seed_title, cand_title)
+
+        if not _similar_related(
+            seed_tags,
+            mt,
+            seed_title,
+            cand_title,
+            seed_host,
+            cand_host,
+            t_sim,
+        ):
+            continue
+
+        wjac = weighted_jaccard(seed_tags, mt, weights)
+        shared_strong_n = len(set(strong_tags(seed_tags)) & set(strong_tags(mt)))
+        same_host = 1.0 if seed_host and cand_host and seed_host == cand_host else 0.0
+        same_type = (
+            1.0
+            if seed_type
+            and (getattr(m, "media_type", "") or "").lower().strip() == seed_type
+            else 0.0
+        )
+        personal = min(SIMILAR_PERSONAL_CAP, max(0.0, score_item(m, now) * 0.05))
+
+        # Content dominates; personal ≤ ~12.
+        s = (
+            wjac * 220.0
+            + shared_strong_n * 55.0
+            + t_sim * 90.0
+            + same_host * 28.0
+            + same_type * 8.0
+            + personal
+        )
+        scored.append((s, m))
+
+    scored.sort(key=lambda x: x[0], reverse=True)
+    out = [seed]
+    for _, m in scored:
+        if len(out) >= limit:
+            break
+        out.append(m)
+    return out

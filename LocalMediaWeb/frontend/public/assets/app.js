@@ -5,8 +5,8 @@
   const soundKey = "lmw_want_sound";
   const state = {
     view: "feed",
-    category: "",
     mode: localStorage.getItem(feedModeKey) || "recommend",
+    similarTo: null,
     items: [],
     feedIndex: 0,
     dwellStart: 0,
@@ -234,16 +234,6 @@
     );
   }
 
-  async function loadCategories() {
-    const data = await api("/api/categories");
-    const sel = $("#categoryFilter");
-    const cur = state.category;
-    sel.innerHTML =
-      `<option value="">全部分类</option>` +
-      data.categories.map((c) => `<option value="${c}">${c}</option>`).join("");
-    sel.value = cur;
-  }
-
   async function loadFeed(opts = {}) {
     const keepId = opts.keepCurrentId;
     const quiet = !!opts.quiet;
@@ -252,7 +242,9 @@
       mode: state.mode || "recommend",
       limit: "80",
     });
-    if (state.category) q.set("category", state.category);
+    if (state.mode === "similar" && state.similarTo) {
+      q.set("similar_to", String(state.similarTo));
+    }
     const data = await api(`/api/feed?${q}`);
     state.items = data.items || [];
     state.viewedIds = new Set();
@@ -269,6 +261,78 @@
         });
       }
     }
+  }
+
+  function ensureFeedModeOption(value, label) {
+    const modeSel = $("#feedMode");
+    if (!modeSel) return;
+    if (![...modeSel.options].some((o) => o.value === value)) {
+      const opt = document.createElement("option");
+      opt.value = value;
+      opt.textContent = label;
+      modeSel.appendChild(opt);
+    }
+    modeSel.value = value;
+  }
+
+  function syncSimilarBtn() {
+    const btn = $("#btnSimilar");
+    if (!btn) return;
+    if (state.mode === "similar") {
+      btn.textContent = "推荐随机";
+      btn.title = "退出相似推荐，切换为随机 Feed";
+      btn.classList.add("is-active");
+    } else {
+      btn.textContent = "推荐相似";
+      btn.title = "根据当前 Feed 媒体的标签推荐相似内容";
+      btn.classList.remove("is-active");
+    }
+  }
+
+  async function loadRandomFeed() {
+    state.mode = "random";
+    state.similarTo = null;
+    localStorage.setItem(feedModeKey, "random");
+    ensureFeedModeOption("random", "随机");
+    syncSimilarBtn();
+    showToast("随机推荐");
+    await loadFeed();
+    setView("feed");
+  }
+
+  async function loadSimilarFromCurrent() {
+    const it = currentItem();
+    if (!it) {
+      showToast("暂无当前媒体");
+      return;
+    }
+    const tags = it.tags || [];
+    if (!tags.length) {
+      showToast("当前媒体无标签，已按推荐模式刷新");
+      state.mode = "recommend";
+      state.similarTo = null;
+      localStorage.setItem(feedModeKey, state.mode);
+      ensureFeedModeOption(state.mode, "推荐");
+      syncSimilarBtn();
+      await loadFeed();
+      return;
+    }
+    state.mode = "similar";
+    state.similarTo = it.id;
+    localStorage.setItem(feedModeKey, "similar");
+    ensureFeedModeOption("similar", "相似");
+    syncSimilarBtn();
+    showToast(`相似推荐 · 基于 #${it.id} · ${tags.slice(0, 5).join(", ")}`);
+    await loadFeed();
+    setView("feed");
+  }
+
+  async function toggleSimilarOrRandom() {
+    if (state.mode === "similar") {
+      await loadRandomFeed();
+      return;
+    }
+    await loadSimilarFromCurrent();
   }
 
   /**
@@ -293,7 +357,6 @@
       state.libRefreshing = true;
       const keepId = currentItem()?.id;
       try {
-        await loadCategories().catch(() => {});
         await loadFeed({ keepCurrentId: keepId, quiet: true });
         if (state.view === "admin") {
           await refreshAdmin().catch(() => {});
@@ -376,9 +439,12 @@
 
   function typeChip(item) {
     const partial = item.partial ? `<span class="chip warn">不完整</span>` : "";
+    const tags = (item.tags || [])
+      .slice(0, 5)
+      .map((t) => `<span class="chip tag">#${escapeHtml(t)}</span>`)
+      .join("");
     return `<span class="chip">${escapeHtml(item.media_type)}</span>
-      <span class="chip">${escapeHtml(item.category)}</span>
-      <span class="chip">#${item.id}</span>${partial}`;
+      <span class="chip">#${item.id}</span>${tags}${partial}`;
   }
 
   function renderFeed() {
@@ -1095,11 +1161,12 @@
         items
           .map(
             (m) => `<div class="admin-media-row">
+            <label class="admin-check"><input type="checkbox" data-mid="${m.id}" /></label>
             <img class="admin-thumb" data-src="${m.thumb_url}" alt="" />
             <div class="admin-media-meta">
-              <div><strong>#${m.id}</strong> · ${escapeHtml(m.media_type)} · ${escapeHtml(m.category)}${m.liked ? " · ♥" : ""}</div>
+              <div><strong>#${m.id}</strong> · ${escapeHtml(m.media_type)}${m.liked ? " · ♥" : ""}</div>
               <div class="muted">${escapeHtml(m.title || m.source_url || "")}</div>
-              <div class="muted">${ICO.eye} ${m.view_count || 0} · skip ${m.skip_count || 0}</div>
+              <div class="muted">${(m.tags || []).map((t) => "#" + escapeHtml(t)).join(" ") || "无标签"} · ${ICO.eye} ${m.view_count || 0}</div>
             </div>
             <button type="button" class="danger" data-adel="${m.id}">${ICO.trash} 删除</button>
           </div>`
@@ -1138,7 +1205,7 @@
           .map((j) => {
             const st = j.status;
             return `<div class="job">
-            <div><span class="st ${st}">${st}</span> #${j.id} · ${escapeHtml(j.media_type)} · ${escapeHtml(j.category)}</div>
+            <div><span class="st ${st}">${st}</span> #${j.id} · ${escapeHtml(j.media_type)}${(j.tags || []).length ? " · " + j.tags.map((t) => "#" + escapeHtml(t)).join(" ") : ""}</div>
             <div class="muted">${escapeHtml(j.title || j.url)}</div>
             <div>${j.segments_total ? `分片 ${j.segments_done}/${j.segments_total} · ` : ""}${j.progress?.toFixed?.(0) || 0}%</div>
             <div style="color:var(--danger)">${escapeHtml(j.error_message || "")}</div>
@@ -1170,16 +1237,29 @@
     document.querySelectorAll(".topnav .nav").forEach((b) => {
       b.addEventListener("click", () => setView(b.dataset.view));
     });
-    $("#categoryFilter").addEventListener("change", async (e) => {
-      state.category = e.target.value;
-      await loadFeed();
-    });
+    const btnSimilar = $("#btnSimilar");
+    if (btnSimilar) {
+      btnSimilar.addEventListener("click", () => toggleSimilarOrRandom());
+    }
+    syncSimilarBtn();
     const modeSel = $("#feedMode");
     if (modeSel) {
-      modeSel.value = state.mode;
+      if (![...modeSel.options].some((o) => o.value === "similar")) {
+        const opt = document.createElement("option");
+        opt.value = "similar";
+        opt.textContent = "相似";
+        modeSel.appendChild(opt);
+      }
+      modeSel.value = state.mode === "similar" ? "similar" : state.mode;
       modeSel.addEventListener("change", async (e) => {
         state.mode = e.target.value;
+        if (state.mode !== "similar") state.similarTo = null;
         localStorage.setItem(feedModeKey, state.mode);
+        syncSimilarBtn();
+        if (state.mode === "similar" && !state.similarTo) {
+          await loadSimilarFromCurrent();
+          return;
+        }
         await loadFeed();
       });
     }
@@ -1190,7 +1270,6 @@
     $("#btnRescan").onclick = async () => {
       const r = await api("/api/rescan", { method: "POST" });
       alert(`扫描完成\n新增 ${r.added ?? 0} · 跳过 ${r.skipped ?? 0}`);
-      await loadCategories();
       await loadFeed();
       await refreshAdminMedia();
     };
@@ -1206,7 +1285,6 @@
               `清理无效 ${r.purged ?? 0} · 修正大小 ${r.fixed_size ?? 0} · 孤儿缩略图 ${r.orphan_thumbs ?? 0}\n` +
               `新扫描入库 ${r.added ?? 0} · 跳过 ${r.skipped ?? 0}`
           );
-          await loadCategories();
           await loadFeed();
           await refreshAdminMedia();
         } catch (e) {
@@ -1218,17 +1296,40 @@
     }
     $("#btnRefreshJobs").onclick = () => refreshAdmin();
     $("#btnRefreshMedia").onclick = () => refreshAdminMedia();
-    $("#btnNewCat").onclick = async () => {
-      const name = $("#newCat").value.trim();
-      if (!name) return;
-      await api("/api/categories", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ name }),
-      });
-      $("#newCat").value = "";
-      await loadCategories();
-    };
+    const btnBatchTags = $("#btnBatchTags");
+    if (btnBatchTags) {
+      btnBatchTags.onclick = async () => {
+        const ids = [...document.querySelectorAll("#adminMedia input[data-mid]:checked")].map((el) =>
+          Number(el.dataset.mid)
+        );
+        if (!ids.length) {
+          alert("请先勾选媒体");
+          return;
+        }
+        const raw = ($("#batchTagsInput") && $("#batchTagsInput").value) || "";
+        const tags = raw
+          .split(/[,，;；\s]+/)
+          .map((s) => s.trim())
+          .filter(Boolean)
+          .slice(0, 5);
+        if (!tags.length) {
+          alert("请输入至少一个标签");
+          return;
+        }
+        try {
+          const r = await api("/api/media/tags/batch", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ ids, tags, mode: "merge" }),
+          });
+          showToast(`已更新 ${r.updated || 0} 项标签`);
+          await refreshAdminMedia();
+          await loadFeed({ quiet: true });
+        } catch (e) {
+          alert("打标签失败: " + e.message);
+        }
+      };
+    }
     $("#lbClose").onclick = (e) => {
       e.stopPropagation();
       closeLightbox();
@@ -1271,8 +1372,7 @@
   }
 
   bind();
-  loadCategories()
-    .then(() => loadFeed())
+  loadFeed()
     .then(() => startLibraryPoll())
     .catch((e) => {
       const empty = $("#feedEmpty");

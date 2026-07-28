@@ -28,6 +28,8 @@
     let hideTimer = 0;
     let posTimer = 0;
     let busy = false;
+    /** 入库标签弹窗打开时为 true：暂停悬停逻辑，并锁住页面焦点 */
+    let dialogOpen = false;
 
     const SKIP_RE = /^(data:image\/svg|chrome-extension:|moz-extension:|about:|javascript:)/i;
     const MEDIA_EXT = /\.(mp4|webm|mkv|mov|m4v|m3u8|mpd|gif|jpe?g|png|webp|avif|bmp)(\?|#|$)/i;
@@ -309,7 +311,7 @@
     }
 
     function onPointerMove(e) {
-        if (!enabled || busy) return;
+        if (!enabled || busy || dialogOpen) return;
         // When over our host/badge (pointer-events on badge only), keep
         try {
             if (e.composedPath && e.composedPath().includes(host)) return;
@@ -340,6 +342,41 @@
         }, 40);
     }
 
+    /**
+     * 标签对话框：扩展独立窗口（chrome.windows popup）。
+     * 不在 grok.com 等页面内输入，彻底避免站点抢焦点。
+     */
+    function openTagDialog({ title, url, media_type }) {
+        dialogOpen = true;
+        toast("请在弹出的扩展窗口中确认标签…", 4000);
+        return new Promise((resolve) => {
+            try {
+                chrome.runtime.sendMessage(
+                    {
+                        Message: "lmwAskTags",
+                        title: String(title || "").slice(0, 512),
+                        url: url || "",
+                        media_type: media_type || "",
+                        source_page: location.href,
+                        count: 1,
+                    },
+                    (resp) => {
+                        dialogOpen = false;
+                        if (chrome.runtime.lastError) {
+                            toast("无法打开标签窗口: " + chrome.runtime.lastError.message, 3500, "err");
+                            resolve({ ok: false, cancelled: true, tags: [] });
+                            return;
+                        }
+                        resolve(resp || { ok: false, cancelled: true, tags: [] });
+                    }
+                );
+            } catch (e) {
+                dialogOpen = false;
+                resolve({ ok: false, cancelled: true, tags: [], error: String(e) });
+            }
+        });
+    }
+
     async function onIngestClick(e) {
         e.preventDefault();
         e.stopPropagation();
@@ -358,6 +395,13 @@
             document.title ||
             "media";
 
+        const dlg = await openTagDialog({ title, url, media_type: mtype });
+        if (!dlg || !dlg.ok || dlg.cancelled) {
+            toast("已取消", 1200);
+            return;
+        }
+        const tags = dlg.tags || [];
+
         busy = true;
         badge.classList.add("busy");
         badge.classList.remove("ok", "err");
@@ -371,6 +415,7 @@
                     media_type: mtype,
                     title: String(title).slice(0, 200),
                     source_page: location.href,
+                    tags,
                 });
             } else {
                 result = await new Promise((resolve, reject) => {
@@ -383,6 +428,7 @@
                             referer: location.href,
                             source_page: location.href,
                             page_url: location.href,
+                            tags,
                         },
                         (resp) => {
                             if (chrome.runtime.lastError) {
@@ -480,7 +526,8 @@
                     title: meta.title || "",
                     media_type: mtype === "m3u8" || mtype === "dash" ? "video" : mtype,
                     source_url: meta.source_page || location.href,
-                    category: settings.lmwDefaultCategory || "default",
+                    category: "default",
+                    tags: meta.tags || [],
                 },
                 (resp) => {
                     if (chrome.runtime.lastError) {

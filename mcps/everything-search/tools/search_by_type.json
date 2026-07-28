@@ -1,0 +1,32 @@
+{
+  "name": "search_by_type",
+  "description": "\n    Search for specific file types.\n    \n    Args:\n        file_type: Type: audio, video, image, document, executable, compressed, code\n        query: Additional search query (optional)\n        folder_path: Limit search to specific folder path (optional)\n        max_results: Maximum number of results (default 50)\n    ",
+  "inputSchema": {
+    "properties": {
+      "file_type": {
+        "title": "File Type",
+        "type": "string"
+      },
+      "query": {
+        "default": "",
+        "title": "Query",
+        "type": "string"
+      },
+      "folder_path": {
+        "default": "",
+        "title": "Folder Path",
+        "type": "string"
+      },
+      "max_results": {
+        "default": 50,
+        "title": "Max Results",
+        "type": "integer"
+      }
+    },
+    "required": [
+      "file_type"
+    ],
+    "title": "search_by_typeArguments",
+    "type": "object"
+  }
+}

@@ -312,11 +312,20 @@
                         $tips.innerHTML = doDownload ? i18n("downloadCompleted", "下载完成") : "已取消入库";
                         return;
                     }
+                    let host = "";
+                    try { host = location.hostname.replace(/^www\./, "").split(".").slice(-2, -1)[0] || ""; } catch (e) {}
+                    const tagRaw = window.prompt("标签（最多5个，逗号分隔；取消=中止）", ["video", "record", host].filter(Boolean).join(", "));
+                    if (tagRaw === null) {
+                        $tips.innerHTML = "已取消入库";
+                        return;
+                    }
+                    const tags = String(tagRaw).split(/[,，;；\s]+/).map((s) => s.trim().toLowerCase()).filter(Boolean).slice(0, 5);
                     $tips.innerHTML = "正在入库…";
                     catCatchIngestBlob(blob, {
                         filename: `${title}.${ext}`,
                         title,
                         media_type: "video",
+                        tags,
                     }).then((res) => {
                         const id = res?.media_id || res?.item?.id || "";
                         $tips.innerHTML = (id ? `入库成功 #${id}` : "入库成功") + (doDownload ? " / 已下载" : "");
@@ -395,6 +404,7 @@
                 title: meta.title || document.title || "record",
                 media_type: meta.media_type || "video",
                 source_url: location.href,
+                tags: meta.tags || [],
             }, location.origin);
             const timer = setTimeout(() => {
                 finish(() => reject(new Error("入库超时")));

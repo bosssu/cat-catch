@@ -1,0 +1,32 @@
+{
+  "name": "utools_zdblnfxa_video_convert",
+  "description": "视频格式转换 [utools:utools.zdblnfxa.video_convert]",
+  "inputSchema": {
+    "$schema": "http://json-schema.org/draft-07/schema#",
+    "type": "object",
+    "properties": {
+      "inputPath": {
+        "type": "string",
+        "description": "输入视频文件绝对路径"
+      },
+      "format": {
+        "type": "string",
+        "enum": [
+          "mp4",
+          "mkv",
+          "mov",
+          "webm",
+          "avi",
+          "flv",
+          "wmv"
+        ],
+        "description": "目标视频格式"
+      }
+    },
+    "required": [
+      "inputPath",
+      "format"
+    ],
+    "additionalProperties": false
+  }
+}

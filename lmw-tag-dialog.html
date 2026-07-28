@@ -1,0 +1,121 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>入库标签</title>
+  <style>
+    * { box-sizing: border-box; }
+    html, body {
+      margin: 0;
+      padding: 0;
+      background: #14141c;
+      color: #f0f0f5;
+      font: 13px/1.45 "Segoe UI", "Microsoft YaHei", sans-serif;
+    }
+    .wrap { padding: 14px 16px 16px; }
+    h1 { margin: 0 0 10px; font-size: 16px; font-weight: 700; }
+    .meta {
+      font-size: 12px;
+      opacity: 0.85;
+      word-break: break-all;
+      line-height: 1.4;
+      margin-bottom: 12px;
+      padding: 8px 10px;
+      background: #1c1c28;
+      border-radius: 8px;
+      border: 1px solid rgba(255,255,255,.08);
+      max-height: 88px;
+      overflow: auto;
+    }
+    .meta b { opacity: 0.7; font-weight: 600; }
+    .label { font-weight: 600; margin-bottom: 6px; }
+    .row { display: flex; flex-wrap: wrap; gap: 6px; margin: 8px 0; min-height: 28px; }
+    .chip {
+      display: inline-flex;
+      align-items: center;
+      gap: 4px;
+      padding: 4px 10px;
+      border-radius: 999px;
+      background: rgba(90, 130, 255, 0.35);
+      border: 1px solid rgba(120, 160, 255, 0.35);
+      font-size: 12px;
+    }
+    .chip button {
+      border: 0;
+      background: transparent;
+      color: inherit;
+      cursor: pointer;
+      font-size: 14px;
+      line-height: 1;
+      padding: 0 0 0 2px;
+    }
+    .sug {
+      appearance: none;
+      display: inline-flex;
+      align-items: center;
+      padding: 5px 12px;
+      border-radius: 999px;
+      background: rgba(255, 255, 255, 0.1);
+      color: #e8eefc;
+      font-size: 12px;
+      cursor: pointer;
+      border: 1px solid rgba(255, 255, 255, 0.18);
+    }
+    .sug:hover { border-color: rgba(120, 160, 255, 0.7); background: rgba(90, 130, 255, 0.28); }
+    .sug.on { background: rgba(90, 130, 255, 0.4); border-color: rgba(120, 160, 255, 0.8); }
+    .sug:disabled { opacity: 0.45; cursor: not-allowed; }
+    input[type="text"] {
+      width: 100%;
+      padding: 9px 11px;
+      border-radius: 8px;
+      border: 1px solid rgba(255, 255, 255, 0.15);
+      background: #0e0e14;
+      color: #fff;
+      outline: none;
+      margin-top: 4px;
+    }
+    input[type="text"]:focus { border-color: rgba(90, 140, 255, 0.7); }
+    .hint { font-size: 11px; opacity: 0.7; margin-top: 6px; }
+    .err { font-size: 11px; color: #f88; min-height: 16px; margin-top: 4px; }
+    .actions {
+      display: flex;
+      gap: 8px;
+      justify-content: flex-end;
+      margin-top: 14px;
+      flex-wrap: wrap;
+    }
+    .actions button {
+      border: 0;
+      border-radius: 8px;
+      padding: 8px 14px;
+      cursor: pointer;
+      font-weight: 600;
+      font-size: 13px;
+    }
+    .btn-ok { background: #3b82f6; color: #fff; }
+    .btn-skip { background: rgba(255, 255, 255, 0.12); color: #fff; }
+    .btn-cancel { background: transparent; color: #aaa; }
+    .empty { opacity: 0.5; font-size: 12px; }
+  </style>
+</head>
+<body>
+  <div class="wrap">
+    <h1 id="heading">入库详情</h1>
+    <div class="meta" id="meta">加载中…</div>
+    <div class="label">已选标签（最多 5 个）</div>
+    <div class="row" id="chips"></div>
+    <div class="hint">建议标签（点击添加 / 再点取消）</div>
+    <div class="row" id="sug"></div>
+    <div class="hint">或手动输入后回车添加</div>
+    <input type="text" id="input" placeholder="例如: anime, 1080p" maxlength="64" autocomplete="off" spellcheck="false" />
+    <div class="err" id="err"></div>
+    <div class="actions">
+      <button type="button" class="btn-cancel" id="btnCancel">取消</button>
+      <button type="button" class="btn-skip" id="btnSkip">不打标签入库</button>
+      <button type="button" class="btn-ok" id="btnOk">确认入库</button>
+    </div>
+  </div>
+  <script src="js/lmw-tag-dialog.js"></script>
+</body>
+</html>

@@ -1,0 +1,21 @@
+{
+  "name": "utools_pdfconverter_pdf_merge",
+  "description": "将多个 PDF 文件合并成一个PDF文件 [utools:utools.pdfconverter.pdf_merge]",
+  "inputSchema": {
+    "$schema": "http://json-schema.org/draft-07/schema#",
+    "type": "object",
+    "properties": {
+      "inputPaths": {
+        "type": "array",
+        "items": {
+          "type": "string",
+          "description": "PDF 文件路径"
+        }
+      }
+    },
+    "required": [
+      "inputPaths"
+    ],
+    "additionalProperties": false
+  }
+}

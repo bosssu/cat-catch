@@ -1,0 +1,50 @@
+{
+  "name": "search_by_attributes",
+  "description": "\n    Search files by Windows file attributes.\n    \n    Args:\n        query: Additional search query (optional)\n        hidden: Find hidden files\n        system: Find system files\n        read_only: Find read-only files\n        compressed: Find compressed files\n        encrypted: Find encrypted files\n        folder_path: Limit search to specific folder (optional)\n        max_results: Maximum number of results (default 50)\n    ",
+  "inputSchema": {
+    "properties": {
+      "query": {
+        "default": "",
+        "title": "Query",
+        "type": "string"
+      },
+      "hidden": {
+        "default": false,
+        "title": "Hidden",
+        "type": "boolean"
+      },
+      "system": {
+        "default": false,
+        "title": "System",
+        "type": "boolean"
+      },
+      "read_only": {
+        "default": false,
+        "title": "Read Only",
+        "type": "boolean"
+      },
+      "compressed": {
+        "default": false,
+        "title": "Compressed",
+        "type": "boolean"
+      },
+      "encrypted": {
+        "default": false,
+        "title": "Encrypted",
+        "type": "boolean"
+      },
+      "folder_path": {
+        "default": "",
+        "title": "Folder Path",
+        "type": "string"
+      },
+      "max_results": {
+        "default": 50,
+        "title": "Max Results",
+        "type": "integer"
+      }
+    },
+    "title": "search_by_attributesArguments",
+    "type": "object"
+  }
+}

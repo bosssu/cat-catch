@@ -1,0 +1,27 @@
+{
+  "name": "utools_todo_todo_search",
+  "description": "搜索待办事项，支持关键词、分组、状态、结束日期筛选 [utools:utools.todo.todo_search]",
+  "inputSchema": {
+    "$schema": "http://json-schema.org/draft-07/schema#",
+    "type": "object",
+    "properties": {
+      "query": {
+        "type": "string",
+        "description": "关键词搜索（可选）"
+      },
+      "group": {
+        "type": "string",
+        "description": "分组名称筛选（可选）"
+      },
+      "status": {
+        "type": "string",
+        "description": "按状态筛选：done=已完成，pending=未完成（可选）"
+      },
+      "dueAt": {
+        "type": "string",
+        "description": "结束日期筛选，格式：2025-12-31（可选）"
+      }
+    },
+    "additionalProperties": false
+  }
+}

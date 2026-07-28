@@ -1,0 +1,40 @@
+{
+  "name": "utools_zdblnfxa_video_extract_audio",
+  "description": "从视频中提取音频轨道，并导出为指定格式的音频文件 [utools:utools.zdblnfxa.video_extract_audio]",
+  "inputSchema": {
+    "$schema": "http://json-schema.org/draft-07/schema#",
+    "type": "object",
+    "properties": {
+      "inputPath": {
+        "type": "string",
+        "description": "输入视频文件的绝对路径"
+      },
+      "format": {
+        "default": "mp3",
+        "type": "string",
+        "enum": [
+          "mp3",
+          "aac",
+          "wav",
+          "flac",
+          "m4a"
+        ],
+        "description": "导出音频文件的格式"
+      },
+      "startTime": {
+        "default": 0,
+        "type": "number",
+        "description": "音频截取的起始时间（秒）"
+      },
+      "duration": {
+        "default": null,
+        "type": "number",
+        "description": "截取音频的时长（秒），不指定则提取整段视频音频"
+      }
+    },
+    "required": [
+      "inputPath"
+    ],
+    "additionalProperties": false
+  }
+}

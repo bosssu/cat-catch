@@ -402,6 +402,36 @@ function lmwGuessExt(url, mime, mediaType) {
     return "mp4";
 }
 
+function lmwNormalizeTags(raw) {
+    if (!raw) return [];
+    let list = raw;
+    if (typeof raw === "string") {
+        try {
+            const j = JSON.parse(raw);
+            list = Array.isArray(j) ? j : String(raw).split(/[,，;；\s]+/);
+        } catch (e) {
+            list = String(raw).split(/[,，;；\s]+/);
+        }
+    }
+    if (!Array.isArray(list)) return [];
+    const out = [];
+    const seen = new Set();
+    for (const t of list) {
+        let name = String(t || "")
+            .trim()
+            .toLowerCase()
+            .replace(/^#/, "")
+            .replace(/\s+/g, "-")
+            .replace(/[^\w\u4e00-\u9fff\-+.#]/gi, "")
+            .slice(0, 32);
+        if (!name || seen.has(name)) continue;
+        seen.add(name);
+        out.push(name);
+        if (out.length >= 5) break;
+    }
+    return out;
+}
+
 async function lmwUploadBlob(s, blob, meta) {
     const fd = new FormData();
     fd.append("category", meta.category || s.lmwDefaultCategory || "default");
@@ -409,6 +439,8 @@ async function lmwUploadBlob(s, blob, meta) {
     fd.append("source_url", meta.source_url || meta.url || "");
     fd.append("media_type", meta.media_type || "video");
     fd.append("remux", "1");
+    const tags = lmwNormalizeTags(meta.tags || []);
+    if (tags.length) fd.append("tags", JSON.stringify(tags));
     const name = meta.filename || "upload.bin";
     fd.append("file", blob, name);
     const headers = lmwAuthHeaders(s, false);
@@ -450,7 +482,8 @@ async function lmwPageIngestFromBackground(Message) {
     const mediaType = Message.media_type || "video";
     const title = Message.title || "";
     const page = Message.source_page || Message.page_url || Message.referer || "";
-    const category = Message.category || s.lmwDefaultCategory || "default";
+    const category = "default";
+    const tags = lmwNormalizeTags(Message.tags || []);
     const isStream =
         mediaType === "m3u8" ||
         mediaType === "dash" ||
@@ -482,6 +515,7 @@ async function lmwPageIngestFromBackground(Message) {
                 source_url: url,
                 media_type: mediaType === "m3u8" || mediaType === "dash" ? "video" : mediaType,
                 filename: `${String(title || "media").slice(0, 40)}.${ext}`,
+                tags,
             });
             return up;
         } catch (e) {
@@ -502,11 +536,12 @@ async function lmwPageIngestFromBackground(Message) {
         referer: page,
         source_page: page,
         headers,
+        tags,
     };
     const ingestRes = await lmwFetchJson(lmwBaseUrl(s) + "/api/ingest", {
         method: "POST",
         headers: lmwAuthHeaders(s, true),
-        body: JSON.stringify({ category, items: [item] }),
+        body: JSON.stringify({ category, items: [item], tags }),
     });
 
     const dupIds = ingestRes.duplicate_media_ids || [];
@@ -568,6 +603,7 @@ async function lmwPageIngestFromBackground(Message) {
                 source_url: url,
                 media_type: mediaType,
                 filename: `${String(title || "media").slice(0, 40)}.${ext}`,
+                tags,
             });
             return { ...up, note: "fallback_upload", job_id: jobId };
         } catch (e2) {
@@ -600,13 +636,107 @@ async function lmwPageUploadFromBackground(Message) {
     const blob = new Blob([buf], { type: Message.mime || "application/octet-stream" });
     if (!blob.size) throw new Error("文件为空");
     return lmwUploadBlob(s, blob, {
-        category: Message.category || s.lmwDefaultCategory || "default",
+        category: "default",
         title: Message.title || "",
         source_url: Message.source_url || "",
         media_type: Message.media_type || "video",
         filename: Message.filename || "upload.bin",
+        tags: Message.tags || [],
     });
 }
+
+/**
+ * 页面浮动入库：标签对话框用扩展独立窗口，避免 grok.com 等站点抢焦点。
+ * requestId → { sendResponse, windowId, timer }
+ */
+const lmwTagDialogWaiters = new Map();
+
+function lmwSuggestTagsLocal({ title = "", url = "", media_type = "", source_page = "" } = {}) {
+    const c = [];
+    const mt = (media_type || "").toLowerCase();
+    if (["video", "image", "gif", "m3u8", "dash"].includes(mt)) c.push(mt);
+    try {
+        const host = new URL(url || source_page || "https://local.invalid").hostname
+            .replace(/^www\./, "");
+        const parts = host.split(".");
+        if (parts.length >= 2) c.push(parts[parts.length - 2]);
+    } catch (e) { /* ignore */ }
+    const toks = String(title || "").match(/[\u4e00-\u9fff]{2,6}|[A-Za-z][A-Za-z0-9_-]{2,16}/g) || [];
+    for (const t of toks.slice(0, 2)) c.push(t.toLowerCase());
+    return lmwNormalizeTags(c);
+}
+
+function lmwOpenTagDialogWindow(payload) {
+    return new Promise((resolve) => {
+        const requestId =
+            "tag_" + Date.now().toString(36) + "_" + Math.random().toString(36).slice(2, 8);
+        const data = {
+            title: payload.title || "",
+            url: payload.url || "",
+            media_type: payload.media_type || "",
+            source_page: payload.source_page || "",
+            count: payload.count || 1,
+            tags: lmwNormalizeTags(payload.tags || []),
+            suggestions: lmwSuggestTagsLocal(payload),
+        };
+        const key = "lmwTagAsk_" + requestId;
+        const store = chrome.storage.session || chrome.storage.local;
+        store.set({ [key]: data }, () => {
+            const url = chrome.runtime.getURL("lmw-tag-dialog.html") + "?rid=" + encodeURIComponent(requestId);
+            chrome.windows.create(
+                {
+                    url,
+                    type: "popup",
+                    width: 440,
+                    height: 520,
+                    focused: true,
+                },
+                (win) => {
+                    if (chrome.runtime.lastError || !win) {
+                        store.remove(key);
+                        // 无法开窗时：返回空标签继续入库，避免卡死
+                        resolve({ ok: true, tags: data.suggestions.slice(0, 2), fallback: true });
+                        return;
+                    }
+                    const windowId = win.id;
+                    const timer = setTimeout(() => {
+                        const w = lmwTagDialogWaiters.get(requestId);
+                        if (!w) return;
+                        lmwTagDialogWaiters.delete(requestId);
+                        store.remove(key);
+                        try {
+                            chrome.windows.remove(windowId);
+                        } catch (e) { /* ignore */ }
+                        resolve({ ok: false, cancelled: true, tags: [], timeout: true });
+                    }, 10 * 60 * 1000);
+                    lmwTagDialogWaiters.set(requestId, {
+                        resolve,
+                        windowId,
+                        timer,
+                        storageKey: key,
+                    });
+                }
+            );
+        });
+    });
+}
+
+chrome.windows?.onRemoved?.addListener((windowId) => {
+    // 延迟：确认入库时先发 result 再关窗，避免误判为取消
+    setTimeout(() => {
+        for (const [rid, w] of lmwTagDialogWaiters.entries()) {
+            if (w.windowId !== windowId) continue;
+            clearTimeout(w.timer);
+            lmwTagDialogWaiters.delete(rid);
+            try {
+                (chrome.storage.session || chrome.storage.local).remove(w.storageKey);
+            } catch (e) { /* ignore */ }
+            try {
+                w.resolve({ ok: false, cancelled: true, tags: [] });
+            } catch (e) { /* ignore */ }
+        }
+    }, 200);
+});
 
 /**
  * 监听 扩展 message 事件
@@ -614,6 +744,49 @@ async function lmwPageUploadFromBackground(Message) {
 chrome.runtime.onMessage.addListener(function (Message, sender, sendResponse) {
     if (chrome.runtime.lastError) { return; }
     // 页面浮动入库不依赖媒体嗅探 init，优先处理
+    if (Message.Message == "lmwAskTags") {
+        lmwOpenTagDialogWindow(Message)
+            .then((r) => sendResponse(r))
+            .catch((e) => sendResponse({ ok: false, cancelled: true, tags: [], error: String(e) }));
+        return true;
+    }
+    if (Message.Message == "lmwTagDialogGet") {
+        const rid = Message.requestId || "";
+        const key = "lmwTagAsk_" + rid;
+        const store = chrome.storage.session || chrome.storage.local;
+        store.get(key, (items) => {
+            const data = items && items[key];
+            if (!data) {
+                sendResponse({ ok: false, error: "expired" });
+                return;
+            }
+            sendResponse({ ok: true, data });
+        });
+        return true;
+    }
+    if (Message.Message == "lmwTagDialogResult") {
+        const rid = Message.requestId || "";
+        const w = lmwTagDialogWaiters.get(rid);
+        if (w) {
+            clearTimeout(w.timer);
+            lmwTagDialogWaiters.delete(rid);
+            try {
+                (chrome.storage.session || chrome.storage.local).remove(w.storageKey);
+            } catch (e) { /* ignore */ }
+            const result = Message.result || { ok: false, cancelled: true, tags: [] };
+            try {
+                w.resolve(result);
+            } catch (e) { /* ignore */ }
+            // 关闭弹窗（若仍打开）
+            if (w.windowId != null) {
+                try {
+                    chrome.windows.remove(w.windowId, () => void chrome.runtime.lastError);
+                } catch (e) { /* ignore */ }
+            }
+        }
+        sendResponse({ ok: true });
+        return true;
+    }
     if (Message.Message == "lmwPageIngest") {
         lmwPageIngestFromBackground(Message)
             .then((r) => sendResponse(r))

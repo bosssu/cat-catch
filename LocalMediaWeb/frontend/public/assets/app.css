@@ -147,6 +147,29 @@ button { cursor: pointer; }
 }
 .select-wrap select option { background: #1a1a24; color: #fff; }
 
+.nav-filter-btn {
+  appearance: none;
+  border: 1px solid var(--card-border);
+  background: var(--bg-elevated);
+  color: var(--fg);
+  font-size: 13px;
+  font-weight: 600;
+  padding: 8px 14px;
+  border-radius: 999px;
+  cursor: pointer;
+  backdrop-filter: blur(12px);
+  -webkit-backdrop-filter: blur(12px);
+}
+.nav-filter-btn:hover {
+  border-color: rgba(120, 160, 255, 0.45);
+  background: rgba(80, 120, 220, 0.18);
+}
+.nav-filter-btn.is-active {
+  border-color: rgba(120, 160, 255, 0.55);
+  background: rgba(80, 120, 220, 0.28);
+  color: #dce8ff;
+}
+
 /* —— Views —— */
 .view { min-height: 100%; }
 .page-head {
@@ -376,6 +399,13 @@ body.is-chrome-hidden .lmw-toast {
   color: rgba(255,255,255,0.85);
 }
 .chip.warn { background: rgba(255, 170, 80, 0.25); color: #ffd09a; }
+.chip.tag { background: rgba(100, 140, 255, 0.22); color: #c8d8ff; }
+
+.admin-check {
+  display: flex;
+  align-items: center;
+  padding: 0 4px;
+}
 
 .hud .actions {
   display: flex;

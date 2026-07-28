@@ -1,0 +1,17 @@
+{
+  "name": "open_file_location",
+  "description": "\n    Open the folder containing a file in Windows Explorer.\n    \n    Args:\n        file_path: Full path to the file\n    ",
+  "inputSchema": {
+    "properties": {
+      "file_path": {
+        "title": "File Path",
+        "type": "string"
+      }
+    },
+    "required": [
+      "file_path"
+    ],
+    "title": "open_file_locationArguments",
+    "type": "object"
+  }
+}

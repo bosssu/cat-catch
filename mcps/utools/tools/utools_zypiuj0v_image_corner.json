@@ -1,0 +1,24 @@
+{
+  "name": "utools_zypiuj0v_image_corner",
+  "description": "为图片添加圆角效果，支持像素值或百分比两种方式指定圆角半径。 [utools:utools.zypiuj0v.image_corner]",
+  "inputSchema": {
+    "$schema": "http://json-schema.org/draft-07/schema#",
+    "type": "object",
+    "properties": {
+      "inputPath": {
+        "type": "string",
+        "format": "uri",
+        "description": "图片文件路径"
+      },
+      "radius": {
+        "type": "string",
+        "description": "圆角半径，可以是像素值（如 10）或百分比（如 10%），百分比表示相对于图片较小边长的比例"
+      }
+    },
+    "required": [
+      "inputPath",
+      "radius"
+    ],
+    "additionalProperties": false
+  }
+}

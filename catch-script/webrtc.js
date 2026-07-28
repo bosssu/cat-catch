@@ -312,17 +312,24 @@
             if (!window.confirm(`确认将 WebRTC 录制入库到媒体库？\n约 ${sizeMb} MB · ${ext}`)) {
                 tips(doDownload ? "已下载，已取消入库" : "已取消入库");
             } else {
+                const tagRaw = window.prompt("标签（最多5个，逗号分隔；取消=中止）", "video, webrtc");
+                if (tagRaw === null) {
+                    tips("已取消入库");
+                } else {
+                const tags = String(tagRaw).split(/[,，;；\s]+/).map((s) => s.trim().toLowerCase()).filter(Boolean).slice(0, 5);
                 tips("正在入库…");
                 catCatchIngestBlob(blob, {
                     filename: `${title}.${ext}`,
                     title,
                     media_type: "video",
+                    tags,
                 }).then((res) => {
                     const id = res?.media_id || res?.item?.id || "";
                     tips((id ? `入库成功 #${id}` : "入库成功") + (doDownload ? " / 已下载" : ""));
                 }).catch((e) => {
                     tips("入库失败: " + (e?.message || e));
                 });
+                }
             }
         }
     }
@@ -355,6 +362,7 @@
                 title: meta.title || document.title || "webrtc",
                 media_type: meta.media_type || "video",
                 source_url: location.href,
+                tags: meta.tags || [],
             }, location.origin);
             const timer = setTimeout(() => {
                 finish(() => reject(new Error("入库超时")));

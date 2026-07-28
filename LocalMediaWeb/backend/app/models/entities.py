@@ -27,6 +27,8 @@ class MediaItem(Base):
     thumb_rel: Mapped[str] = mapped_column(String(1024), default="")
     partial: Mapped[bool] = mapped_column(Boolean, default=False)
     warning: Mapped[str] = mapped_column(Text, default="")
+    # JSON array string, e.g. ["video","bilibili"] — max 5 tags (app layer)
+    tags_json: Mapped[str] = mapped_column(Text, default="[]")
     # Feed / personalization (single-user LAN; "like" ≈ favorite)
     liked: Mapped[bool] = mapped_column(Boolean, default=False, index=True)
     like_count: Mapped[int] = mapped_column(Integer, default=0)  # toggles still 0/1; kept for UI
@@ -51,6 +53,7 @@ class DownloadJob(Base):
     source_page: Mapped[str] = mapped_column(String(2048), default="")
     # JSON string of headers (short-lived; may be cleared after success)
     headers_json: Mapped[str] = mapped_column(Text, default="{}")
+    tags_json: Mapped[str] = mapped_column(Text, default="[]")
     status: Mapped[str] = mapped_column(String(32), index=True, default="queued")
     http_status: Mapped[int] = mapped_column(Integer, default=0)
     error_message: Mapped[str] = mapped_column(Text, default="")

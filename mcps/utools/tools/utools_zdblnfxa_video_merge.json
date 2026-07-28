@@ -1,0 +1,27 @@
+{
+  "name": "utools_zdblnfxa_video_merge",
+  "description": "将多个视频文件按顺序合并为一个视频文件。 [utools:utools.zdblnfxa.video_merge]",
+  "inputSchema": {
+    "$schema": "http://json-schema.org/draft-07/schema#",
+    "type": "object",
+    "properties": {
+      "inputPaths": {
+        "minItems": 2,
+        "type": "array",
+        "items": {
+          "type": "string"
+        },
+        "description": "待合并的视频文件绝对路径数组"
+      },
+      "reencode": {
+        "default": false,
+        "type": "boolean",
+        "description": "是否重新编码。false 使用快速流复制合并（要求视频参数一致）；true 重新编码以兼容不同视频参数。"
+      }
+    },
+    "required": [
+      "inputPaths"
+    ],
+    "additionalProperties": false
+  }
+}

@@ -1,0 +1,18 @@
+{
+  "name": "utools_zdblnfxa_video_info",
+  "description": "获取本地视频文件的元信息，包括文件大小、时长、封装格式以及视频/音频流信息。 [utools:utools.zdblnfxa.video_info]",
+  "inputSchema": {
+    "$schema": "http://json-schema.org/draft-07/schema#",
+    "type": "object",
+    "properties": {
+      "inputPath": {
+        "type": "string",
+        "description": "输入视频文件绝对路径"
+      }
+    },
+    "required": [
+      "inputPath"
+    ],
+    "additionalProperties": false
+  }
+}

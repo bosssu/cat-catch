@@ -1,0 +1,29 @@
+{
+  "name": "utools_zdblnfxa_video_clip",
+  "description": "按指定时间区间裁剪视频片段。 [utools:utools.zdblnfxa.video_clip]",
+  "inputSchema": {
+    "$schema": "http://json-schema.org/draft-07/schema#",
+    "type": "object",
+    "properties": {
+      "inputPath": {
+        "type": "string",
+        "description": "输入视频文件绝对路径"
+      },
+      "startTime": {
+        "default": 0,
+        "type": "number",
+        "minimum": 0,
+        "description": "裁剪开始时间（秒）"
+      },
+      "endTime": {
+        "type": "number",
+        "description": "裁剪结束时间（秒）"
+      }
+    },
+    "required": [
+      "inputPath",
+      "endTime"
+    ],
+    "additionalProperties": false
+  }
+}

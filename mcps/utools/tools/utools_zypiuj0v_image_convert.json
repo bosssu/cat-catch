@@ -1,0 +1,36 @@
+{
+  "name": "utools_zypiuj0v_image_convert",
+  "description": "将图片转换为指定的格式，支持多种常见图片格式。 [utools:utools.zypiuj0v.image_convert]",
+  "inputSchema": {
+    "$schema": "http://json-schema.org/draft-07/schema#",
+    "type": "object",
+    "properties": {
+      "inputPath": {
+        "type": "string",
+        "format": "uri",
+        "description": "图片文件路径"
+      },
+      "format": {
+        "type": "string",
+        "enum": [
+          "png",
+          "jpg",
+          "jpeg",
+          "webp",
+          "tiff",
+          "avif",
+          "gif",
+          "svg",
+          "bmp",
+          "ico"
+        ],
+        "description": "目标图片格式"
+      }
+    },
+    "required": [
+      "inputPath",
+      "format"
+    ],
+    "additionalProperties": false
+  }
+}

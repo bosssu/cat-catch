@@ -1,0 +1,20 @@
+{
+  "name": "utools_video_start_screen_record",
+  "description": "开始录制屏幕（全屏录制） [utools:utools.video.start_screen_record]",
+  "inputSchema": {
+    "$schema": "http://json-schema.org/draft-07/schema#",
+    "type": "object",
+    "properties": {
+      "displayId": {
+        "type": "number",
+        "description": "显示器ID，不传则使用主显示器"
+      },
+      "systemAudio": {
+        "default": true,
+        "type": "boolean",
+        "description": "是否录制系统声音"
+      }
+    },
+    "additionalProperties": false
+  }
+}

@@ -1,0 +1,15 @@
+{
+  "name": "utools_video_screen_capture",
+  "description": "截取屏幕画面并保存为图片文件。默认使用主显示器 [utools:utools.video.screen_capture]",
+  "inputSchema": {
+    "$schema": "http://json-schema.org/draft-07/schema#",
+    "type": "object",
+    "properties": {
+      "displayId": {
+        "type": "number",
+        "description": "显示器ID，不传则使用主显示器"
+      }
+    },
+    "additionalProperties": false
+  }
+}

@@ -1,0 +1,39 @@
+{
+  "name": "utools_clipboard_content_pin_to_screen",
+  "description": "将文本、图片或文件固定到屏幕悬浮中转区，以置顶小窗形式展示，支持拖拽与快速访问。 [utools:utools.clipboard.content_pin_to_screen]",
+  "inputSchema": {
+    "$schema": "http://json-schema.org/draft-07/schema#",
+    "type": "object",
+    "properties": {
+      "type": {
+        "type": "string",
+        "enum": [
+          "text",
+          "image",
+          "files"
+        ],
+        "description": "内容类型"
+      },
+      "text": {
+        "type": "string",
+        "description": "文本内容（type 为 text 时必填）"
+      },
+      "image": {
+        "type": "string",
+        "description": "图片文件绝对路径（type 为 image 时必填）"
+      },
+      "files": {
+        "type": "array",
+        "items": {
+          "type": "string",
+          "description": "文件或文件夹的绝对路径"
+        },
+        "description": "文件或文件夹路径（type 为 files 时必填）"
+      }
+    },
+    "required": [
+      "type"
+    ],
+    "additionalProperties": false
+  }
+}

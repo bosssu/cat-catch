@@ -1,0 +1,30 @@
+{
+  "name": "search_large_files",
+  "description": "\n    Find large files.\n    \n    Args:\n        min_size: Minimum file size (e.g., \"100mb\", \"1gb\", \"500kb\"). Default: 100mb\n        folder_path: Limit search to specific folder (optional)\n        extension: File extension filter (optional)\n        max_results: Maximum number of results (default 50)\n    ",
+  "inputSchema": {
+    "properties": {
+      "min_size": {
+        "default": "100mb",
+        "title": "Min Size",
+        "type": "string"
+      },
+      "folder_path": {
+        "default": "",
+        "title": "Folder Path",
+        "type": "string"
+      },
+      "extension": {
+        "default": "",
+        "title": "Extension",
+        "type": "string"
+      },
+      "max_results": {
+        "default": 50,
+        "title": "Max Results",
+        "type": "integer"
+      }
+    },
+    "title": "search_large_filesArguments",
+    "type": "object"
+  }
+}

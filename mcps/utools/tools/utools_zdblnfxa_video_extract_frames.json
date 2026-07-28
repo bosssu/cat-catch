@@ -1,0 +1,44 @@
+{
+  "name": "utools_zdblnfxa_video_extract_frames",
+  "description": "从视频中提取图像帧，可提取单帧或按时间间隔提取多帧 [utools:utools.zdblnfxa.video_extract_frames]",
+  "inputSchema": {
+    "$schema": "http://json-schema.org/draft-07/schema#",
+    "type": "object",
+    "properties": {
+      "inputPath": {
+        "type": "string",
+        "description": "输入视频文件绝对路径"
+      },
+      "startTime": {
+        "default": 0,
+        "type": "number",
+        "minimum": 0,
+        "description": "开始提取时间（秒）"
+      },
+      "frameCount": {
+        "default": 1,
+        "type": "integer",
+        "minimum": 1,
+        "maximum": 9007199254740991,
+        "description": "提取帧数量 / 最大帧数"
+      },
+      "interval": {
+        "default": null,
+        "type": "number",
+        "minimum": 0.01,
+        "description": "帧提取间隔（秒），不指定则连续抽取 frameCount 帧"
+      },
+      "width": {
+        "default": null,
+        "type": "integer",
+        "minimum": -9007199254740991,
+        "maximum": 9007199254740991,
+        "description": "输出图片宽度，默认使用视频原宽度，高度按比例自动计算"
+      }
+    },
+    "required": [
+      "inputPath"
+    ],
+    "additionalProperties": false
+  }
+}

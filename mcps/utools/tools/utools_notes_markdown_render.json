@@ -1,0 +1,27 @@
+{
+  "name": "utools_notes_markdown_render",
+  "description": "将 Markdown 文本渲染为图片或 PDF 文件，用于可视化展示或文档导出。\n\n支持扩展语法（可直接使用）：\n- Mermaid 图表：```mermaid 代码块\n- ECharts 图表：```echarts 代码块\n- LaTeX 数学公式：$...$（行内）、$$...$$（块级）\n- 任务列表：- [ ] / - [x]\n- 高亮标记：==text==\n- 多语言代码高亮：```js / ```python 等\n\n当需要生成包含图表、流程图、公式或代码展示的内容时优先使用此工具。\n输入内容将被直接渲染，请确保语法正确。 [utools:utools.notes.markdown_render]",
+  "inputSchema": {
+    "$schema": "http://json-schema.org/draft-07/schema#",
+    "type": "object",
+    "properties": {
+      "markdown": {
+        "type": "string",
+        "description": "Markdown 原文内容"
+      },
+      "format": {
+        "type": "string",
+        "enum": [
+          "image",
+          "pdf"
+        ],
+        "description": "输出格式：image（图片）或 pdf（文档）"
+      }
+    },
+    "required": [
+      "markdown",
+      "format"
+    ],
+    "additionalProperties": false
+  }
+}

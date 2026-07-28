@@ -1,0 +1,48 @@
+{
+  "name": "utools_zypiuj0v_image_merge_to_gif",
+  "description": "将多张图片合并为GIF动图，支持设置画面尺寸、帧间隔和背景色。 [utools:utools.zypiuj0v.image_merge_to_gif]",
+  "inputSchema": {
+    "$schema": "http://json-schema.org/draft-07/schema#",
+    "type": "object",
+    "properties": {
+      "inputPaths": {
+        "minItems": 2,
+        "type": "array",
+        "items": {
+          "type": "string",
+          "format": "uri"
+        },
+        "description": "图片文件路径数组，至少需要2张图片"
+      },
+      "width": {
+        "default": 500,
+        "type": "integer",
+        "minimum": 20,
+        "maximum": 9007199254740991,
+        "description": "GIF画面宽度（像素）, 可选，默认500"
+      },
+      "height": {
+        "default": 500,
+        "type": "integer",
+        "minimum": 20,
+        "maximum": 9007199254740991,
+        "description": "GIF画面高度（像素）, 可选，默认500"
+      },
+      "delay": {
+        "default": 1,
+        "type": "number",
+        "minimum": 1,
+        "description": "帧间隔时间（秒）, 可选，默认1秒"
+      },
+      "bgColor": {
+        "default": "#ffffff",
+        "type": "string",
+        "description": "画面背景色，十六进制颜色代码, 可选，默认#ffffff（白色）"
+      }
+    },
+    "required": [
+      "inputPaths"
+    ],
+    "additionalProperties": false
+  }
+}

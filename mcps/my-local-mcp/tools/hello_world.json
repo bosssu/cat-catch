@@ -1,0 +1,16 @@
+{
+  "name": "hello_world",
+  "description": "Test tool for MyLocalMCPServer. Returns a greeting and basic server metadata. Use this to verify the local MCP server is reachable from Grok Build.",
+  "inputSchema": {
+    "type": "object",
+    "properties": {
+      "name": {
+        "type": "string",
+        "default": "World",
+        "description": "Name to greet. Defaults to 'World'."
+      }
+    },
+    "additionalProperties": false,
+    "$schema": "http://json-schema.org/draft-07/schema#"
+  }
+}

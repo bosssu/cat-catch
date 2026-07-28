@@ -1,0 +1,20 @@
+{
+  "name": "search_empty_folders",
+  "description": "\n    Find empty folders.\n    \n    Args:\n        folder_path: Limit search to specific folder (optional)\n        max_results: Maximum number of results (default 100)\n    ",
+  "inputSchema": {
+    "properties": {
+      "folder_path": {
+        "default": "",
+        "title": "Folder Path",
+        "type": "string"
+      },
+      "max_results": {
+        "default": 100,
+        "title": "Max Results",
+        "type": "integer"
+      }
+    },
+    "title": "search_empty_foldersArguments",
+    "type": "object"
+  }
+}

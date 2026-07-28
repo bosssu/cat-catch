@@ -1,0 +1,27 @@
+{
+  "name": "search_duplicates",
+  "description": "\n    Find files with the same name (potential duplicates).\n    \n    Args:\n        filename: Exact filename to search for\n        folder_path: Limit search to specific folder (optional)\n        max_results: Maximum number of results (default 50)\n    ",
+  "inputSchema": {
+    "properties": {
+      "filename": {
+        "title": "Filename",
+        "type": "string"
+      },
+      "folder_path": {
+        "default": "",
+        "title": "Folder Path",
+        "type": "string"
+      },
+      "max_results": {
+        "default": 50,
+        "title": "Max Results",
+        "type": "integer"
+      }
+    },
+    "required": [
+      "filename"
+    ],
+    "title": "search_duplicatesArguments",
+    "type": "object"
+  }
+}

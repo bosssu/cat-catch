@@ -1,0 +1,8 @@
+{
+  "name": "utools_video_stop_screen_record",
+  "description": "停止录屏并返回录制结果 [utools:utools.video.stop_screen_record]",
+  "inputSchema": {
+    "type": "object",
+    "properties": {}
+  }
+}

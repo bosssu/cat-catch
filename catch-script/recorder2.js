@@ -236,11 +236,17 @@
                 if (!window.confirm(`确认将录屏入库到媒体库？\n约 ${sizeMb} MB · webm`)) {
                     catCatchRecorderStart.innerHTML = i18n("startRecording", "开始录制");
                 } else {
+                    const tagRaw = window.prompt("标签（最多5个，逗号分隔；取消=中止）", "video, screen");
+                    if (tagRaw === null) {
+                        catCatchRecorderStart.innerHTML = i18n("startRecording", "开始录制");
+                    } else {
+                    const tags = String(tagRaw).split(/[,，;；\s]+/).map((s) => s.trim().toLowerCase()).filter(Boolean).slice(0, 5);
                     catCatchRecorderStart.innerHTML = "入库中…";
                     catCatchIngestBlob(fileBlob, {
                         filename: `${title}.webm`,
                         title,
                         media_type: "video",
+                        tags,
                     }).then((res) => {
                         const id = res?.media_id || res?.item?.id || "";
                         alert(id ? `录屏入库成功 #${id}` : "录屏入库成功");
@@ -250,6 +256,7 @@
                         alert("入库失败: " + (e?.message || e));
                         catCatchRecorderStart.innerHTML = i18n("startRecording", "开始录制");
                     });
+                    }
                 }
             } else {
                 catCatchRecorderStart.innerHTML = i18n("startRecording", "开始录制");
@@ -289,6 +296,7 @@
                 title: meta.title || document.title || "screen",
                 media_type: meta.media_type || "video",
                 source_url: location.href,
+                tags: meta.tags || [],
             }, location.origin);
             const timer = setTimeout(() => {
                 finish(() => reject(new Error("入库超时")));

@@ -1,0 +1,25 @@
+{
+  "name": "utools_notes_markdown_notes_search",
+  "description": "搜索 Markdown 笔记（标题和正文），返回匹配结果摘要，不包含完整正文。 [utools:utools.notes.markdown_notes_search]",
+  "inputSchema": {
+    "$schema": "http://json-schema.org/draft-07/schema#",
+    "type": "object",
+    "properties": {
+      "query": {
+        "type": "string",
+        "description": "搜索关键词"
+      },
+      "limit": {
+        "default": 10,
+        "type": "integer",
+        "minimum": 1,
+        "maximum": 50,
+        "description": "返回结果数量上限"
+      }
+    },
+    "required": [
+      "query"
+    ],
+    "additionalProperties": false
+  }
+}

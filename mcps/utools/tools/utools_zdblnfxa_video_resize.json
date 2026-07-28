@@ -1,0 +1,26 @@
+{
+  "name": "utools_zdblnfxa_video_resize",
+  "description": "调整视频分辨率，必须提供 width 或 height，另一个按比例自动计算。如果同时提供 width 和 height，则强制修改为指定尺寸。 [utools:utools.zdblnfxa.video_resize]",
+  "inputSchema": {
+    "$schema": "http://json-schema.org/draft-07/schema#",
+    "type": "object",
+    "properties": {
+      "inputPath": {
+        "type": "string",
+        "description": "输入视频文件绝对路径"
+      },
+      "width": {
+        "type": "number",
+        "description": "输出视频宽度（px），可选，但至少填写 width 或 height"
+      },
+      "height": {
+        "type": "number",
+        "description": "输出视频高度（px），可选，但至少填写 width 或 height"
+      }
+    },
+    "required": [
+      "inputPath"
+    ],
+    "additionalProperties": false
+  }
+}

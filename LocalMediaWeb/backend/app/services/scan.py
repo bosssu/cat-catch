@@ -8,7 +8,7 @@ from app.core.config import get_settings
 from app.core.db import session_scope
 from app.models.entities import MediaItem
 from app.services.thumb import generate_thumb
-from app.services.util import safe_category, url_hash
+from app.services.util import url_hash
 
 IMAGE_EXT = {".jpg", ".jpeg", ".png", ".gif", ".webp", ".avif", ".bmp"}
 VIDEO_EXT = {".mp4", ".webm", ".mkv", ".mov", ".ts", ".m4v"}
@@ -28,7 +28,6 @@ def purge_missing_media() -> dict:
         for item in rows:
             path = root / item.rel_path
             if not path.is_file():
-                # orphan thumb
                 if item.thumb_rel:
                     tp = settings.data_path() / item.thumb_rel
                     try:
@@ -69,6 +68,9 @@ def purge_missing_media() -> dict:
 
 
 def rescan_medias(*, purge: bool = False) -> dict:
+    """
+    Index files under Medias/. Supports flat layout and legacy category subdirs.
+    """
     settings = get_settings()
     root = settings.medias_path()
     purge_info = purge_missing_media() if purge else {"purged": 0, "fixed_size": 0, "orphan_thumbs": 0}
@@ -79,21 +81,13 @@ def rescan_medias(*, purge: bool = False) -> dict:
             continue
         if path.name.startswith("."):
             continue
+        # skip thumbs if ever nested
         try:
             rel = path.relative_to(root).as_posix()
         except ValueError:
             continue
-        parts = Path(rel).parts
-        cat = safe_category(parts[0] if len(parts) > 1 else "default")
-        if len(parts) == 1:
-            # file directly under Medias — treat as default
-            cat = "default"
-            rel = f"default/{path.name}"
-            dest = settings.medias_path() / "default" / path.name
-            if not dest.exists():
-                dest.parent.mkdir(parents=True, exist_ok=True)
-                path.replace(dest)
-                path = dest
+        if rel.startswith("."):
+            continue
         ext = path.suffix.lower()
         if ext in IMAGE_EXT:
             mtype = "gif" if ext == ".gif" else "image"
@@ -108,13 +102,14 @@ def rescan_medias(*, purge: bool = False) -> dict:
                 skipped += 1
                 continue
             item = MediaItem(
-                category=cat,
+                category="default",
                 title=path.stem,
                 media_type=mtype,
                 rel_path=rel,
                 source_url="",
-                url_hash=url_hash(rel, cat),
+                url_hash=url_hash(rel, "default"),
                 file_size=path.stat().st_size,
+                tags_json="[]",
             )
             db.add(item)
             db.commit()
@@ -133,23 +128,11 @@ def rescan_medias(*, purge: bool = False) -> dict:
 
 
 def list_categories() -> list[str]:
-    settings = get_settings()
-    cats = set()
-    root = settings.medias_path()
-    if root.is_dir():
-        for p in root.iterdir():
-            if p.is_dir() and not p.name.startswith("."):
-                cats.add(p.name)
-    with session_scope() as db:
-        for row in db.scalars(select(MediaItem.category).distinct()).all():
-            if row:
-                cats.add(row)
-    if not cats:
-        cats.add("default")
-    return sorted(cats)
+    """Deprecated: always return default for old clients."""
+    return ["default"]
 
 
 def ensure_category(name: str) -> str:
-    cat = safe_category(name)
-    (get_settings().medias_path() / cat).mkdir(parents=True, exist_ok=True)
-    return cat
+    """Deprecated: ensure Medias root exists; ignore name folders."""
+    get_settings().medias_path().mkdir(parents=True, exist_ok=True)
+    return "default"

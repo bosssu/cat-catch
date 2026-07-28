@@ -1,0 +1,59 @@
+{
+  "name": "utools_zypiuj0v_image_pad",
+  "description": "为图片添加边距留白，支持设置上下左右四个方向的边距大小、背景颜色和透明度。 [utools:utools.zypiuj0v.image_pad]",
+  "inputSchema": {
+    "$schema": "http://json-schema.org/draft-07/schema#",
+    "type": "object",
+    "properties": {
+      "inputPath": {
+        "type": "string",
+        "format": "uri",
+        "description": "图片文件路径"
+      },
+      "top": {
+        "default": 10,
+        "type": "integer",
+        "minimum": 0,
+        "maximum": 9007199254740991,
+        "description": "上边距（像素），非负整数，可选，默认10"
+      },
+      "bottom": {
+        "default": 10,
+        "type": "integer",
+        "minimum": 0,
+        "maximum": 9007199254740991,
+        "description": "下边距（像素），非负整数，可选，默认10"
+      },
+      "left": {
+        "default": 10,
+        "type": "integer",
+        "minimum": 0,
+        "maximum": 9007199254740991,
+        "description": "左边距（像素），非负整数，可选，默认10"
+      },
+      "right": {
+        "default": 10,
+        "type": "integer",
+        "minimum": 0,
+        "maximum": 9007199254740991,
+        "description": "右边距（像素），非负整数，可选，默认10"
+      },
+      "color": {
+        "default": "#000000",
+        "type": "string",
+        "description": "背景颜色，十六进制颜色代码，可选，默认#000000（黑色）"
+      },
+      "opacity": {
+        "default": 100,
+        "type": "integer",
+        "minimum": 0,
+        "maximum": 100,
+        "description": "透明度，0-100，可选，默认100（不透明）"
+      }
+    },
+    "required": [
+      "inputPath"
+    ],
+    "additionalProperties": false
+  }
+}

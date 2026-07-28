@@ -1,0 +1,39 @@
+{
+  "name": "utools_zypiuj0v_image_resize",
+  "description": "修改图片尺寸，支持像素值或百分比指定宽度和高度，提供多种缩放方式。 [utools:utools.zypiuj0v.image_resize]",
+  "inputSchema": {
+    "$schema": "http://json-schema.org/draft-07/schema#",
+    "type": "object",
+    "properties": {
+      "inputPath": {
+        "type": "string",
+        "format": "uri",
+        "description": "图片文件路径"
+      },
+      "width": {
+        "type": "string",
+        "description": "图片宽度，可以是像素值（如 800）或百分比（如 50%）"
+      },
+      "height": {
+        "type": "string",
+        "description": "图片高度，可以是像素值（如 600）或百分比（如 50%）"
+      },
+      "fit": {
+        "default": "cover",
+        "type": "string",
+        "enum": [
+          "cover",
+          "contain",
+          "fill",
+          "inside",
+          "outside"
+        ],
+        "description": "缩放方式，当同时指定宽度和高度时生效：cover-填满画面（裁边），contain-完整显示（留空白），fill-拉伸填满（变形），inside-保留完整（可能小），outside-至少覆盖（可能超出）"
+      }
+    },
+    "required": [
+      "inputPath"
+    ],
+    "additionalProperties": false
+  }
+}

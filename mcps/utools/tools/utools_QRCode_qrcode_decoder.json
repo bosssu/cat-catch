@@ -1,0 +1,16 @@
+{
+  "name": "utools_QRCode_qrcode_decoder",
+  "description": "输入二维码图片路径，识别并输出其中的文本或链接 [utools:utools.QRCode.qrcode_decoder]",
+  "inputSchema": {
+    "$schema": "http://json-schema.org/draft-07/schema#",
+    "type": "object",
+    "properties": {
+      "inputPath": {
+        "type": "string"
+      }
+    },
+    "required": [
+      "inputPath"
+    ]
+  }
+}

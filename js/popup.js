@@ -838,16 +838,34 @@ async function lmwIngestChecked() {
         Tips("没有可入库的资源", 1500);
         return;
     }
+    const first = items[0] || {};
+    let tags = [];
+    if (typeof LMW.openIngestDialog === "function") {
+        const dlg = await LMW.openIngestDialog({
+            title: first.title || first.url || "media",
+            url: first.url || "",
+            media_type: first.media_type || "",
+            source_page: pageUrl,
+            count: items.length,
+        });
+        if (!dlg || !dlg.ok || dlg.cancelled) {
+            Tips("已取消入库", 1200);
+            return;
+        }
+        tags = dlg.tags || [];
+        for (const it of items) it.tags = tags;
+    }
     Tips(`正在入库 ${items.length} 项…`, 0);
     $("#lmwSelect").prop("disabled", true);
     try {
         await LMW.health();
         // 不在 popup 里长时间 waitJobs，提交后即反馈；大任务由服务端后台跑
-        const res = await LMW.pushItems(items, G.lmwDefaultCategory || "default", {
+        const res = await LMW.pushItems(items, "default", {
             wait: false,
             autoFallback: G.lmwAutoFallback,
+            tags,
         });
-        Tips(LMW.summarizePushResult(res), 3500);
+        Tips(LMW.summarizePushResult(res) + (tags.length ? " · " + tags.join(",") : ""), 3500);
     } catch (e) {
         const msg = (e && e.message) || String(e);
         Tips("入库失败: " + msg.slice(0, 120), 4000);

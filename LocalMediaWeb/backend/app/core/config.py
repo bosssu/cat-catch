@@ -101,7 +101,7 @@ class Settings(BaseSettings):
 
     def ensure_dirs(self) -> None:
         self.medias_path().mkdir(parents=True, exist_ok=True)
-        (self.medias_path() / "default").mkdir(parents=True, exist_ok=True)
+        # legacy default/ subdir kept if present; new files go flat under Medias/
         self.thumbs_path().mkdir(parents=True, exist_ok=True)
         self.tmp_path().mkdir(parents=True, exist_ok=True)
         self.logs_path().mkdir(parents=True, exist_ok=True)

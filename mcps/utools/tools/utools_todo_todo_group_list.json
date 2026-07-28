@@ -1,0 +1,10 @@
+{
+  "name": "utools_todo_todo_group_list",
+  "description": "列出所有待办分组 [utools:utools.todo.todo_group_list]",
+  "inputSchema": {
+    "$schema": "http://json-schema.org/draft-07/schema#",
+    "type": "object",
+    "properties": {},
+    "additionalProperties": false
+  }
+}

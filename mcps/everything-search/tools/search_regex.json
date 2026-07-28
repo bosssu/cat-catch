@@ -1,0 +1,32 @@
+{
+  "name": "search_regex",
+  "description": "\n    Search using regular expressions.\n    \n    Args:\n        pattern: Regular expression pattern\n        folder_path: Limit search to specific folder path (optional)\n        max_results: Maximum number of results (default 50)\n        match_case: Enable case-sensitive search\n    ",
+  "inputSchema": {
+    "properties": {
+      "pattern": {
+        "title": "Pattern",
+        "type": "string"
+      },
+      "folder_path": {
+        "default": "",
+        "title": "Folder Path",
+        "type": "string"
+      },
+      "max_results": {
+        "default": 50,
+        "title": "Max Results",
+        "type": "integer"
+      },
+      "match_case": {
+        "default": false,
+        "title": "Match Case",
+        "type": "boolean"
+      }
+    },
+    "required": [
+      "pattern"
+    ],
+    "title": "search_regexArguments",
+    "type": "object"
+  }
+}

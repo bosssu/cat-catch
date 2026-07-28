@@ -1,0 +1,26 @@
+{
+  "name": "utools_todo_todo_create",
+  "description": "创建一个新的待办事项 [utools:utools.todo.todo_create]",
+  "inputSchema": {
+    "$schema": "http://json-schema.org/draft-07/schema#",
+    "type": "object",
+    "properties": {
+      "content": {
+        "type": "string",
+        "description": "待办事项的内容（必填）"
+      },
+      "group": {
+        "type": "string",
+        "description": "分组名称，不存在则自动创建（可选）"
+      },
+      "dueAt": {
+        "type": "string",
+        "description": "结束日期，格式：2025-12-31（可选）"
+      }
+    },
+    "required": [
+      "content"
+    ],
+    "additionalProperties": false
+  }
+}

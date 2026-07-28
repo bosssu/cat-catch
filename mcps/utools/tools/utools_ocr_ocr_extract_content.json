@@ -1,0 +1,28 @@
+{
+  "name": "utools_ocr_ocr_extract_content",
+  "description": "从图片中识别并提取内容，支持文字、表格和公式 [utools:utools.ocr.ocr_extract_content]",
+  "inputSchema": {
+    "$schema": "http://json-schema.org/draft-07/schema#",
+    "type": "object",
+    "properties": {
+      "imagePath": {
+        "type": "string",
+        "description": "图片文件路径"
+      },
+      "extractType": {
+        "type": "string",
+        "enum": [
+          "text",
+          "table",
+          "formula"
+        ],
+        "description": "提取内容的类型，支持文字（text）、表格（table）和公式（formula）"
+      }
+    },
+    "required": [
+      "imagePath",
+      "extractType"
+    ],
+    "additionalProperties": false
+  }
+}

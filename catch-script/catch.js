@@ -555,6 +555,7 @@
                     title: meta.title || document.title || "capture",
                     media_type: meta.media_type || "video",
                     source_url: location.href,
+                    tags: meta.tags || [],
                 }, location.origin);
                 const timer = setTimeout(() => {
                     finish(() => reject(new Error("入库超时（请确认扩展 content-script 与 LocalMediaWeb 已启动）")));
@@ -595,6 +596,7 @@
                     filename: meta.filename || "capture.mp4",
                     title: meta.title || document.title || "capture",
                     source_url: location.href,
+                    tags: meta.tags || [],
                 }, location.origin);
                 const timer = setTimeout(() => {
                     finish(() => reject(new Error("入库超时（AV 合并）")));
@@ -629,6 +631,25 @@
             }
         }
 
+        /** 入库前标签：建议 video + 站点，用户可改（最多5） */
+        askIngestTags(baseTitle) {
+            let host = "";
+            try {
+                host = location.hostname.replace(/^www\./, "").split(".").slice(-2, -1)[0] || "";
+            } catch (e) { /* ignore */ }
+            const def = ["video", host].filter(Boolean).slice(0, 5).join(", ");
+            const raw = window.prompt(
+                `入库标签（最多5个，逗号分隔）\n${(baseTitle || "").slice(0, 60)}\n留空=不打标签；点取消=中止入库`,
+                def
+            );
+            if (raw === null) return null; // cancel
+            return String(raw)
+                .split(/[,，;；\s]+/)
+                .map((s) => s.trim().toLowerCase().replace(/^#/, ""))
+                .filter(Boolean)
+                .slice(0, 5);
+        }
+
         /**
          * 整理 buffer 后上传：
          * - 音视频双轨 → 合并为 1 条媒体（解决「成功 2 项」且无法播）
@@ -642,6 +663,11 @@
             this.prepareCatchBuffers();
 
             const baseTitle = this.fileName ? this.fileName.innerHTML.trim() : document.title;
+            const tags = this.askIngestTags(baseTitle);
+            if (tags === null) {
+                if (this.tips) this.tips.innerHTML = "已取消入库";
+                return;
+            }
             if (this.tips) this.tips.innerHTML = "正在入库…";
 
             const tracks = [];
@@ -668,6 +694,7 @@
                     const res = await this.postIngestAV(vBlob, aBlob, {
                         filename: `${baseTitle}.mp4`,
                         title: baseTitle,
+                        tags,
                     });
                     const id = res?.media_id || res?.item?.id || "";
                     if (this.tips) this.tips.innerHTML = id ? `入库成功 1 项（#${id}，音视频已合并）` : "入库成功 1 项（音视频已合并）";
@@ -680,6 +707,7 @@
                         filename: `${baseTitle}.${ext}`,
                         title: baseTitle,
                         media_type: "video",
+                        tags,
                     });
                     const id = res?.media_id || res?.item?.id || "";
                     if (this.tips) this.tips.innerHTML = id ? `入库成功 1 项（#${id}）` : "入库成功 1 项";

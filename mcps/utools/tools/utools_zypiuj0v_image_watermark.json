@@ -1,0 +1,85 @@
+{
+  "name": "utools_zypiuj0v_image_watermark",
+  "description": "为图片添加文字水印，支持自定义文本、字体、颜色、透明度、旋转角度、位置和平铺效果。 [utools:utools.zypiuj0v.image_watermark]",
+  "inputSchema": {
+    "$schema": "http://json-schema.org/draft-07/schema#",
+    "type": "object",
+    "properties": {
+      "inputPath": {
+        "type": "string",
+        "format": "uri",
+        "description": "图片文件路径"
+      },
+      "text": {
+        "type": "string",
+        "description": "水印文本内容"
+      },
+      "fontSize": {
+        "default": 24,
+        "type": "integer",
+        "minimum": 10,
+        "maximum": 200,
+        "description": "字体大小，10-200，默认24"
+      },
+      "fontColor": {
+        "default": "#597EF7",
+        "type": "string",
+        "description": "字体颜色，十六进制颜色代码，默认#597EF7"
+      },
+      "opacity": {
+        "default": 50,
+        "type": "integer",
+        "minimum": 1,
+        "maximum": 100,
+        "description": "透明度，1-100，默认50"
+      },
+      "angle": {
+        "default": 0,
+        "type": "integer",
+        "minimum": -180,
+        "maximum": 180,
+        "description": "旋转角度，-180到180度，默认0"
+      },
+      "padding": {
+        "default": 10,
+        "type": "integer",
+        "minimum": 0,
+        "maximum": 1000,
+        "description": "文字四周内边距，0-1000，默认10"
+      },
+      "tile": {
+        "default": false,
+        "type": "boolean",
+        "description": "是否平铺水印，默认false"
+      },
+      "margin": {
+        "default": 50,
+        "type": "integer",
+        "minimum": 0,
+        "maximum": 500,
+        "description": "平铺水印时间距，0-500，默认50（仅当tile=true时有效）"
+      },
+      "position": {
+        "default": "center",
+        "type": "string",
+        "enum": [
+          "left top",
+          "top",
+          "right top",
+          "left",
+          "center",
+          "right",
+          "left bottom",
+          "bottom",
+          "right bottom"
+        ],
+        "description": "水印位置，默认center。当tile=true时此参数无效。"
+      }
+    },
+    "required": [
+      "inputPath",
+      "text"
+    ],
+    "additionalProperties": false
+  }
+}

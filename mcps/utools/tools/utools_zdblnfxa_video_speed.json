@@ -1,0 +1,29 @@
+{
+  "name": "utools_zdblnfxa_video_speed",
+  "description": "调整视频播放速度，可加速或减速。支持浮点倍速，例如 2.0 表示 2 倍速，0.5 表示减半速度。 [utools:utools.zdblnfxa.video_speed]",
+  "inputSchema": {
+    "$schema": "http://json-schema.org/draft-07/schema#",
+    "type": "object",
+    "properties": {
+      "inputPath": {
+        "type": "string",
+        "description": "输入视频文件绝对路径"
+      },
+      "speed": {
+        "type": "number",
+        "minimum": 0.1,
+        "description": "播放速度倍数，例如 2.0 表示加速两倍，0.5 表示减速为原来一半"
+      },
+      "speedAudio": {
+        "default": true,
+        "type": "boolean",
+        "description": "是否同步加速音频"
+      }
+    },
+    "required": [
+      "inputPath",
+      "speed"
+    ],
+    "additionalProperties": false
+  }
+}

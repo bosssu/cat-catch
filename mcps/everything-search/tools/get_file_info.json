@@ -1,0 +1,17 @@
+{
+  "name": "get_file_info",
+  "description": "\n    Get detailed information about a file.\n    \n    Args:\n        file_path: Full path to the file\n    ",
+  "inputSchema": {
+    "properties": {
+      "file_path": {
+        "title": "File Path",
+        "type": "string"
+      }
+    },
+    "required": [
+      "file_path"
+    ],
+    "title": "get_file_infoArguments",
+    "type": "object"
+  }
+}

@@ -1,0 +1,38 @@
+{
+  "name": "utools_zypiuj0v_image_compress",
+  "description": "压缩图片以减小文件大小，同时尽量保持图像质量，适用于各种图片格式。 [utools:utools.zypiuj0v.image_compress]",
+  "inputSchema": {
+    "$schema": "http://json-schema.org/draft-07/schema#",
+    "type": "object",
+    "properties": {
+      "inputPath": {
+        "type": "string",
+        "format": "uri",
+        "description": "图片文件路径"
+      },
+      "quality": {
+        "default": 80,
+        "type": "integer",
+        "minimum": 0,
+        "maximum": 100,
+        "description": "压缩质量，可选，0-100，值越高越清晰文件越大，默认80"
+      },
+      "maxSize": {
+        "anyOf": [
+          {
+            "type": "number",
+            "minimum": 0
+          },
+          {
+            "type": "null"
+          }
+        ],
+        "description": "目标文件大小（KB），可选，留空表示无限制"
+      }
+    },
+    "required": [
+      "inputPath"
+    ],
+    "additionalProperties": false
+  }
+}

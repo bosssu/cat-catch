@@ -141,13 +141,20 @@ async def _pump() -> None:
 async def enqueue_jobs(
     category: str,
     items: list[dict],
+    default_tags: list | None = None,
 ) -> dict:
-    """Create jobs; return accepted/duplicates/job_ids/duplicate_media_ids."""
-    cat = safe_category(category)
-    get_settings().medias_path().joinpath(cat).mkdir(parents=True, exist_ok=True)
+    """Create jobs; return accepted/duplicates/job_ids/duplicate_media_ids.
+
+    category is kept for hash compatibility but new files store flat under Medias/.
+    """
+    from app.services.tags import normalize_tags, tags_to_json
+
+    cat = "default"  # flat library; ignore client category folders
+    get_settings().medias_path().mkdir(parents=True, exist_ok=True)
     job_ids: list[int] = []
     duplicates: list[int] = []
     accepted = 0
+    top_tags = normalize_tags(default_tags or [])
 
     with session_scope() as db:
         for it in items:
@@ -169,10 +176,17 @@ async def enqueue_jobs(
             uh = media_url_hash(url, cat, start_sec, end_sec)
 
             existing = db.scalars(
-                select(MediaItem).where(MediaItem.url_hash == uh, MediaItem.category == cat)
+                select(MediaItem).where(MediaItem.url_hash == uh)
             ).first()
             if existing:
                 duplicates.append(existing.id)
+                # merge tags if client sent some
+                item_tags = normalize_tags(it.get("tags") or top_tags)
+                if item_tags:
+                    from app.services.tags import tags_from_json
+
+                    merged = normalize_tags(tags_from_json(existing.tags_json) + item_tags)
+                    existing.tags_json = tags_to_json(merged)
                 continue
             # also skip active jobs for same url+range
             active = db.scalars(
@@ -185,6 +199,7 @@ async def enqueue_jobs(
                 job_ids.append(active.id)
                 continue
 
+            item_tags = normalize_tags(it.get("tags") if it.get("tags") is not None else top_tags)
             job = DownloadJob(
                 category=cat,
                 url=url,
@@ -192,6 +207,7 @@ async def enqueue_jobs(
                 title=(it.get("title") or "")[:512],
                 source_page=(it.get("source_page") or it.get("referer") or "")[:2048],
                 headers_json=job_payload_json(headers, start_sec, end_sec),
+                tags_json=tags_to_json(item_tags),
                 status="queued",
                 url_hash=uh,
                 client_fallback_allowed=True,
@@ -514,7 +530,7 @@ async def _run_direct(
         mtype = detect_media_type(url, ct, media_type)
         ext = guess_ext(url, ct, mtype)
         fname = safe_filename(title, url, ext)
-        dest_dir = settings.medias_path() / cat
+        dest_dir = settings.medias_path()
         dest_dir.mkdir(parents=True, exist_ok=True)
         dest = ensure_unique_path(dest_dir / fname)
         shutil.move(str(tmp_path), str(dest))
@@ -635,7 +651,7 @@ async def _run_m3u8(
     fname = safe_filename(
         title, url, out_file.suffix.lstrip(".") or "mp4", disambiguator=clip_key
     )
-    dest = settings.medias_path() / cat / fname
+    dest = settings.medias_path() / fname
     dest.parent.mkdir(parents=True, exist_ok=True)
     dest = ensure_unique_path(dest)
     shutil.move(str(out_file), str(dest))
@@ -709,7 +725,7 @@ async def _run_dash(
 
     out_file: Path = meta["out_file"]
     fname = safe_filename(title, url, out_file.suffix.lstrip(".") or "mp4")
-    dest = settings.medias_path() / cat / fname
+    dest = settings.medias_path() / fname
     dest.parent.mkdir(parents=True, exist_ok=True)
     dest = ensure_unique_path(dest)
     shutil.move(str(out_file), str(dest))
@@ -749,10 +765,17 @@ async def _register_media(
     warning: str,
 ) -> None:
     settings = get_settings()
-    rel = f"{cat}/{dest.name}"
+    # Flat layout: rel_path is filename only (legacy rows may still be cat/name)
+    rel = dest.name
+    try:
+        rel = dest.resolve().relative_to(settings.medias_path().resolve()).as_posix()
+    except Exception:
+        rel = dest.name
     with session_scope() as db:
+        job = db.get(DownloadJob, job_id)
+        tags_json = (job.tags_json if job and getattr(job, "tags_json", None) else None) or "[]"
         item = MediaItem(
-            category=cat,
+            category="default",
             title=title[:512],
             media_type=media_type if media_type != "m3u8" else "video",
             rel_path=rel,
@@ -762,11 +785,11 @@ async def _register_media(
             mime=mime or "",
             partial=partial,
             warning=warning or "",
+            tags_json=tags_json,
         )
         db.add(item)
         db.flush()
         media_id = item.id
-        job = db.get(DownloadJob, job_id)
         if job:
             job.status = "success"
             job.media_id = media_id
@@ -815,6 +838,7 @@ def register_uploaded_file(
     media_type: str,
     mime: str,
     dedupe: bool = False,
+    tags: list | None = None,
 ) -> MediaItem:
     """
     Register a file already written under Medias/.
@@ -822,16 +846,22 @@ def register_uploaded_file(
     Uploads from extension capture must use dedupe=False: same page URL is reused
     for every capture and would otherwise collapse to the first row (unplayable).
     """
-    cat = safe_category(category)
-    rel = f"{cat}/{dest.name}"
+    from app.services.tags import normalize_tags, tags_from_json, tags_to_json
+
+    settings = get_settings()
+    try:
+        rel = dest.resolve().relative_to(settings.medias_path().resolve()).as_posix()
+    except Exception:
+        rel = dest.name
     size = dest.stat().st_size if dest.is_file() else 0
     # Unique per file path + size so re-uploads never clobber DB identity
-    uh = url_hash(f"upload|{rel}|{size}|{source_url or ''}", cat)
+    uh = url_hash(f"upload|{rel}|{size}|{source_url or ''}", "default")
+    tag_json = tags_to_json(tags or [])
     with session_scope() as db:
         existing = None
         if dedupe and source_url:
             existing = db.scalars(
-                select(MediaItem).where(MediaItem.url_hash == uh, MediaItem.category == cat)
+                select(MediaItem).where(MediaItem.url_hash == uh)
             ).first()
         if not existing:
             existing = db.scalars(select(MediaItem).where(MediaItem.rel_path == rel)).first()
@@ -839,6 +869,9 @@ def register_uploaded_file(
             existing.file_size = size
             existing.mime = mime or existing.mime
             existing.title = (title or existing.title or dest.stem)[:512]
+            if tags:
+                merged = normalize_tags(tags_from_json(existing.tags_json) + list(tags))
+                existing.tags_json = tags_to_json(merged)
             db.commit()
             db.refresh(existing)
             media_id = existing.id
@@ -846,7 +879,7 @@ def register_uploaded_file(
             dest_for_thumb = dest
         else:
             item = MediaItem(
-                category=cat,
+                category="default",
                 title=(title or dest.stem)[:512],
                 media_type=media_type,
                 rel_path=rel,
@@ -854,6 +887,7 @@ def register_uploaded_file(
                 url_hash=uh,
                 file_size=size,
                 mime=mime or "",
+                tags_json=tag_json,
             )
             db.add(item)
             db.commit()

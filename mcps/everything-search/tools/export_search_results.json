@@ -1,0 +1,52 @@
+{
+  "name": "export_search_results",
+  "description": "\n    Export search results to a file.\n    \n    Args:\n        query: Search query\n        output_file: Output file path (e.g., \"C:/results.txt\")\n        format: Export format: txt, csv, json, m3u, m3u8, tsv, efu\n        folder_path: Limit search to specific folder (optional)\n        extension: File extension filter (optional)\n        max_results: Maximum number of results (default 1000)\n        include_size: Include file sizes in export\n        include_dates: Include dates (created, modified) in export\n    ",
+  "inputSchema": {
+    "properties": {
+      "query": {
+        "title": "Query",
+        "type": "string"
+      },
+      "output_file": {
+        "title": "Output File",
+        "type": "string"
+      },
+      "format": {
+        "default": "txt",
+        "title": "Format",
+        "type": "string"
+      },
+      "folder_path": {
+        "default": "",
+        "title": "Folder Path",
+        "type": "string"
+      },
+      "extension": {
+        "default": "",
+        "title": "Extension",
+        "type": "string"
+      },
+      "max_results": {
+        "default": 1000,
+        "title": "Max Results",
+        "type": "integer"
+      },
+      "include_size": {
+        "default": false,
+        "title": "Include Size",
+        "type": "boolean"
+      },
+      "include_dates": {
+        "default": false,
+        "title": "Include Dates",
+        "type": "boolean"
+      }
+    },
+    "required": [
+      "query",
+      "output_file"
+    ],
+    "title": "export_search_resultsArguments",
+    "type": "object"
+  }
+}

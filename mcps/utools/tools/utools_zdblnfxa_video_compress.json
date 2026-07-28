@@ -1,0 +1,35 @@
+{
+  "name": "utools_zdblnfxa_video_compress",
+  "description": "压缩或转码 MP4 视频文件，支持 H.264、H.265、AV1 编码，用于减小文件体积或统一编码格式。 [utools:utools.zdblnfxa.video_compress]",
+  "inputSchema": {
+    "$schema": "http://json-schema.org/draft-07/schema#",
+    "type": "object",
+    "properties": {
+      "inputPath": {
+        "type": "string",
+        "description": "输入视频文件绝对路径（MP4 格式）"
+      },
+      "codec": {
+        "default": "h264",
+        "type": "string",
+        "enum": [
+          "h264",
+          "h265",
+          "av1"
+        ],
+        "description": "输出视频编码格式"
+      },
+      "crf": {
+        "default": 30,
+        "type": "integer",
+        "minimum": 1,
+        "maximum": 63,
+        "description": "恒定质量因子（CRF），数值越大压缩率越高、画质越低"
+      }
+    },
+    "required": [
+      "inputPath"
+    ],
+    "additionalProperties": false
+  }
+}

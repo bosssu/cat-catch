@@ -1,0 +1,54 @@
+{
+  "name": "utools_zdblnfxa_video_animation",
+  "description": "将视频转换为动画动图（GIF 或 WebP），可自定义起始时间、时长、尺寸、帧率和循环播放 [utools:utools.zdblnfxa.video_animation]",
+  "inputSchema": {
+    "$schema": "http://json-schema.org/draft-07/schema#",
+    "type": "object",
+    "properties": {
+      "inputPath": {
+        "type": "string",
+        "description": "输入视频文件绝对路径"
+      },
+      "format": {
+        "default": "gif",
+        "type": "string",
+        "enum": [
+          "gif",
+          "webp"
+        ],
+        "description": "输出动画格式，支持 GIF 或 WebP"
+      },
+      "startTime": {
+        "default": 0,
+        "type": "number",
+        "description": "动画起始时间（秒）"
+      },
+      "duration": {
+        "default": null,
+        "type": "number",
+        "description": "动画时长（秒），默认整个视频长度"
+      },
+      "width": {
+        "default": null,
+        "type": "number",
+        "description": "输出动画宽度，默认使用视频原宽度，高度按比例自动计算"
+      },
+      "fps": {
+        "default": 10,
+        "type": "number",
+        "minimum": 1,
+        "maximum": 60,
+        "description": "输出动画帧率（每秒帧数），默认 10"
+      },
+      "loop": {
+        "default": true,
+        "type": "boolean",
+        "description": "动画是否循环播放，默认 true"
+      }
+    },
+    "required": [
+      "inputPath"
+    ],
+    "additionalProperties": false
+  }
+}

@@ -1,0 +1,69 @@
+{
+  "name": "utools_pdfconverter_pdf_watermark",
+  "description": "为 PDF 文件添加水印 [utools:utools.pdfconverter.pdf_watermark]",
+  "inputSchema": {
+    "$schema": "http://json-schema.org/draft-07/schema#",
+    "type": "object",
+    "properties": {
+      "inputPath": {
+        "type": "string",
+        "description": "PDF 文件路径"
+      },
+      "text": {
+        "type": "string",
+        "description": "水印文本内容"
+      },
+      "fontSize": {
+        "default": 24,
+        "type": "number",
+        "description": "字体大小，默认24"
+      },
+      "color": {
+        "default": "#FF5B5A",
+        "type": "string",
+        "description": "文本颜色，默认#FF5B5A（十六进制）"
+      },
+      "padding": {
+        "default": 10,
+        "type": "number",
+        "description": "水印与边界的间距，默认10"
+      },
+      "angle": {
+        "default": 0,
+        "type": "number",
+        "description": "水印旋转角度，默认0"
+      },
+      "opacity": {
+        "default": 20,
+        "type": "number",
+        "description": "水印不透明度(0-100)，默认20"
+      },
+      "tileFlag": {
+        "default": true,
+        "type": "boolean",
+        "description": "是否平铺水印，默认true"
+      },
+      "location": {
+        "default": "center",
+        "type": "string",
+        "enum": [
+          "leftTop",
+          "top",
+          "rightTop",
+          "left",
+          "center",
+          "right",
+          "leftBottom",
+          "bottom",
+          "rightBottom"
+        ],
+        "description": "水印位置，可选：leftTop, top, rightTop, left, center, right, leftBottom, bottom, rightBottom，默认center"
+      }
+    },
+    "required": [
+      "inputPath",
+      "text"
+    ],
+    "additionalProperties": false
+  }
+}

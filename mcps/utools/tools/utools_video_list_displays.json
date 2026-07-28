@@ -1,0 +1,8 @@
+{
+  "name": "utools_video_list_displays",
+  "description": "获取当前可用显示器列表（用于截图/录屏目标选择） [utools:utools.video.list_displays]",
+  "inputSchema": {
+    "type": "object",
+    "properties": {}
+  }
+}

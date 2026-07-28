@@ -1,0 +1,28 @@
+{
+  "name": "utools_todo_todo_pin_to_screen",
+  "description": "将待办分组固定到桌面小组件 [utools:utools.todo.todo_pin_to_screen]",
+  "inputSchema": {
+    "$schema": "http://json-schema.org/draft-07/schema#",
+    "type": "object",
+    "properties": {
+      "filter": {
+        "type": "object",
+        "properties": {
+          "group": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "分组名称列表（可选）"
+          },
+          "status": {
+            "type": "string",
+            "description": "按状态筛选：done=已完成，pending=未完成（可选）"
+          }
+        },
+        "description": "筛选条件"
+      }
+    },
+    "additionalProperties": false
+  }
+}

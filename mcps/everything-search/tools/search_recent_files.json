@@ -1,0 +1,35 @@
+{
+  "name": "search_recent_files",
+  "description": "\n    Search for recently modified files.\n    \n    Args:\n        days: Files modified within this many days (default 7)\n        query: Additional search query (optional)\n        folder_path: Limit search to specific folder (optional)\n        max_results: Maximum number of results (default 50)\n        files_only: Return only files, not folders (default True)\n    ",
+  "inputSchema": {
+    "properties": {
+      "days": {
+        "default": 7,
+        "title": "Days",
+        "type": "integer"
+      },
+      "query": {
+        "default": "",
+        "title": "Query",
+        "type": "string"
+      },
+      "folder_path": {
+        "default": "",
+        "title": "Folder Path",
+        "type": "string"
+      },
+      "max_results": {
+        "default": 50,
+        "title": "Max Results",
+        "type": "integer"
+      },
+      "files_only": {
+        "default": true,
+        "title": "Files Only",
+        "type": "boolean"
+      }
+    },
+    "title": "search_recent_filesArguments",
+    "type": "object"
+  }
+}

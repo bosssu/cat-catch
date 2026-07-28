@@ -1,0 +1,30 @@
+{
+  "name": "search_folders",
+  "description": "\n    Search for folders/directories only.\n    \n    Args:\n        query: Search query (optional)\n        folder_path: Limit search to specific parent folder (optional)\n        max_results: Maximum number of results (default 50)\n        sort_by: Sort by: name, path, date-modified, date-created\n    ",
+  "inputSchema": {
+    "properties": {
+      "query": {
+        "default": "",
+        "title": "Query",
+        "type": "string"
+      },
+      "folder_path": {
+        "default": "",
+        "title": "Folder Path",
+        "type": "string"
+      },
+      "max_results": {
+        "default": 50,
+        "title": "Max Results",
+        "type": "integer"
+      },
+      "sort_by": {
+        "default": "",
+        "title": "Sort By",
+        "type": "string"
+      }
+    },
+    "title": "search_foldersArguments",
+    "type": "object"
+  }
+}

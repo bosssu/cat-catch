@@ -1,0 +1,8 @@
+{
+  "name": "utools_video_screen_record_status",
+  "description": "获取当前录屏状态 [utools:utools.video.screen_record_status]",
+  "inputSchema": {
+    "type": "object",
+    "properties": {}
+  }
+}

@@ -1265,21 +1265,6 @@
         }
     }
 
-    async function loadCategories() {
-        try {
-            const data = await LMW.categories();
-            const $sel = $("#category").empty();
-            (data.categories || ["default"]).forEach((c) => {
-                $sel.append($("<option/>").val(c).text(c));
-            });
-            const def = G.lmwDefaultCategory || "default";
-            if ($sel.find(`option[value="${def}"]`).length) $sel.val(def);
-        } catch (e) {
-            setStatus("无法连接 LocalMediaWeb: " + e.message + "（请先 start.bat）");
-            $("#category").html('<option value="default">default</option>');
-        }
-    }
-
     async function getPageUrl() {
         if (!tabId) return "";
         try {
@@ -2537,19 +2522,31 @@
             setStatus("请先选择媒体");
             return;
         }
-        const category = $("#category").val() || "default";
         const pageUrl = await getPageUrl();
-        setStatus(`提交 ${chosen.length} 项到 ${category}…`);
+        const first = chosen[0];
+        const dlg = await LMW.openIngestDialog({
+            title: first.title || first.name || document.title || "media",
+            url: first.url || "",
+            media_type: LMW.normalizeMediaType(first),
+            source_page: pageUrl,
+            count: chosen.length,
+        });
+        if (!dlg || !dlg.ok || dlg.cancelled) {
+            setStatus("已取消入库");
+            return;
+        }
+        const tags = dlg.tags || [];
+        setStatus(`提交 ${chosen.length} 项…${tags.length ? " 标签 " + tags.join(",") : ""}`);
         try {
             const payload = [];
             for (const it of chosen) {
-                const row = await LMW.itemToIngest(it, pageUrl);
+                const row = await LMW.itemToIngest(it, pageUrl, tags);
                 if (it._headers) row.headers = Object.assign({}, row.headers, it._headers);
                 if (it._startSec != null) row.start_sec = it._startSec;
                 if (it._endSec != null && it._endSec > 0) row.end_sec = it._endSec;
                 payload.push(row);
             }
-            const result = await LMW.pushItems(payload, category);
+            const result = await LMW.pushItems(payload, "default", { tags });
             const rangeHints = chosen
                 .map((it) => formatRangeLabel(it))
                 .filter(Boolean)
@@ -2561,6 +2558,7 @@
                     "（「重复」= 同一链接+相同起止时间段已入库；要截另一段请改时间后重选再提交）";
             }
             if (rangeHints) msg += " · 本次范围 " + rangeHints;
+            if (tags.length) msg += " · 标签 " + tags.join(",");
             setStatus(msg);
         } catch (e) {
             setStatus("入库失败: " + e.message);
@@ -2633,21 +2631,12 @@
     });
     $("#typeFilter, #resFilter, #longFilter, #cookieFilter").on("change", render);
     $("#btnIngest").on("click", doIngest);
-    $("#btnAddCat").on("click", async () => {
-        const name = $("#newCategory").val().trim();
-        if (!name) return;
-        try {
-            await LMW.createCategory(name);
-            await loadCategories();
-            $("#category").val(name);
-            $("#newCategory").val("");
-            setStatus("已创建分类 " + name);
-        } catch (e) {
-            setStatus("创建分类失败: " + e.message);
-        }
-    });
 
-    await loadCategories();
+    try {
+        await LMW.health();
+    } catch (e) {
+        setStatus("无法连接 LocalMediaWeb: " + ((e && e.message) || e) + "（请先 start.bat）");
+    }
     const auto = params.get("auto");
     if (auto === "images" && tabId) {
         await parsePageImages();

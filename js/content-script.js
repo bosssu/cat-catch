@@ -277,6 +277,11 @@
         fd.append("source_url", source_url || location.href || "");
         fd.append("media_type", media_type || "video");
         fd.append("remux", "1");
+        if (payload.tags) {
+            const tags = Array.isArray(payload.tags) ? payload.tags : String(payload.tags).split(/[,，\s]+/);
+            const cleaned = tags.map((t) => String(t).trim()).filter(Boolean).slice(0, 5);
+            if (cleaned.length) fd.append("tags", JSON.stringify(cleaned));
+        }
         const name = filename || `${(title || document.title || "capture").slice(0, 40)}.bin`;
         fd.append("file", blob, name);
         const headers = {};
@@ -303,6 +308,11 @@
         fd.append("category", category || s.lmwDefaultCategory || "default");
         fd.append("title", title || document.title || "");
         fd.append("source_url", source_url || location.href || "");
+        if (payload.tags) {
+            const tags = Array.isArray(payload.tags) ? payload.tags : String(payload.tags).split(/[,，\s]+/);
+            const cleaned = tags.map((t) => String(t).trim()).filter(Boolean).slice(0, 5);
+            if (cleaned.length) fd.append("tags", JSON.stringify(cleaned));
+        }
         const baseName = (filename || title || document.title || "capture").replace(/\.[^.]+$/, "");
         fd.append("video", vBlob, `${baseName}_video.mp4`);
         if (audioBlobUrl) {

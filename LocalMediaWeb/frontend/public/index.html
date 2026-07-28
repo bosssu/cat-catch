@@ -35,10 +35,9 @@
         </button>
       </div>
       <div class="nav-filters">
-        <label class="select-wrap" title="分类">
-          <svg class="ico-sm" viewBox="0 0 24 24" aria-hidden="true"><path fill="currentColor" d="M10 4H4c-1.1 0-2 .9-2 2v12c0 1.1.9 2 2 2h16c1.1 0 2-.9 2-2V8c0-1.1-.9-2-2-2h-8l-2-2z"/></svg>
-          <select id="categoryFilter"></select>
-        </label>
+        <button type="button" id="btnSimilar" class="nav-filter-btn" title="根据当前 Feed 媒体的标签推荐相似内容">
+          推荐相似
+        </button>
       </div>
     </nav>
 
@@ -114,19 +113,17 @@
           <button type="button" id="btnRefreshMedia" class="btn ghost">刷新媒体</button>
         </div>
         <p class="muted tip">「强制刷新库」会删除数据库中磁盘已不存在的条目，并清理孤儿缩略图，再扫描 Medias。</p>
-        <label>新建分类
-          <span class="row">
-            <input id="newCat" type="text" placeholder="category name" />
-            <button type="button" id="btnNewCat" class="btn primary">创建</button>
-          </span>
-        </label>
       </div>
       <div class="admin-card">
         <h2>
           <svg class="ico" viewBox="0 0 24 24" aria-hidden="true"><path fill="currentColor" d="M6 19c0 1.1.9 2 2 2h8c1.1 0 2-.9 2-2V7H6v12zM19 4h-3.5l-1-1h-5l-1 1H5v2h14V4z"/></svg>
           媒体库
         </h2>
-        <p class="muted tip">删除会移除磁盘文件与索引，不可恢复。</p>
+        <p class="muted tip">删除会移除磁盘文件与索引，不可恢复。可勾选后统一打标签（最多 5 个）。</p>
+        <div class="row" style="margin-bottom:10px;gap:8px;flex-wrap:wrap;">
+          <input id="batchTagsInput" type="text" placeholder="标签，逗号分隔" style="flex:1;min-width:140px" />
+          <button type="button" id="btnBatchTags" class="btn primary">给选中打标签</button>
+        </div>
         <div id="adminMedia" class="admin-media"></div>
       </div>
       <div class="admin-card">

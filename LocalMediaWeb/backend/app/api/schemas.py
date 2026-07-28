@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from datetime import datetime
-from typing import Any
+from typing import Any, Literal
 
 from pydantic import BaseModel, Field
 
@@ -17,20 +17,25 @@ class IngestItem(BaseModel):
     # m3u8 / stream clip (seconds); omit or null = full playlist
     start_sec: float | None = None
     end_sec: float | None = None
+    tags: list[str] = Field(default_factory=list)
 
 
 class IngestRequest(BaseModel):
+    # Deprecated: ignored; kept for old clients. Files store under Medias/ flat.
     category: str = "default"
     items: list[IngestItem]
+    # Default tags applied to items that omit tags
+    tags: list[str] = Field(default_factory=list)
 
 
 class CategoryCreate(BaseModel):
+    """Deprecated."""
     name: str
 
 
 class MediaOut(BaseModel):
     id: int
-    category: str
+    category: str = "default"
     title: str
     media_type: str
     source_url: str
@@ -42,6 +47,7 @@ class MediaOut(BaseModel):
     like_count: int = 0
     skip_count: int = 0
     view_count: int = 0
+    tags: list[str] = Field(default_factory=list)
     created_at: datetime | None = None
     file_url: str
     thumb_url: str
@@ -57,7 +63,7 @@ class InteractEvent(BaseModel):
 
 class JobOut(BaseModel):
     id: int
-    category: str
+    category: str = "default"
     url: str
     media_type: str
     title: str
@@ -69,6 +75,24 @@ class JobOut(BaseModel):
     segments_total: int
     segments_done: int
     media_id: int | None
+    tags: list[str] = Field(default_factory=list)
     created_at: datetime | None = None
 
     model_config = {"from_attributes": True}
+
+
+class TagsUpdate(BaseModel):
+    tags: list[str] = Field(default_factory=list)
+
+
+class TagsBatchUpdate(BaseModel):
+    ids: list[int]
+    tags: list[str] = Field(default_factory=list)
+    mode: Literal["replace", "merge"] = "merge"
+
+
+class TagSuggestRequest(BaseModel):
+    title: str = ""
+    url: str = ""
+    media_type: str = ""
+    source_page: str = ""

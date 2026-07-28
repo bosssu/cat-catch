@@ -1,0 +1,27 @@
+{
+  "name": "utools_6e00d74f_browser_bookmarks_search",
+  "description": "根据关键词在 Chrome 或 Edge 浏览器书签中搜索匹配项，返回书签列表 [utools:utools.6e00d74f.browser_bookmarks_search]",
+  "inputSchema": {
+    "$schema": "http://json-schema.org/draft-07/schema#",
+    "type": "object",
+    "properties": {
+      "keyword": {
+        "type": "string",
+        "minLength": 1,
+        "maxLength": 100,
+        "description": "用于搜索书签的关键词（支持标题或 URL 模糊匹配）"
+      },
+      "limit": {
+        "default": 50,
+        "type": "number",
+        "minimum": 1,
+        "maximum": 100,
+        "description": "返回结果的最大数量，默认值为 50"
+      }
+    },
+    "required": [
+      "keyword"
+    ],
+    "additionalProperties": false
+  }
+}

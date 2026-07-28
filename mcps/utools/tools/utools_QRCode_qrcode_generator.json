@@ -1,0 +1,16 @@
+{
+  "name": "utools_QRCode_qrcode_generator",
+  "description": "输入文本或链接，生成二维码图片 [utools:utools.QRCode.qrcode_generator]",
+  "inputSchema": {
+    "$schema": "http://json-schema.org/draft-07/schema#",
+    "type": "object",
+    "properties": {
+      "text": {
+        "type": "string"
+      }
+    },
+    "required": [
+      "text"
+    ]
+  }
+}

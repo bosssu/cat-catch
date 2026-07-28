@@ -360,7 +360,7 @@
         <p>LocalMediaWeb</p>
       </h1>
       <div class="optionBox">
-        <span class="explain">本地媒体聚合服务（默认 http://127.0.0.1:8790 ）。popup「媒体库」打开浏览页，「入库」将勾选资源提交；缓存捕捉/录制面板可 blob 直接入库。见 LocalMediaWeb/README.md</span>
+        <span class="explain">本地媒体聚合服务（默认 http://127.0.0.1:8790 ）。入库时弹窗打标签（最多5个）；媒体库顶栏「推荐相似」按标签推荐。见 LocalMediaWeb/README.md</span>
         <div class="list">
           <div class="item">
             <div><span>启用 LocalMediaWeb 入口（媒体库 / 入库）</span></div>
@@ -398,10 +398,7 @@
             <div><span>Token（可选，对应 X-LMW-Token）</span></div>
             <input id="lmwToken" save="input" type="password" class="width100" autocomplete="off">
           </div>
-          <div class="item">
-            <div><span>默认分类</span></div>
-            <input id="lmwDefaultCategory" save="input" type="text" class="width100" placeholder="default">
-          </div>
+
           <div class="item">
             <div><span>服务端失败时自动回退上传</span></div>
             <div class="switch">

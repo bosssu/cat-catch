@@ -1,0 +1,24 @@
+{
+  "name": "utools_notes_markdown_notes_create",
+  "description": "创建一条新的 Markdown 笔记 [utools:utools.notes.markdown_notes_create]",
+  "inputSchema": {
+    "$schema": "http://json-schema.org/draft-07/schema#",
+    "type": "object",
+    "properties": {
+      "title": {
+        "type": "string",
+        "maxLength": 50,
+        "description": "笔记标题"
+      },
+      "content": {
+        "type": "string",
+        "description": "笔记内容（Markdown 源码）"
+      }
+    },
+    "required": [
+      "title",
+      "content"
+    ],
+    "additionalProperties": false
+  }
+}

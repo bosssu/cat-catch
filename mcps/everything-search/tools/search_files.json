@@ -1,0 +1,42 @@
+{
+  "name": "search_files",
+  "description": "\n    Search for files and folders using Everything.\n    \n    Args:\n        query: Search query (supports wildcards * and ?)\n        max_results: Maximum number of results (default 50)\n        match_case: Enable case-sensitive search\n        match_whole_word: Match whole words only\n        match_path: Search in full path instead of filename only\n        sort_by: Sort by: name, path, size, extension, date-modified, date-created, date-accessed\n    ",
+  "inputSchema": {
+    "properties": {
+      "query": {
+        "title": "Query",
+        "type": "string"
+      },
+      "max_results": {
+        "default": 50,
+        "title": "Max Results",
+        "type": "integer"
+      },
+      "match_case": {
+        "default": false,
+        "title": "Match Case",
+        "type": "boolean"
+      },
+      "match_whole_word": {
+        "default": false,
+        "title": "Match Whole Word",
+        "type": "boolean"
+      },
+      "match_path": {
+        "default": false,
+        "title": "Match Path",
+        "type": "boolean"
+      },
+      "sort_by": {
+        "default": "",
+        "title": "Sort By",
+        "type": "string"
+      }
+    },
+    "required": [
+      "query"
+    ],
+    "title": "search_filesArguments",
+    "type": "object"
+  }
+}

@@ -12,16 +12,26 @@ from sqlalchemy import desc, func, select
 from app.api.deps import require_token
 from datetime import datetime, timezone
 
-from app.api.schemas import CategoryCreate, IngestRequest, InteractEvent, JobOut, MediaOut
+from app.api.schemas import (
+    CategoryCreate,
+    IngestRequest,
+    InteractEvent,
+    JobOut,
+    MediaOut,
+    TagSuggestRequest,
+    TagsBatchUpdate,
+    TagsUpdate,
+)
 from app.core.config import ffmpeg_available, get_settings, gopeed_binary_available
 from app.core.db import get_db
 from app.models.entities import DownloadJob, MediaItem
 from app.services.download import enqueue_jobs, register_uploaded_file, request_cancel
-from app.services.feed_rank import rank_recommend_with_affinity
+from app.services.feed_rank import rank_recommend_with_affinity, rank_similar
 from app.services.media_process import merge_av_to_mp4, remux_to_playable, write_temp_bytes
 from app.services.scan import ensure_category, list_categories, purge_missing_media, rescan_medias
+from app.services.tags import normalize_tags, suggest_tags, tags_from_json, tags_to_json
 from app.services.thumb import generate_thumb, thumb_path_for
-from app.services.util import detect_media_type, safe_category, safe_filename
+from app.services.util import detect_media_type, safe_filename
 
 router = APIRouter(prefix="/api")
 public_router = APIRouter(prefix="/api")
@@ -30,7 +40,7 @@ public_router = APIRouter(prefix="/api")
 def _media_out(m: MediaItem) -> MediaOut:
     return MediaOut(
         id=m.id,
-        category=m.category,
+        category=getattr(m, "category", None) or "default",
         title=m.title,
         media_type=m.media_type,
         source_url=m.source_url,
@@ -42,6 +52,7 @@ def _media_out(m: MediaItem) -> MediaOut:
         like_count=int(getattr(m, "like_count", 0) or 0),
         skip_count=int(getattr(m, "skip_count", 0) or 0),
         view_count=int(getattr(m, "view_count", 0) or 0),
+        tags=tags_from_json(getattr(m, "tags_json", None)),
         created_at=m.created_at,
         file_url=f"/api/media/{m.id}/file",
         thumb_url=f"/api/media/{m.id}/thumb",
@@ -51,7 +62,7 @@ def _media_out(m: MediaItem) -> MediaOut:
 def _job_out(j: DownloadJob) -> JobOut:
     return JobOut(
         id=j.id,
-        category=j.category,
+        category=getattr(j, "category", None) or "default",
         url=j.url,
         media_type=j.media_type,
         title=j.title,
@@ -63,6 +74,7 @@ def _job_out(j: DownloadJob) -> JobOut:
         segments_total=j.segments_total,
         segments_done=j.segments_done,
         media_id=j.media_id,
+        tags=tags_from_json(getattr(j, "tags_json", None)),
         created_at=j.created_at,
     )
 
@@ -101,28 +113,86 @@ def health():
 
 @router.get("/categories", dependencies=[Depends(require_token)])
 def categories():
+    """Deprecated: categories removed; always default."""
     return {"categories": list_categories()}
 
 
 @router.post("/categories", dependencies=[Depends(require_token)])
 def create_category(body: CategoryCreate):
+    """Deprecated no-op."""
     name = ensure_category(body.name)
-    return {"name": name}
+    return {"name": name, "deprecated": True}
+
+
+@router.get("/tags", dependencies=[Depends(require_token)])
+def list_tags(db=Depends(get_db)):
+    counts: dict[str, int] = {}
+    for m in db.scalars(select(MediaItem)).all():
+        for t in tags_from_json(getattr(m, "tags_json", None)):
+            counts[t] = counts.get(t, 0) + 1
+    tags = [{"name": k, "count": v} for k, v in sorted(counts.items(), key=lambda x: (-x[1], x[0]))]
+    return {"tags": tags}
+
+
+@router.post("/tags/suggest", dependencies=[Depends(require_token)])
+def tags_suggest(body: TagSuggestRequest, db=Depends(get_db)):
+    pool: list[str] = []
+    for m in db.scalars(select(MediaItem).order_by(desc(MediaItem.id)).limit(200)).all():
+        pool.extend(tags_from_json(getattr(m, "tags_json", None)))
+    tags = suggest_tags(
+        title=body.title,
+        url=body.url,
+        media_type=body.media_type,
+        source_page=body.source_page,
+        existing_pool=pool,
+    )
+    return {"tags": tags}
+
+
+@router.post("/media/{media_id}/tags", dependencies=[Depends(require_token)])
+def set_media_tags(media_id: int, body: TagsUpdate, db=Depends(get_db)):
+    m = db.get(MediaItem, media_id)
+    if not m:
+        raise HTTPException(404, "Not found")
+    m.tags_json = tags_to_json(body.tags)
+    db.commit()
+    db.refresh(m)
+    return _media_out(m)
+
+
+@router.post("/media/tags/batch", dependencies=[Depends(require_token)])
+def batch_media_tags(body: TagsBatchUpdate, db=Depends(get_db)):
+    if not body.ids:
+        raise HTTPException(400, "ids required")
+    new_tags = normalize_tags(body.tags)
+    updated = 0
+    items = []
+    for mid in body.ids[:200]:
+        m = db.get(MediaItem, mid)
+        if not m:
+            continue
+        if body.mode == "replace":
+            m.tags_json = tags_to_json(new_tags)
+        else:
+            merged = normalize_tags(tags_from_json(m.tags_json) + new_tags)
+            m.tags_json = tags_to_json(merged)
+        updated += 1
+        items.append(_media_out(m))
+    db.commit()
+    return {"updated": updated, "items": items}
 
 
 @router.get("/media", dependencies=[Depends(require_token)])
 def list_media(
-    category: str | None = None,
     type: str | None = None,
     q: str | None = None,
+    tag: str | None = None,
     sort: str = "new",
     offset: int = 0,
     limit: int = Query(default=50, le=200),
     db=Depends(get_db),
 ):
     stmt = select(MediaItem)
-    if category:
-        stmt = stmt.where(MediaItem.category == safe_category(category))
     if type:
         stmt = stmt.where(MediaItem.media_type == type)
     if q:
@@ -131,28 +201,30 @@ def list_media(
         stmt = stmt.order_by(MediaItem.id.asc())
     else:
         stmt = stmt.order_by(MediaItem.id.desc())
-    total = db.scalar(select(func.count()).select_from(stmt.subquery())) or 0
-    rows = db.scalars(stmt.offset(offset).limit(limit)).all()
-    return {"total": total, "items": [_media_out(m) for m in rows]}
+    rows = list(db.scalars(stmt).all())
+    if tag:
+        t = tag.strip().lower()
+        rows = [m for m in rows if t in tags_from_json(getattr(m, "tags_json", None))]
+    total = len(rows)
+    page = rows[offset : offset + limit]
+    return {"total": total, "items": [_media_out(m) for m in page]}
 
 
 @router.get("/feed", dependencies=[Depends(require_token)])
 def feed(
     mode: str = "recommend",
     limit: int = Query(default=30, le=100),
-    category: str | None = None,
+    similar_to: int | None = None,
+    tag: str | None = None,
     db=Depends(get_db),
 ):
     """
     mode:
-      - recommend: personal score (like / view / skip / recency / category affinity)
-      - recent: newest first
-      - random: shuffle
-      - liked: only liked items
+      - recommend: personal score + tag affinity
+      - similar: similar_to media_id (tag overlap); falls back to recommend
+      - recent / random / liked
     """
     stmt = select(MediaItem)
-    if category:
-        stmt = stmt.where(MediaItem.category == safe_category(category))
     if mode == "liked":
         stmt = stmt.where(MediaItem.liked.is_(True))
         rows = list(db.scalars(stmt.order_by(desc(MediaItem.id)).limit(limit)).all())
@@ -162,12 +234,27 @@ def feed(
         rows = list(db.scalars(stmt.order_by(desc(MediaItem.id)).limit(400)).all())
         random.shuffle(rows)
         rows = rows[:limit]
+    elif mode == "similar" or similar_to:
+        pool = list(db.scalars(stmt.order_by(desc(MediaItem.id)).limit(500)).all())
+        seed = db.get(MediaItem, similar_to) if similar_to else None
+        if seed is None and pool:
+            seed = pool[0]
+        if seed is None:
+            rows = []
+        else:
+            rows = rank_similar(pool, seed, limit=limit)
+        mode = "similar"
     else:
-        # recommend: pool then rank
         pool = list(db.scalars(stmt.order_by(desc(MediaItem.id)).limit(500)).all())
         rows = rank_recommend_with_affinity(pool, limit=limit)
-    return {"mode": mode, "items": [_media_out(m) for m in rows]}
-
+    if tag:
+        t = tag.strip().lower()
+        rows = [m for m in rows if t in tags_from_json(getattr(m, "tags_json", None))]
+    return {
+        "mode": mode,
+        "similar_to": similar_to,
+        "items": [_media_out(m) for m in rows],
+    }
 
 @router.get("/media/{media_id}", dependencies=[Depends(require_token)])
 def get_media(media_id: int, db=Depends(get_db)):
@@ -278,8 +365,9 @@ def interact(media_id: int, body: InteractEvent, db=Depends(get_db)):
 @router.post("/ingest", dependencies=[Depends(require_token)])
 async def ingest(body: IngestRequest):
     result = await enqueue_jobs(
-        body.category,
+        "default",
         [it.model_dump() for it in body.items],
+        default_tags=body.tags,
     )
     return result
 
@@ -291,13 +379,15 @@ async def upload(
     source_url: str = Form(""),
     media_type: str = Form(""),
     remux: str = Form("1"),
+    tags: str = Form(""),
     file: UploadFile = File(...),
 ):
     """
     Direct blob upload (cache capture / recorder).
     Default remux=1 runs ffmpeg copy+faststart so MSE fMP4 / webm is browser-playable.
+    tags: JSON array or comma-separated (max 5).
     """
-    cat = ensure_category(category)
+    ensure_category(category)
     settings = get_settings()
     raw_name = file.filename or "upload.bin"
     data = await file.read()
@@ -310,7 +400,7 @@ async def upload(
     if mtype not in ("image", "gif", "video"):
         mtype = "video"
     fname = safe_filename(title or Path(raw_name).stem, source_url or raw_name, ext)
-    dest = settings.medias_path() / cat / fname
+    dest = settings.medias_path() / fname
     dest.parent.mkdir(parents=True, exist_ok=True)
     dest.write_bytes(data)
     mime = file.content_type or ""
@@ -324,14 +414,16 @@ async def upload(
             mime = mimetypes.guess_type(dest.name)[0] or mime or "video/mp4"
         except Exception as e:
             note = f"remux_skip:{e}"
+    tag_list = normalize_tags(tags)
     item = register_uploaded_file(
-        category=cat,
+        category="default",
         dest=dest,
         title=title or Path(raw_name).stem,
         source_url=source_url,
         media_type=mtype,
         mime=mime,
         dedupe=False,
+        tags=tag_list,
     )
     return {"media_id": item.id, "item": _media_out(item), "note": note}
 
@@ -341,13 +433,14 @@ async def upload_av(
     category: str = Form("default"),
     title: str = Form(""),
     source_url: str = Form(""),
+    tags: str = Form(""),
     video: UploadFile = File(...),
     audio: UploadFile | None = File(None),
 ):
     """
     Merge separate MSE video + audio buffers into one playable mp4 (one media item).
     """
-    cat = ensure_category(category)
+    ensure_category(category)
     settings = get_settings()
     vdata = await video.read()
     adata = await audio.read() if audio is not None else b""
@@ -360,24 +453,24 @@ async def upload_av(
     a_tmp = write_temp_bytes(adata, ".mp4") if adata and len(adata) > 32 else None
     try:
         fname = safe_filename(title or "capture", source_url or "capture", "mp4")
-        dest = settings.medias_path() / cat / fname
+        dest = settings.medias_path() / fname
         dest.parent.mkdir(parents=True, exist_ok=True)
         try:
             merge_av_to_mp4(v_tmp, a_tmp, dest)
             note = "merged"
         except Exception as e:
-            # fallback: remux video track only
             dest.write_bytes(vdata)
             dest = remux_to_playable(dest, prefer_ext="mp4")
             note = f"video_only:{e}"
         item = register_uploaded_file(
-            category=cat,
+            category="default",
             dest=dest,
             title=title or "capture",
             source_url=source_url,
             media_type="video",
             mime="video/mp4",
             dedupe=False,
+            tags=normalize_tags(tags),
         )
         return {"media_id": item.id, "item": _media_out(item), "note": note}
     finally:
@@ -387,7 +480,6 @@ async def upload_av(
                     p.unlink()
                 except OSError:
                     pass
-
 
 @router.get("/jobs", dependencies=[Depends(require_token)])
 def list_jobs(

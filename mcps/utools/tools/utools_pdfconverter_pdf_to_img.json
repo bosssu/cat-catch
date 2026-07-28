@@ -1,0 +1,18 @@
+{
+  "name": "utools_pdfconverter_pdf_to_img",
+  "description": "将 PDF 文件转换为图片格式 [utools:utools.pdfconverter.pdf_to_img]",
+  "inputSchema": {
+    "$schema": "http://json-schema.org/draft-07/schema#",
+    "type": "object",
+    "properties": {
+      "inputPath": {
+        "type": "string",
+        "description": "PDF 文件路径"
+      }
+    },
+    "required": [
+      "inputPath"
+    ],
+    "additionalProperties": false
+  }
+}
