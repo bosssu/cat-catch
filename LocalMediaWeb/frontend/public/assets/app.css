@@ -1625,6 +1625,16 @@ button.chip.tag.is-active {
   flex-shrink: 0;
   border: 1px solid var(--card-border);
 }
+.admin-thumb-audio {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: radial-gradient(ellipse at 50% 45%, #2a3550 0%, #141820 100%);
+  color: #c8d2e6;
+  font-size: 26px;
+  line-height: 1;
+  user-select: none;
+}
 .admin-media-meta { flex: 1; min-width: 0; font-size: 13px; }
 .jobs .job {
   border-top: 1px solid var(--card-border);

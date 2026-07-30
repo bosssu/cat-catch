@@ -508,10 +508,21 @@ def get_media(media_id: int, db=Depends(get_db)):
     return _media_out(m)
 
 
+_AUDIO_MIME_BY_EXT = {
+    ".mp3": "audio/mpeg",
+    ".m4a": "audio/mp4",
+    ".aac": "audio/aac",
+    ".ogg": "audio/ogg",
+    ".opus": "audio/opus",
+    ".wav": "audio/wav",
+    ".flac": "audio/flac",
+}
+
+
 @router.get("/media/{media_id}/file", dependencies=[Depends(require_token)])
 def media_file(media_id: int, db=Depends(get_db)):
     """
-    Stream media with Range support (native <video> on mobile).
+    Stream media with Range support (native <video> / <audio> on mobile).
     Auth: header or ?token= (see require_token).
     """
     m = db.get(MediaItem, media_id)
@@ -521,11 +532,16 @@ def media_file(media_id: int, db=Depends(get_db)):
     if not path.is_file():
         raise HTTPException(404, "File missing on disk")
     media = m.mime or mimetypes.guess_type(path.name)[0] or "application/octet-stream"
-    # webm leftovers: still serve, but prefer correct type for mp4 after remux
-    if path.suffix.lower() == ".mp4":
+    suf = path.suffix.lower()
+    # Prefer correct types so browsers decode (Windows mimetypes often miss m4a/flac)
+    if suf == ".mp4":
         media = "video/mp4"
-    elif path.suffix.lower() == ".webm":
+    elif suf == ".webm":
         media = "video/webm"
+    elif suf in _AUDIO_MIME_BY_EXT:
+        media = _AUDIO_MIME_BY_EXT[suf]
+    elif (m.media_type or "").lower() == "audio" and not (media or "").startswith("audio/"):
+        media = "audio/mpeg"
     try:
         st = path.stat()
         etag = f'"{st.st_mtime_ns}-{st.st_size}"'
@@ -538,6 +554,7 @@ def media_file(media_id: int, db=Depends(get_db)):
         content_disposition_type="inline",
         headers={
             "Cache-Control": "private, max-age=0, must-revalidate",
+            "Accept-Ranges": "bytes",
             "ETag": etag,
         },
     )
@@ -545,32 +562,45 @@ def media_file(media_id: int, db=Depends(get_db)):
 
 @router.get("/media/{media_id}/thumb", dependencies=[Depends(require_token)])
 def media_thumb(media_id: int, db=Depends(get_db)):
+    from app.services.thumb import audio_placeholder_path, ensure_audio_placeholder
+
     m = db.get(MediaItem, media_id)
     if not m:
         raise HTTPException(404, "Not found")
     tpath = thumb_path_for(media_id)
+    mtype = (m.media_type or "").lower()
     if not tpath.is_file():
         src = get_settings().medias_path() / m.rel_path
-        if src.is_file():
-            rel = generate_thumb(src, media_id, m.media_type)
+        if src.is_file() or mtype == "audio":
+            rel = generate_thumb(src if src.is_file() else tpath, media_id, m.media_type or "audio")
             if rel:
                 m.thumb_rel = rel
                 db.commit()
-    if tpath.is_file():
+    # Per-id jpg, or shared audio placeholder path stored in thumb_rel
+    serve: Path | None = tpath if tpath.is_file() else None
+    if not serve and m.thumb_rel:
+        cand = get_settings().data_path() / m.thumb_rel
+        if cand.is_file():
+            serve = cand
+    if not serve and mtype == "audio":
         try:
-            st = tpath.stat()
+            serve = ensure_audio_placeholder()
+        except Exception:
+            serve = audio_placeholder_path() if audio_placeholder_path().is_file() else None
+    if serve and serve.is_file():
+        try:
+            st = serve.stat()
             etag = f'"{st.st_mtime_ns}-{st.st_size}"'
         except OSError:
             etag = f'"thumb-{media_id}"'
         return FileResponse(
-            tpath,
+            serve,
             media_type="image/jpeg",
             headers={
                 "Cache-Control": "private, max-age=0, must-revalidate",
                 "ETag": etag,
             },
         )
-    # 1x1 pixel jpeg fallback is better as SVG placeholder via empty 404 with cache
     raise HTTPException(404, "No thumb")
 
 

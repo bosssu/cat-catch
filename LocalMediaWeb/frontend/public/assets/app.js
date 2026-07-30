@@ -1352,11 +1352,15 @@
     try {
       sessionStorage.setItem(soundKey, state.wantSound ? "1" : "0");
     } catch (_) {}
-    // Only the shared feed player (or current slide video)
-    const active = getFeedPlayer(false) || document.querySelector(
-      `#feedScroller .snap-slide[data-id="${state.activeFeedId}"] video`
-    );
+    // Shared feed video and/or audio players
+    const active =
+      getFeedPlayer(false) ||
+      getFeedAudioPlayer(false) ||
+      document.querySelector(
+        `#feedScroller .snap-slide[data-id="${state.activeFeedId}"] video, #feedScroller .snap-slide[data-id="${state.activeFeedId}"] audio`
+      );
     if (active) applySoundToVideo(active);
+    applySoundToAllVideos();
     document.querySelectorAll("[data-act='mute']").forEach(syncMuteBtn);
   }
 
@@ -3987,6 +3991,30 @@
     const want = !!state.wantSound;
     // Unlocked = user has unmuted once on THIS element lineage (shared player)
     const unlocked = !!(state.audioUnlocked || state.wantSound);
+    const isAudio = media.tagName === "AUDIO";
+
+    // <audio> autoplay is stricter than <video> (no visual track). Prefer muted
+    // start so we leave the loading state; unmute when preference + unlock allow.
+    if (isAudio) {
+      setVideoMutedProg(media, true);
+      if (!(await attempt())) {
+        await waitVideoReady(media, isMobileFeedClient() ? 5000 : 8000);
+        if (!alive()) return false;
+        setVideoMutedProg(media, true);
+        if (!(await attempt())) return false;
+      }
+      if (want && unlocked) {
+        setVideoMutedProg(media, false);
+        if (await attempt()) {
+          markAudioUnlocked();
+          return true;
+        }
+        // Keep muted playback if unmute blocked
+        setVideoMutedProg(media, true);
+        if (!(await attempt())) return !media.paused;
+      }
+      return !media.paused;
+    }
 
     // Preferred path after unlock: play WITH sound first (same element keeps privilege)
     if (want && unlocked) {
@@ -4132,10 +4160,36 @@
     // —— Audio slides (shared <audio> + progress chrome) ——
     if (isAudioSlide) {
       const src = stage.getAttribute("data-src") || "";
-      if (!src) return;
+      if (!src) {
+        setSlideLoading(slideEl, false);
+        return;
+      }
 
       let media = mountFeedAudioPlayer(slideEl);
-      if (!media) return;
+      if (!media) {
+        setSlideLoading(slideEl, false);
+        return;
+      }
+
+      const revealAudio = (played) => {
+        media.classList.add("is-ready");
+        setSlideLoading(slideEl, false);
+        // Show center play if autoplay blocked — user can tap to start
+        if (!played) {
+          media.dataset.userPaused = "1";
+          const btn = stage.querySelector(".media-play-toggle");
+          if (btn) {
+            btn.classList.add("is-visible", "is-paused");
+            btn.innerHTML = ICO.play;
+            btn.setAttribute("aria-label", "播放");
+          }
+          const bar = stage.querySelector(".feed-progress");
+          if (bar) bar.classList.add("is-visible");
+        } else {
+          media.dataset.userPaused = "0";
+        }
+        state._activateRetryCount = 0;
+      };
 
       const isDifferentClip =
         !mediaSrcLoaded(media, src) ||
@@ -4151,15 +4205,16 @@
         state.activeFeedId = id;
         onSlideActive(index);
         pauseOtherFeedVideos(media);
+        let played = !media.paused;
         if (media.paused) {
           const gen = bumpVideoPlayGen(media);
-          await playVideoRobust(media, gen);
+          played = await playVideoRobust(media, gen);
         } else if (state.wantSound && media.muted && state.audioUnlocked) {
           setVideoMutedProg(media, false);
           if (media.paused) softResumeFeedVideo(media);
+          played = !media.paused;
         }
-        media.classList.add("is-ready");
-        setSlideLoading(slideEl, false);
+        revealAudio(played || !media.paused);
         return;
       }
 
@@ -4175,7 +4230,7 @@
       media = mountFeedAudioPlayer(slideEl) || media;
       if (isDifferentClip) media.dataset.userPaused = "0";
       if (media.dataset.userPaused === "1") {
-        setSlideLoading(slideEl, false);
+        revealAudio(false);
         releaseActivating();
         return;
       }
@@ -4192,22 +4247,23 @@
           !mediaSrcLoaded(media, src) ||
           isDifferentClip;
         const ok = await loadMediaEl(media, src, { force: needForce });
-        if (!ok || epoch !== state.playEpoch || state.activeFeedId !== id) {
+        if (epoch !== state.playEpoch || state.activeFeedId !== id) {
           releaseActivating();
           return;
         }
+        if (!ok || media.error) {
+          // Load failed — stop spinner so UI is not stuck forever
+          revealAudio(false);
+          releaseActivating();
+          return;
+        }
+        // Always clear spinner after load; autoplay may be blocked (common for <audio>)
         let played = await playVideoRobust(media, gen);
-        if (!played && epoch === state.playEpoch && media.isConnected && !media.paused) {
-          played = true;
+        if (!played && media.isConnected && !media.paused) played = true;
+        if (played && state.wantSound && !media.muted) markAudioUnlocked();
+        if (epoch === state.playEpoch && state.activeFeedId === id) {
+          revealAudio(played);
         }
-        if (!played || epoch !== state.playEpoch || state.activeFeedId !== id) {
-          releaseActivating();
-          return;
-        }
-        if (state.wantSound && !media.muted) markAudioUnlocked();
-        media.classList.add("is-ready");
-        setSlideLoading(slideEl, false);
-        state._activateRetryCount = 0;
       } finally {
         releaseActivating();
       }
@@ -4791,8 +4847,13 @@
     const type = img.dataset.type || "";
     if (type === "audio") {
       img.classList.add("cell-thumb-audio");
-      img.removeAttribute("src");
       img.alt = "audio";
+      // Server returns shared note placeholder JPEG for audio
+      if (thumb) {
+        const ok = await loadMediaEl(img, thumb);
+        if (ok) return;
+      }
+      img.removeAttribute("src");
       return;
     }
     // 1) 服务端静态 jpg 缩略图
@@ -5364,21 +5425,26 @@
       if (!box) return;
       box.innerHTML =
         items
-          .map(
-            (m) => `<div class="admin-media-row">
+          .map((m) => {
+            const isAudio = (m.media_type || "") === "audio";
+            const thumb = isAudio
+              ? `<div class="admin-thumb admin-thumb-audio" title="audio" aria-hidden="true">♪</div>`
+              : `<img class="admin-thumb" data-src="${m.thumb_url || ""}" alt="" />`;
+            return `<div class="admin-media-row">
             <label class="admin-check"><input type="checkbox" data-mid="${m.id}" /></label>
-            <img class="admin-thumb" data-src="${m.thumb_url}" alt="" />
+            ${thumb}
             <div class="admin-media-meta">
               <div><strong>#${m.id}</strong> · ${escapeHtml(m.media_type)}${m.liked ? " · ♥" : ""}</div>
               <div class="muted">${escapeHtml(m.title || m.source_url || "")}</div>
               <div class="muted">${(m.tags || []).map((t) => "#" + escapeHtml(t)).join(" ") || "无标签"} · ${ICO.eye} ${m.view_count || 0}</div>
             </div>
             <button type="button" class="danger" data-adel="${m.id}">${ICO.trash} 删除</button>
-          </div>`
-          )
+          </div>`;
+          })
           .join("") || `<div class='muted'>${q ? "无匹配媒体" : "暂无媒体"}</div>`;
-      box.querySelectorAll(".admin-thumb").forEach((img) => {
-        loadMediaEl(img, img.dataset.src);
+      box.querySelectorAll("img.admin-thumb[data-src]").forEach((img) => {
+        const src = img.dataset.src;
+        if (src) loadMediaEl(img, src);
       });
       box.querySelectorAll("[data-adel]").forEach((b) => {
         b.onclick = async () => {
