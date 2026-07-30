@@ -1463,7 +1463,14 @@
     if (!slideEl) return null;
     const stage = slideEl.querySelector(".media-stage");
     if (!stage) return null;
+    // Feed audio uses the same <video> decoder (iOS autoplay is reliable for video).
+    // Park any leftover <audio> so it cannot fight the shared player.
     parkFeedAudio();
+    stage.querySelectorAll("audio").forEach((el) => {
+      try {
+        el.remove();
+      } catch (_) {}
+    });
     const v = getFeedPlayer(true);
     if (!v) return null;
     // Remove any leftover per-slide <video> shells (old markup / recovery)
@@ -1475,8 +1482,11 @@
       }
     });
     if (v.parentNode !== stage) {
+      // Keep .audio-stage-art above the player (inserted first / lower in stack)
+      const art = stage.querySelector(".audio-stage-art");
       const loading = stage.querySelector(".media-loading");
-      if (loading) loading.after(v);
+      if (art) art.after(v);
+      else if (loading) loading.after(v);
       else stage.insertBefore(v, stage.firstChild);
     }
     // data-src on stage is the clip URL for this slide
@@ -1495,33 +1505,9 @@
     return v;
   }
 
+  /** @deprecated feed audio now uses mountFeedPlayer; kept for park safety */
   function mountFeedAudioPlayer(slideEl) {
-    if (!slideEl) return null;
-    const stage = slideEl.querySelector(".media-stage");
-    if (!stage) return null;
-    parkFeedPlayer();
-    const a = getFeedAudioPlayer(true);
-    if (!a) return null;
-    stage.querySelectorAll("audio").forEach((el) => {
-      if (el !== a) {
-        try {
-          el.remove();
-        } catch (_) {}
-      }
-    });
-    if (a.parentNode !== stage) {
-      const loading = stage.querySelector(".media-loading");
-      if (loading) loading.after(a);
-      else stage.insertBefore(a, stage.firstChild);
-    }
-    const clip = stage.getAttribute("data-src") || "";
-    if (clip) a.setAttribute("data-src", clip);
-    try {
-      delete stage.dataset.progressBound;
-    } catch (_) {}
-    bindFeedProgress(stage);
-    applySoundToVideo(a);
-    return a;
+    return mountFeedPlayer(slideEl);
   }
 
   function isFeedPlayer(el) {
@@ -2417,7 +2403,17 @@
             </div>
             <div class="feed-progress-time"><span class="cur">0:00</span><span class="sep">/</span><span class="dur">0:00</span></div>
           </div>`;
-    const audioArt = `<div class="audio-stage-art" aria-hidden="true"><span class="audio-note">♪</span></div>`;
+    // SVG note (not text ♪) so every OS/font shows a visible icon
+    const audioArt = isAudio
+      ? `<div class="audio-stage-art" aria-hidden="true">
+          <div class="audio-note-badge">
+            <svg class="audio-note-svg" viewBox="0 0 64 64" width="96" height="96" focusable="false">
+              <circle cx="32" cy="32" r="30" fill="rgba(80,110,180,0.25)" stroke="rgba(180,200,240,0.45)" stroke-width="2"/>
+              <path fill="rgba(220,230,255,0.92)" d="M40 12v28.5a9 9 0 1 1-4-7.5V20l14-4v6.2l-10 2.8V12z"/>
+            </svg>
+          </div>
+        </div>`
+      : "";
     const media = isImg
       ? `${loading}<img data-src="${fileUrl(item)}" alt="" draggable="false" />`
       : isAudio
@@ -3935,13 +3931,20 @@
    */
   function waitVideoReady(video, timeoutMs = 10000) {
     if (!video) return Promise.resolve(false);
-    const isAudio = video.tagName === "AUDIO";
+    // <audio> or audio file in <video> (no picture track): videoWidth stays 0 forever
+    const stageKind =
+      (video.closest && video.closest(".media-stage")?.getAttribute("data-kind")) || "";
+    const audioOnly =
+      video.tagName === "AUDIO" ||
+      stageKind === "audio" ||
+      (video.dataset && video.dataset.audioOnly === "1");
     // Prefer a real frame (videoWidth>0). readyState alone can be true for audio-first demux.
-    // For <audio>, readyState is enough (no videoWidth).
-    const isFrameReady = () =>
-      isAudio
-        ? video.readyState >= 2
-        : video.readyState >= 2 && (video.videoWidth > 0 || video.readyState >= 3);
+    const isFrameReady = () => {
+      if (audioOnly) return video.readyState >= 1;
+      return (
+        video.readyState >= 2 && (video.videoWidth > 0 || video.readyState >= 3)
+      );
+    };
     if (isFrameReady()) return Promise.resolve(true);
     return new Promise((resolve) => {
       let done = false;
@@ -3955,16 +3958,18 @@
       };
       const onReady = () => {
         if (isFrameReady()) fin(true);
-        // metadata-only still useful as soft progress; don't finish early on mobile
-        else if (!isAudio && video.readyState >= 2 && video.videoWidth > 0) fin(true);
-        else if (isAudio && video.readyState >= 1) fin(true);
+        else if (!audioOnly && video.readyState >= 2 && video.videoWidth > 0) fin(true);
       };
       const onErr = () => fin(false);
       const events = ["loadeddata", "canplay", "canplaythrough", "loadedmetadata", "playing"];
       events.forEach((ev) => video.addEventListener(ev, onReady));
       video.addEventListener("error", onErr);
-      const timer = setTimeout(() => fin(video.readyState >= 2 || video.readyState >= 1), timeoutMs);
-      // already progressing
+      // Audio-only: shorter timeout — readyState>=1 is enough
+      const ms = audioOnly ? Math.min(timeoutMs, 4000) : timeoutMs;
+      const timer = setTimeout(
+        () => fin(video.readyState >= 1 || !!video.getAttribute("src")),
+        ms
+      );
       onReady();
     });
   }
@@ -4150,125 +4155,14 @@
     if (!stage) return;
 
     const kind = (stage.getAttribute("data-kind") || "").toLowerCase();
+    // Audio feeds use the same shared <video> path as video (iOS autoplay + Range).
+    // Visual: CSS hides the black video; SVG note art sits on top.
     const isAudioSlide = kind === "audio";
     const isVideoSlide =
-      !isAudioSlide &&
-      (kind === "video" ||
-        !!stage.querySelector("video") ||
-        (!stage.querySelector("img") && !!stage.getAttribute("data-src")));
-
-    // —— Audio slides (shared <audio> + progress chrome) ——
-    if (isAudioSlide) {
-      const src = stage.getAttribute("data-src") || "";
-      if (!src) {
-        setSlideLoading(slideEl, false);
-        return;
-      }
-
-      let media = mountFeedAudioPlayer(slideEl);
-      if (!media) {
-        setSlideLoading(slideEl, false);
-        return;
-      }
-
-      const revealAudio = (played) => {
-        media.classList.add("is-ready");
-        setSlideLoading(slideEl, false);
-        // Show center play if autoplay blocked — user can tap to start
-        if (!played) {
-          media.dataset.userPaused = "1";
-          const btn = stage.querySelector(".media-play-toggle");
-          if (btn) {
-            btn.classList.add("is-visible", "is-paused");
-            btn.innerHTML = ICO.play;
-            btn.setAttribute("aria-label", "播放");
-          }
-          const bar = stage.querySelector(".feed-progress");
-          if (bar) bar.classList.add("is-visible");
-        } else {
-          media.dataset.userPaused = "0";
-        }
-        state._activateRetryCount = 0;
-      };
-
-      const isDifferentClip =
-        !mediaSrcLoaded(media, src) ||
-        (media.getAttribute("data-src") && media.getAttribute("data-src") !== src);
-
-      if (
-        media.dataset.userPaused !== "1" &&
-        mediaSrcLoaded(media, src) &&
-        media.getAttribute("src") &&
-        media.readyState >= 1 &&
-        !media.error
-      ) {
-        state.activeFeedId = id;
-        onSlideActive(index);
-        pauseOtherFeedVideos(media);
-        let played = !media.paused;
-        if (media.paused) {
-          const gen = bumpVideoPlayGen(media);
-          played = await playVideoRobust(media, gen);
-        } else if (state.wantSound && media.muted && state.audioUnlocked) {
-          setVideoMutedProg(media, false);
-          if (media.paused) softResumeFeedVideo(media);
-          played = !media.paused;
-        }
-        revealAudio(played || !media.paused);
-        return;
-      }
-
-      const epoch = ++state.playEpoch;
-      state.activeFeedId = id;
-      state._feedActivating = true;
-      onSlideActive(index);
-      setSlideLoading(slideEl, true);
-      const releaseActivating = () => {
-        if (epoch === state.playEpoch) state._feedActivating = false;
-      };
-      pauseOtherFeedVideos(media);
-      media = mountFeedAudioPlayer(slideEl) || media;
-      if (isDifferentClip) media.dataset.userPaused = "0";
-      if (media.dataset.userPaused === "1") {
-        revealAudio(false);
-        releaseActivating();
-        return;
-      }
-      const gen = bumpVideoPlayGen(media);
-      try {
-        media.classList.remove("is-ready");
-      } catch (_) {}
-      media.setAttribute("data-src", src);
-      media.preload = "auto";
-      try {
-        const needForce =
-          !!media.error ||
-          !media.getAttribute("src") ||
-          !mediaSrcLoaded(media, src) ||
-          isDifferentClip;
-        const ok = await loadMediaEl(media, src, { force: needForce });
-        if (epoch !== state.playEpoch || state.activeFeedId !== id) {
-          releaseActivating();
-          return;
-        }
-        if (!ok || media.error) {
-          // Load failed — stop spinner so UI is not stuck forever
-          revealAudio(false);
-          releaseActivating();
-          return;
-        }
-        // Always clear spinner after load; autoplay may be blocked (common for <audio>)
-        let played = await playVideoRobust(media, gen);
-        if (!played && media.isConnected && !media.paused) played = true;
-        if (played && state.wantSound && !media.muted) markAudioUnlocked();
-        if (epoch === state.playEpoch && state.activeFeedId === id) {
-          revealAudio(played);
-        }
-      } finally {
-        releaseActivating();
-      }
-      return;
-    }
+      isAudioSlide ||
+      kind === "video" ||
+      !!stage.querySelector("video") ||
+      (!stage.querySelector("img") && !!stage.getAttribute("data-src"));
 
     // —— Image slides ——
     if (!isVideoSlide) {
@@ -4322,15 +4216,26 @@
       return;
     }
 
-    // —— Video: mount singleton player into this slide ——
+    // —— Video / audio: mount singleton player into this slide ——
     const src =
       stage.getAttribute("data-src") ||
       slideEl.querySelector("video")?.getAttribute("data-src") ||
       "";
-    if (!src) return;
+    if (!src) {
+      setSlideLoading(slideEl, false);
+      return;
+    }
 
     let media = mountFeedPlayer(slideEl);
-    if (!media) return;
+    if (!media) {
+      setSlideLoading(slideEl, false);
+      return;
+    }
+    if (isAudioSlide) {
+      try {
+        media.dataset.audioOnly = "1";
+      } catch (_) {}
+    }
 
     // Same clip already loaded & ready → soft resume (keep sound unlock)
     // After L→P, first switch to a *different* clip must not take soft path on stale buffer
@@ -4417,18 +4322,32 @@
         forcePostOrient ||
         isDifferentClip;
       const ok = await loadMediaEl(media, src, { force: needForce });
-      if (!ok || epoch !== state.playEpoch || state.activeFeedId !== id) {
-        releaseActivating();
-        if (epoch === state.playEpoch && state.activeFeedId === id) {
-          scheduleActivateRetry(slideEl, id, "load-fail");
-        }
-        return;
-      }
       if (epoch !== state.playEpoch || state.activeFeedId !== id) {
         releaseActivating();
         return;
       }
+      if (!ok || media.error) {
+        // Always clear spinner (audio-only files used to spin forever on iOS)
+        setSlideLoading(slideEl, false);
+        media.classList.add("is-ready");
+        releaseActivating();
+        if (epoch === state.playEpoch && state.activeFeedId === id && !isAudioSlide) {
+          scheduleActivateRetry(slideEl, id, "load-fail");
+        }
+        // Audio: show play button so user can retry with gesture
+        if (isAudioSlide) {
+          media.dataset.userPaused = "1";
+          const btn = stage.querySelector(".media-play-toggle");
+          if (btn) {
+            btn.classList.add("is-visible", "is-paused");
+            btn.innerHTML = ICO.play;
+            btn.setAttribute("aria-label", "播放");
+          }
+        }
+        return;
+      }
       if (String(media.dataset.playGen) !== String(gen)) {
+        setSlideLoading(slideEl, false);
         releaseActivating();
         return;
       }
@@ -4445,9 +4364,26 @@
         played = true;
       }
 
-      if (!played || epoch !== state.playEpoch || state.activeFeedId !== id) {
+      if (epoch !== state.playEpoch || state.activeFeedId !== id) {
         releaseActivating();
-        if (epoch === state.playEpoch && state.activeFeedId === id) {
+        return;
+      }
+
+      if (!played) {
+        // Autoplay blocked: still end loading; user can tap center play (gesture)
+        setSlideLoading(slideEl, false);
+        media.classList.add("is-ready");
+        media.dataset.userPaused = "1";
+        const btn = stage.querySelector(".media-play-toggle");
+        if (btn) {
+          btn.classList.add("is-visible", "is-paused");
+          btn.innerHTML = ICO.play;
+          btn.setAttribute("aria-label", "播放");
+        }
+        const bar = stage.querySelector(".feed-progress");
+        if (bar) bar.classList.add("is-visible");
+        releaseActivating();
+        if (!isAudioSlide) {
           scheduleActivateRetry(slideEl, id, "play-fail");
         }
         return;
@@ -4462,7 +4398,8 @@
 
       const reveal = () => revealFeedVideo(media, slideEl, { epoch, id, gen });
       reveal();
-      if (media.readyState < 2 || !media.videoWidth) {
+      // Audio-only never gets videoWidth — don't wait on a frame that will never come
+      if (!isAudioSlide && (media.readyState < 2 || !media.videoWidth)) {
         const onFrame = () => {
           media.removeEventListener("loadeddata", onFrame);
           media.removeEventListener("playing", onFrame);

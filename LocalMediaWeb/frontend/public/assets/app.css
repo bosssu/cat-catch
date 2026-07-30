@@ -577,9 +577,9 @@ body.search-open .topnav { display: none; }
 #lmwFeedPlayer.is-ready {
   opacity: 1;
 }
-/* Audio feed: gradient art + hidden singleton <audio> driving progress chrome */
+/* Audio feed: gradient + SVG note. Shared <video> decodes audio but stays invisible. */
 .media-stage-audio {
-  background: radial-gradient(ellipse at 50% 40%, #2a3550 0%, #12161f 65%, #0a0c10 100%);
+  background: radial-gradient(ellipse at 50% 38%, #3a4d7a 0%, #1a2238 42%, #0c1018 100%);
 }
 .media-stage-audio .audio-stage-art {
   position: absolute;
@@ -588,14 +588,29 @@ body.search-open .topnav { display: none; }
   align-items: center;
   justify-content: center;
   pointer-events: none;
-  z-index: 1;
+  z-index: 4; /* above decoder video, below progress (8) / play (9) */
 }
-.media-stage-audio .audio-note {
-  font-size: clamp(64px, 18vw, 120px);
-  line-height: 1;
-  opacity: 0.55;
-  filter: drop-shadow(0 8px 24px rgba(0, 0, 0, 0.45));
-  user-select: none;
+.media-stage-audio .audio-note-badge {
+  display: grid;
+  place-items: center;
+  width: min(42vw, 180px);
+  height: min(42vw, 180px);
+  border-radius: 50%;
+  background: radial-gradient(circle at 40% 35%, rgba(255, 255, 255, 0.12), transparent 55%);
+  filter: drop-shadow(0 12px 28px rgba(0, 0, 0, 0.55));
+}
+.media-stage-audio .audio-note-svg {
+  width: 58%;
+  height: 58%;
+  display: block;
+}
+/* Hide black video frame; keep element for iOS autoplay + Range */
+.media-stage-audio video,
+.media-stage-audio video.feed-player,
+.media-stage-audio #lmwFeedPlayer {
+  opacity: 0 !important;
+  pointer-events: none;
+  background: transparent !important;
 }
 .media-stage-audio audio.feed-audio-player,
 #lmwFeedAudio {
