@@ -13,7 +13,9 @@
   --like: #ff4d7a;
   --shadow: 0 12px 40px rgba(0, 0, 0, 0.45);
   --radius: 16px;
-  --nav-h: 56px;
+  --nav-h: 44px;
+  --glass: rgba(18, 18, 28, 0.42);
+  --glass-border: rgba(255, 255, 255, 0.1);
   --font: "Segoe UI", system-ui, -apple-system, "PingFang SC", "Microsoft YaHei", sans-serif;
   font-family: var(--font);
   color-scheme: dark;
@@ -37,43 +39,55 @@ button { cursor: pointer; }
 .ico { width: 18px; height: 18px; flex-shrink: 0; }
 .ico-sm { width: 14px; height: 14px; opacity: 0.75; flex-shrink: 0; }
 
-/* —— Top nav —— */
+/* —— Top nav：半透玻璃质感、紧凑 —— */
 .topnav {
   position: fixed;
   top: 0; left: 0; right: 0;
   z-index: 30;
   display: flex;
   align-items: center;
-  gap: 10px;
+  gap: 6px;
   min-height: var(--nav-h);
-  padding: 8px 12px;
-  padding-top: max(8px, env(safe-area-inset-top));
-  background: linear-gradient(to bottom, rgba(8, 8, 14, 0.92) 40%, rgba(8, 8, 14, 0));
+  padding: 6px 10px;
+  padding-top: max(6px, env(safe-area-inset-top));
+  /* 轻量顶渐变，不压暗画面 */
+  background: linear-gradient(to bottom, rgba(8, 8, 14, 0.28) 0%, transparent 100%);
   pointer-events: none;
 }
 .topnav > * { pointer-events: auto; }
+.topnav .nav-filters,
+.topnav .nav-icon-btn,
+.topnav .nav-tabs,
+.topnav .brand,
+.topnav .select-wrap {
+  pointer-events: auto;
+  position: relative;
+  z-index: 31;
+}
 
 .brand {
   display: flex;
   align-items: center;
-  gap: 8px;
-  padding: 6px 10px 6px 6px;
+  gap: 6px;
+  padding: 3px 8px 3px 3px;
   border-radius: 999px;
-  background: var(--bg-elevated);
-  border: 1px solid var(--card-border);
-  backdrop-filter: blur(12px);
-  -webkit-backdrop-filter: blur(12px);
+  background: var(--glass);
+  border: 1px solid var(--glass-border);
+  backdrop-filter: blur(16px) saturate(1.35);
+  -webkit-backdrop-filter: blur(16px) saturate(1.35);
+  box-shadow: 0 2px 12px rgba(0, 0, 0, 0.18);
 }
 .brand-mark {
   display: grid;
   place-items: center;
-  width: 28px; height: 28px;
+  width: 22px; height: 22px;
   border-radius: 50%;
   background: linear-gradient(135deg, var(--accent), #a78bfa);
   color: #fff;
 }
+.brand-mark .ico { width: 12px; height: 12px; }
 .brand-text {
-  font-size: 13px;
+  font-size: 12px;
   font-weight: 650;
   letter-spacing: 0.02em;
 }
@@ -83,56 +97,232 @@ button { cursor: pointer; }
 
 .nav-tabs {
   display: flex;
-  gap: 4px;
-  padding: 4px;
+  gap: 2px;
+  padding: 2px;
   border-radius: 999px;
-  background: var(--bg-elevated);
-  border: 1px solid var(--card-border);
-  backdrop-filter: blur(12px);
-  -webkit-backdrop-filter: blur(12px);
+  background: var(--glass);
+  border: 1px solid var(--glass-border);
+  backdrop-filter: blur(16px) saturate(1.35);
+  -webkit-backdrop-filter: blur(16px) saturate(1.35);
+  box-shadow: 0 2px 12px rgba(0, 0, 0, 0.18);
 }
 .topnav .nav {
   display: inline-flex;
   align-items: center;
-  gap: 6px;
+  gap: 4px;
   border: 0;
   background: transparent;
   color: var(--muted);
   border-radius: 999px;
-  padding: 8px 12px;
-  font-size: 13px;
+  padding: 5px 9px;
+  font-size: 12px;
   font-weight: 550;
   transition: background 0.15s, color 0.15s, transform 0.1s;
 }
-.topnav .nav:hover { color: var(--fg); background: rgba(255,255,255,0.04); }
+.topnav .nav:hover { color: var(--fg); background: rgba(255,255,255,0.06); }
 .topnav .nav.active {
-  background: linear-gradient(135deg, var(--accent), #7c6cf0);
+  background: linear-gradient(135deg, rgba(109, 140, 255, 0.92), rgba(124, 108, 240, 0.92));
   color: #fff;
-  box-shadow: 0 4px 16px rgba(109, 140, 255, 0.35);
+  box-shadow: 0 2px 10px rgba(109, 140, 255, 0.32);
 }
-.topnav .nav .ico { width: 16px; height: 16px; }
+.topnav .nav .ico { width: 14px; height: 14px; }
 @media (max-width: 420px) {
   .topnav .nav span { display: none; }
-  .topnav .nav { padding: 10px; }
+  .topnav .nav { padding: 7px; }
 }
 
 .nav-filters {
   margin-left: auto;
   display: flex;
-  gap: 8px;
+  gap: 6px;
   flex-wrap: wrap;
+  align-items: center;
   justify-content: flex-end;
 }
+.nav-icon-btn {
+  display: inline-grid;
+  place-items: center;
+  width: 32px;
+  height: 32px;
+  padding: 0;
+  border: 1px solid var(--glass-border);
+  border-radius: 50%;
+  background: var(--glass);
+  color: var(--fg);
+  backdrop-filter: blur(16px) saturate(1.35);
+  -webkit-backdrop-filter: blur(16px) saturate(1.35);
+  box-shadow: 0 2px 12px rgba(0, 0, 0, 0.18);
+  transition: background 0.15s, border-color 0.15s, transform 0.1s;
+}
+.nav-icon-btn:hover {
+  border-color: rgba(120, 160, 255, 0.45);
+  background: rgba(80, 120, 220, 0.22);
+}
+.nav-icon-btn:active { transform: scale(0.96); }
+.nav-icon-btn .ico { width: 16px; height: 16px; }
+
+/* —— Search page (short-video app style) —— */
+#view-search {
+  position: fixed;
+  inset: 0;
+  z-index: 50;
+  min-height: 100vh;
+  min-height: 100dvh;
+  background: var(--bg);
+  overflow-y: auto;
+  -webkit-overflow-scrolling: touch;
+}
+#view-search.hide {
+  /* keep fixed so re-open is instant; display none via .hide */
+}
+.search-page {
+  max-width: 960px;
+  margin: 0 auto;
+  padding: max(10px, env(safe-area-inset-top)) 12px 48px;
+}
+.search-bar-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  position: sticky;
+  top: 0;
+  z-index: 5;
+  padding: 8px 0 12px;
+  background: linear-gradient(to bottom, var(--bg) 70%, transparent);
+}
+.search-input-wrap {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 0 10px 0 12px;
+  height: 40px;
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.08);
+  border: 1px solid var(--card-border);
+}
+.search-input-wrap:focus-within {
+  border-color: rgba(120, 160, 255, 0.55);
+  background: rgba(80, 120, 220, 0.12);
+}
+.search-input-ico {
+  width: 18px;
+  height: 18px;
+  opacity: 0.55;
+  flex-shrink: 0;
+}
+.search-input {
+  flex: 1;
+  min-width: 0;
+  border: 0;
+  outline: none;
+  background: transparent;
+  color: var(--fg);
+  font-size: 15px;
+  height: 100%;
+}
+.search-input::-webkit-search-cancel-button { display: none; }
+.search-clear {
+  width: 22px;
+  height: 22px;
+  border: 0;
+  border-radius: 50%;
+  background: rgba(255, 255, 255, 0.16);
+  color: var(--fg);
+  font-size: 16px;
+  line-height: 1;
+  padding: 0;
+  flex-shrink: 0;
+}
+.search-go {
+  border: 0;
+  background: transparent;
+  color: var(--accent);
+  font-weight: 650;
+  font-size: 15px;
+  padding: 8px 6px;
+  white-space: nowrap;
+}
+.search-discover { padding: 4px 2px 16px; }
+.search-block { margin-bottom: 18px; }
+.search-block-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 10px;
+  font-size: 14px;
+  font-weight: 650;
+}
+.search-link-btn {
+  border: 0;
+  background: transparent;
+  color: var(--muted);
+  font-size: 12px;
+  padding: 4px 0;
+}
+.search-chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+.search-chip {
+  border: 1px solid var(--card-border);
+  background: rgba(255, 255, 255, 0.05);
+  color: var(--fg);
+  border-radius: 999px;
+  padding: 7px 12px;
+  font-size: 13px;
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.search-chip:hover {
+  border-color: rgba(120, 160, 255, 0.4);
+  background: var(--accent-soft);
+}
+.search-chip .cnt {
+  margin-left: 4px;
+  color: var(--muted);
+  font-size: 11px;
+}
+.search-result-head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 6px 12px;
+  padding: 4px 2px 10px;
+  font-size: 13px;
+}
+.search-result-hint {
+  font-size: 12px;
+  opacity: 0.85;
+}
+.search-grid { padding-top: 0 !important; }
+.search-empty {
+  text-align: center;
+  padding: 48px 16px;
+  font-size: 14px;
+}
+.search-more-wrap {
+  display: flex;
+  justify-content: center;
+  padding: 16px 0 8px;
+}
+body.search-open .topnav { display: none; }
 .select-wrap {
   display: inline-flex;
   align-items: center;
-  gap: 6px;
-  padding: 4px 10px 4px 10px;
+  gap: 4px;
+  padding: 2px 8px 2px 8px;
   border-radius: 999px;
-  background: var(--bg-elevated);
-  border: 1px solid var(--card-border);
-  backdrop-filter: blur(12px);
-  -webkit-backdrop-filter: blur(12px);
+  background: var(--glass);
+  border: 1px solid var(--glass-border);
+  backdrop-filter: blur(16px) saturate(1.35);
+  -webkit-backdrop-filter: blur(16px) saturate(1.35);
+  box-shadow: 0 2px 12px rgba(0, 0, 0, 0.18);
 }
 .select-wrap select {
   appearance: none;
@@ -140,10 +330,10 @@ button { cursor: pointer; }
   border: 0;
   background: transparent;
   color: var(--fg);
-  font-size: 13px;
+  font-size: 12px;
   font-weight: 600;
-  padding: 6px 18px 6px 4px;
-  min-width: 88px;
+  padding: 4px 16px 4px 2px;
+  min-width: 72px;
   outline: none;
   cursor: pointer;
   background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='12' viewBox='0 0 24 24' fill='none' stroke='%23aab' stroke-width='2'%3E%3Cpath d='M6 9l6 6 6-6'/%3E%3C/svg%3E");
@@ -153,7 +343,7 @@ button { cursor: pointer; }
 .select-wrap select option { background: #1a1a24; color: #fff; }
 .nav-filters .select-wrap:hover {
   border-color: rgba(120, 160, 255, 0.45);
-  background: rgba(80, 120, 220, 0.12);
+  background: rgba(80, 120, 220, 0.2);
 }
 
 /* —— Views —— */
@@ -171,19 +361,39 @@ button { cursor: pointer; }
 }
 .page-head p { margin: 0; font-size: 13px; }
 
-/* —— Feed —— */
+/* —— Feed ——
+ * Mainstream short-video scroller (TikTok-style):
+ * - NO scroll-behavior:smooth (fights mandatory snap → multi-page "fast jump" on iOS)
+ * - scroll-snap-stop:always → one gesture = one page
+ * - overscroll contain → less rubber-band thrash with video decode
+ */
 .feed-scroller {
   height: 100vh;
   height: 100dvh;
-  overflow-y: scroll;
+  overflow-y: auto;
+  overflow-x: hidden;
   scroll-snap-type: y mandatory;
-  scroll-behavior: smooth;
+  scroll-behavior: auto;
+  overscroll-behavior-y: contain;
   -webkit-overflow-scrolling: touch;
+  /* isolate layout thrash from video decode */
+  contain: layout style;
+  /* hide scrollbar (iOS Edge / desktop) — scroll still works */
+  scrollbar-width: none; /* Firefox */
+  -ms-overflow-style: none; /* legacy Edge */
+}
+.feed-scroller::-webkit-scrollbar {
+  width: 0;
+  height: 0;
+  display: none;
 }
 .snap-slide {
+  height: 100%;
   height: 100vh;
   height: 100dvh;
+  min-height: 100%;
   scroll-snap-align: start;
+  scroll-snap-stop: always;
   position: relative;
   display: flex;
   align-items: center;
@@ -204,17 +414,72 @@ button { cursor: pointer; }
   -webkit-tap-highlight-color: transparent;
   user-select: none;
 }
+/*
+ * Unified stage fit (desktop / phone / headset):
+ * - default contain: full frame visible, letterbox OK (wide windows / Pico4)
+ * - .fit-cover: only when JS allows (phone portrait + taller media)
+ */
 .media-stage img,
 .media-stage video {
+  width: 100%;
+  height: 100%;
   max-width: 100%;
   max-height: 100%;
-  width: auto;
-  height: auto;
   object-fit: contain;
+  object-position: center center;
   user-select: none;
   -webkit-user-drag: none;
   pointer-events: none; /* 事件落到 stage，双触更稳 */
   transform-origin: center center;
+}
+.media-stage img.fit-cover,
+.media-stage video.fit-cover {
+  object-fit: cover;
+}
+/*
+ * Video stays visible. Spinner overlay covers until load finishes.
+ * #lmwFeedPlayer is the singleton feed decoder (moved between slides).
+ */
+.media-stage video,
+.media-stage video.feed-player,
+#lmwFeedPlayer {
+  opacity: 1;
+  background: #000;
+}
+.media-stage video.is-ready,
+#lmwFeedPlayer.is-ready {
+  opacity: 1;
+}
+/* Loading spinner while single-stream buffer is empty */
+.media-loading {
+  position: absolute;
+  inset: 0;
+  z-index: 3;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  pointer-events: none;
+  opacity: 0;
+  transition: opacity 0.18s ease;
+  background: transparent;
+}
+.media-loading.is-on {
+  opacity: 1;
+}
+.media-loading-spinner {
+  width: 38px;
+  height: 38px;
+  border-radius: 50%;
+  border: 3px solid rgba(255, 255, 255, 0.22);
+  border-top-color: rgba(255, 255, 255, 0.92);
+  box-sizing: border-box;
+  animation: media-spin 0.72s linear infinite;
+  will-change: transform;
+}
+@keyframes media-spin {
+  to {
+    transform: rotate(360deg);
+  }
 }
 
 /* 中央暂停/播放：默认隐藏，单击画面与进度条一同显示 */
@@ -272,15 +537,15 @@ body.is-chrome-hidden .media-play-toggle {
 }
 
 /* Feed 进度条：默认隐藏，单击显示，idle 后收起
-   抬高到底部 HUD 标题区上方，避免被 meta/操作按钮挡住 */
+   贴在紧凑 HUD 上方，避免挡住画面过多 */
 .feed-progress {
   position: absolute;
   left: 0;
   right: 0;
-  bottom: max(132px, calc(env(safe-area-inset-bottom) + 118px));
+  bottom: max(92px, calc(env(safe-area-inset-bottom) + 78px));
   z-index: 8;
-  padding: 14px 16px 8px;
-  background: linear-gradient(transparent, rgba(0, 0, 0, 0.45));
+  padding: 8px 12px 4px;
+  background: linear-gradient(transparent, rgba(0, 0, 0, 0.28));
   opacity: 0;
   pointer-events: none;
   transform: translateY(6px);
@@ -363,14 +628,55 @@ body.is-chrome-hidden .media-play-toggle {
   position: absolute;
   left: 0; right: 0; bottom: 0;
   z-index: 7; /* above progress bar so side buttons stay clickable */
-  padding: 56px 16px max(28px, calc(env(safe-area-inset-bottom) + 18px));
-  background: linear-gradient(transparent, rgba(0,0,0,0.82) 55%);
+  /* 上 padding 仅覆盖文字上方薄渐变，避免大片压暗画面 */
+  padding: 18px 12px max(12px, calc(env(safe-area-inset-bottom) + 8px));
+  background: linear-gradient(
+    to top,
+    rgba(0, 0, 0, 0.72) 0%,
+    rgba(0, 0, 0, 0.38) 55%,
+    rgba(0, 0, 0, 0.12) 82%,
+    transparent 100%
+  );
   display: flex;
   align-items: flex-end;
   justify-content: space-between;
-  gap: 14px;
+  gap: 10px;
   pointer-events: none;
   transition: opacity 0.22s ease, transform 0.22s ease;
+}
+
+/*
+ * Phone landscape immersive (CSS "fullscreen" — never video.requestFullscreen).
+ * Avoids browser pause-on-exit which broke inline playback after rotate.
+ */
+body.lmw-phone-landscape {
+  overflow: hidden;
+  background: #000;
+}
+body.lmw-phone-landscape #view-feed,
+body.lmw-phone-landscape #feedScroller {
+  position: fixed;
+  inset: 0;
+  z-index: 40;
+  width: 100%;
+  height: 100%;
+  height: 100dvh;
+  max-height: 100dvh;
+  background: #000;
+}
+body.lmw-phone-landscape .snap-slide {
+  height: 100%;
+  height: 100dvh;
+  min-height: 100dvh;
+}
+body.lmw-phone-landscape .topnav {
+  opacity: 0 !important;
+  pointer-events: none !important;
+  transform: translateY(-100%);
+}
+body.lmw-phone-landscape .hud {
+  opacity: 0.92;
+  /* keep mute/like reachable at edge if needed; mostly cinematic */
 }
 
 /* 沉浸模式：双击媒体区隐藏顶栏 / HUD / 进度；再双击恢复 */
@@ -398,7 +704,7 @@ body.is-chrome-hidden .lmw-toast {
   pointer-events: none;
 }
 .hud .meta {
-  max-width: min(72%, 480px);
+  max-width: min(70%, 420px);
   word-break: break-word;
   /* meta stays none so empty padding doesn't block stage taps */
   pointer-events: none;
@@ -406,13 +712,15 @@ body.is-chrome-hidden .lmw-toast {
 .hud .type {
   display: inline-flex;
   flex-wrap: wrap;
-  gap: 6px;
+  gap: 4px;
   align-items: center;
   /* re-enable only the chip row so #tags are clickable */
   pointer-events: auto;
   color: rgba(255,255,255,0.65);
-  font-size: 12px;
-  margin-bottom: 6px;
+  font-size: 11px;
+  margin-bottom: 3px;
+  max-height: 42px;
+  overflow: hidden;
 }
 .hud .type .chip:not(button) {
   pointer-events: none;
@@ -423,10 +731,10 @@ body.is-chrome-hidden .lmw-toast {
   z-index: 2;
 }
 .hud .title {
-  font-size: 15px;
+  font-size: 13px;
   font-weight: 600;
-  line-height: 1.35;
-  text-shadow: 0 1px 8px rgba(0,0,0,0.5);
+  line-height: 1.25;
+  text-shadow: 0 1px 6px rgba(0,0,0,0.55);
   /* 左下角标题：超长省略尾部 */
   max-width: 100%;
   overflow: hidden;
@@ -435,24 +743,28 @@ body.is-chrome-hidden .lmw-toast {
 }
 .hud .stats {
   display: flex;
-  gap: 12px;
-  margin-top: 8px;
-  font-size: 12px;
-  color: rgba(255,255,255,0.55);
+  gap: 10px;
+  margin-top: 4px;
+  font-size: 11px;
+  color: rgba(255,255,255,0.5);
 }
 .hud .stats span {
   display: inline-flex;
   align-items: center;
-  gap: 4px;
+  gap: 3px;
+}
+.hud .stats .ico {
+  width: 12px;
+  height: 12px;
 }
 .chip {
   display: inline-flex;
   align-items: center;
-  gap: 4px;
-  padding: 2px 8px;
+  gap: 3px;
+  padding: 1px 6px;
   border-radius: 999px;
   background: rgba(255,255,255,0.1);
-  font-size: 11px;
+  font-size: 10px;
   color: rgba(255,255,255,0.85);
 }
 .chip.warn { background: rgba(255, 170, 80, 0.25); color: #ffd09a; }
@@ -489,26 +801,26 @@ button.chip.tag.is-active {
 .hud .actions {
   display: flex;
   flex-direction: column;
-  gap: 12px;
+  gap: 8px;
   pointer-events: auto;
 }
 .hud .round {
-  width: 50px;
-  height: 50px;
+  width: 40px;
+  height: 40px;
   border-radius: 50%;
   border: 1px solid rgba(255,255,255,0.12);
-  background: rgba(20, 20, 28, 0.72);
+  background: rgba(20, 20, 28, 0.48);
   color: #fff;
   display: grid;
   place-items: center;
-  backdrop-filter: blur(10px);
-  -webkit-backdrop-filter: blur(10px);
-  box-shadow: var(--shadow);
+  backdrop-filter: blur(12px) saturate(1.2);
+  -webkit-backdrop-filter: blur(12px) saturate(1.2);
+  box-shadow: 0 4px 14px rgba(0, 0, 0, 0.28);
   transition: transform 0.12s, background 0.15s, border-color 0.15s;
 }
 .hud .round:hover { border-color: rgba(255,255,255,0.25); transform: scale(1.04); }
 .hud .round:active { transform: scale(0.94); }
-.hud .round svg { width: 22px; height: 22px; }
+.hud .round svg { width: 18px; height: 18px; }
 .hud .round.mute-btn.on {
   color: var(--ok);
   border-color: rgba(61, 214, 140, 0.45);
@@ -709,6 +1021,24 @@ button.chip.tag.is-active {
   margin: 12px 0;
   font-size: 13px;
   color: var(--muted);
+}
+.admin-card label.switch-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin: 14px 0 4px;
+  cursor: pointer;
+  user-select: none;
+  color: var(--fg, #e8eaf0);
+}
+.admin-card label.switch-row input[type="checkbox"] {
+  width: 18px;
+  height: 18px;
+  accent-color: var(--accent, #3b82f6);
+  flex-shrink: 0;
+  cursor: pointer;
+  margin: 0;
 }
 .admin-card input[type="text"],
 .admin-card input[type="password"],

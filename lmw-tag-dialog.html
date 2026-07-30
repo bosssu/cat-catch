@@ -131,12 +131,36 @@
     .btn-skip { background: rgba(255, 255, 255, 0.12); color: #fff; }
     .btn-cancel { background: transparent; color: #aaa; }
     .empty { opacity: 0.5; font-size: 12px; }
+    .opt-stack { display: flex; flex-direction: column; gap: 6px; margin: 12px 0 8px; }
+    .opt-row {
+      display: flex;
+      align-items: flex-start;
+      gap: 8px;
+      padding: 10px 12px;
+      border-radius: 10px;
+      background: rgba(244, 114, 182, 0.1);
+      border: 1px solid rgba(244, 114, 182, 0.35);
+      font-size: 13px;
+      line-height: 1.35;
+      cursor: pointer;
+      user-select: none;
+    }
+    .opt-row input { margin-top: 2px; flex-shrink: 0; accent-color: #ec4899; }
+    .opt-row .sub { display: block; font-size: 11px; opacity: 0.7; margin-top: 2px; }
   </style>
 </head>
 <body>
   <div class="wrap">
     <h1 id="heading">入库详情</h1>
     <div class="meta" id="meta">加载中…</div>
+    <div class="opt-stack">
+      <label class="opt-row" title="入库后打上「限制级」标签">
+        <input type="checkbox" id="dlgRestricted" />
+        <span>限制级
+          <span class="sub">打上「限制级」标签；Feed 默认隐藏，可在前端设置开启</span>
+        </span>
+      </label>
+    </div>
     <div class="label">已选标签</div>
     <div class="row" id="chips"></div>
     <div class="hint">建议标签（规则 + 标签库 · 点击添加）</div>

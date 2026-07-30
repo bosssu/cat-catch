@@ -319,6 +319,8 @@ async function lmwGetSettings() {
         lmwToken: "",
         lmwDefaultCategory: "default",
         lmwAutoFallback: true,
+        lmwUseJasna: false,
+        lmwRestricted: false,
     };
     try {
         const keys = Object.keys(defaults);
@@ -438,8 +440,21 @@ async function lmwUploadBlob(s, blob, meta) {
     fd.append("source_url", meta.source_url || meta.url || "");
     fd.append("media_type", meta.media_type || "video");
     fd.append("remux", "1");
-    const tags = lmwNormalizeTags(meta.tags || []);
+    const restricted =
+        meta.restricted === true ||
+        meta.restricted === 1 ||
+        meta.restricted === "1" ||
+        s.lmwRestricted === true;
+    let tags = lmwNormalizeTags(meta.tags || []);
+    if (restricted && !tags.includes("限制级")) tags = tags.concat(["限制级"]);
     if (tags.length) fd.append("tags", JSON.stringify(tags));
+    const useJasna =
+        meta.use_jasna === true ||
+        meta.use_jasna === 1 ||
+        meta.use_jasna === "1" ||
+        s.lmwUseJasna === true;
+    if (useJasna) fd.append("use_jasna", "1");
+    if (restricted) fd.append("restricted", "1");
     const name = meta.filename || "upload.bin";
     fd.append("file", blob, name);
     const headers = lmwAuthHeaders(s, false);
@@ -453,6 +468,7 @@ async function lmwUploadBlob(s, blob, meta) {
         media_id: data.media_id ?? data.item?.id,
         note: data.note || "upload",
         item: data.item,
+        jasna_job_id: data.jasna_job_id ?? null,
     };
 }
 
@@ -482,7 +498,13 @@ async function lmwPageIngestFromBackground(Message) {
     const title = Message.title || "";
     const page = Message.source_page || Message.page_url || Message.referer || "";
     const category = "default";
-    const tags = lmwNormalizeTags(Message.tags || []);
+    const restricted =
+        Message.restricted === true ||
+        Message.restricted === 1 ||
+        Message.restricted === "1" ||
+        s.lmwRestricted === true;
+    let tags = lmwNormalizeTags(Message.tags || []);
+    if (restricted && !tags.includes("限制级")) tags = tags.concat(["限制级"]);
     const isStream =
         mediaType === "m3u8" ||
         mediaType === "dash" ||
@@ -515,6 +537,7 @@ async function lmwPageIngestFromBackground(Message) {
                 media_type: mediaType === "m3u8" || mediaType === "dash" ? "video" : mediaType,
                 filename: `${String(title || "media").slice(0, 40)}.${ext}`,
                 tags,
+                restricted: !!restricted,
             });
             return up;
         } catch (e) {
@@ -524,6 +547,11 @@ async function lmwPageIngestFromBackground(Message) {
     }
 
     // Server ingest (m3u8/dash or client fetch failed)
+    const useJasna =
+        Message.use_jasna === true ||
+        Message.use_jasna === 1 ||
+        Message.use_jasna === "1" ||
+        s.lmwUseJasna === true;
     const item = {
         url,
         media_type: isStream
@@ -536,11 +564,19 @@ async function lmwPageIngestFromBackground(Message) {
         source_page: page,
         headers,
         tags,
+        use_jasna: !!useJasna,
+        restricted: !!restricted,
     };
     const ingestRes = await lmwFetchJson(lmwBaseUrl(s) + "/api/ingest", {
         method: "POST",
         headers: lmwAuthHeaders(s, true),
-        body: JSON.stringify({ category, items: [item], tags }),
+        body: JSON.stringify({
+            category,
+            items: [item],
+            tags,
+            use_jasna: !!useJasna,
+            restricted: !!restricted,
+        }),
     });
 
     const dupIds = ingestRes.duplicate_media_ids || [];
@@ -603,6 +639,7 @@ async function lmwPageIngestFromBackground(Message) {
                 media_type: mediaType,
                 filename: `${String(title || "media").slice(0, 40)}.${ext}`,
                 tags,
+                restricted: !!restricted,
             });
             return { ...up, note: "fallback_upload", job_id: jobId };
         } catch (e2) {

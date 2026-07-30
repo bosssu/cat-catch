@@ -173,6 +173,10 @@ G.OptionLists = {
     // 页面媒体浮动「入库」按钮（资源嗅探）
     lmwFloatIngest: true,
     lmwFloatMinPx: 72,
+    // 入库后使用 jasna 去马赛克（视频；服务端串行 GPU 队列）
+    lmwUseJasna: false,
+    // 入库时默认打上「限制级」标签（各入库 UI 可单独勾选，会写回此偏好）
+    lmwRestricted: false,
 
     popup: false,
     popupMode: 0, // 0:preview.html 1:popup.html 2:window preview.html 3: window popup.html

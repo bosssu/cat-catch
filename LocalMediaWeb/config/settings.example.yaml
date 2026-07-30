@@ -37,6 +37,14 @@ gopeed_path: ""              # e.g. C:/Users/you/.grok/bin/gopeed.exe
 gopeed_connections: 16
 gopeed_min_bytes: 5242880    # 5 * 1024 * 1024；HEAD Content-Length 低于此不用
 
+# Jasna 去马赛克（入库后可选；GPU 串行队列）
+jasna_enabled: true
+jasna_path: "D:/TMP/jasna-windows-nvidia-0.8.1/jasna.exe"  # 或安装目录；空=自动探测
+jasna_cwd: ""                # 空=exe 所在目录（模型权重相对路径）
+jasna_codec: "h264"          # 浏览器友好；成功后替换为 .mp4
+jasna_extra_args: []         # 例如 ["--max-clip-size", "60"]
+jasna_concurrency: 1         # 保持 1（GPU）
+
 # HLS / m3u8 分片并行
 hls_concurrency: 8
 hls_segment_retries: 3

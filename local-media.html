@@ -50,6 +50,14 @@
         <option value="yes">有 Cookie</option>
         <option value="no">无 Cookie</option>
       </select>
+      <label class="lm-check" title="入库文件打上「限制级」标签；Feed 默认不展示">
+        <input type="checkbox" id="lmRestricted" />
+        限制级
+      </label>
+      <label class="lm-check" title="视频入库成功后由服务器调用 jasna 去马赛克（GPU 串行；成功后替换为 h264/mp4）">
+        <input type="checkbox" id="lmUseJasna" />
+        使用 jasna 去马赛克
+      </label>
       <button type="button" id="btnIngest" class="button2 primary">入库选中媒体</button>
     </div>
     <div id="status" class="lm-status"></div>
@@ -80,7 +88,7 @@
           <input type="text" id="lmRangeStart" spellcheck="false" placeholder="00:00:00" />
         </label>
         <label>结束时间
-          <input type="text" id="lmRangeEnd" spellcheck="false" placeholder="结尾（留空=到末尾）" />
+          <input type="text" id="lmRangeEnd" spellcheck="false" placeholder="00:00:00（到末尾可填 00:00:00 或留空）" />
         </label>
         <button type="button" id="lmRangeAdd" class="button2 lm-range-add-btn">添加</button>
       </div>

@@ -8,6 +8,7 @@ const LMW = {
         lmwToken: "",
         lmwDefaultCategory: "default",
         lmwAutoFallback: true,
+        lmwUseJasna: false,
     },
     /** No hard cap on tags per item (server normalize also unlimited). */
     MAX_TAGS: 0,
@@ -74,15 +75,33 @@ const LMW = {
         });
     },
 
-    ingest(category, items, tags = []) {
+    RESTRICTED_TAG: "限制级",
+
+    applyRestrictedTag(tags, restricted) {
+        const out = this.normalizeTags(tags);
+        if (restricted && !out.includes(this.RESTRICTED_TAG)) {
+            out.push(this.RESTRICTED_TAG);
+        }
+        return out;
+    },
+
+    isRestrictedTags(tags) {
+        return this.normalizeTags(tags).includes(this.RESTRICTED_TAG);
+    },
+
+    ingest(category, items, tags = [], opts = {}) {
+        const restricted = !!(opts && opts.restricted);
+        const body = {
+            category: category || "default",
+            items,
+            tags: this.applyRestrictedTag(tags, restricted),
+        };
+        if (opts && opts.use_jasna) body.use_jasna = true;
+        if (restricted) body.restricted = true;
         return this.request("/api/ingest", {
             method: "POST",
             headers: this.headers(true),
-            body: JSON.stringify({
-                category: category || "default",
-                items,
-                tags: this.normalizeTags(tags),
-            }),
+            body: JSON.stringify(body),
         });
     },
 
@@ -384,8 +403,15 @@ const LMW = {
         fd.append("title", meta.title || "");
         fd.append("source_url", meta.source_url || meta.url || "");
         fd.append("media_type", meta.media_type || "");
-        const tags = this.normalizeTags(meta.tags || []);
+        const restricted = !!(
+            meta.restricted === true ||
+            meta.restricted === 1 ||
+            meta.restricted === "1"
+        );
+        const tags = this.applyRestrictedTag(meta.tags || [], restricted);
         if (tags.length) fd.append("tags", JSON.stringify(tags));
+        if (meta.use_jasna) fd.append("use_jasna", "1");
+        if (restricted) fd.append("restricted", "1");
         const name = meta.filename || "upload.bin";
         fd.append("file", blob, name);
         const headers = this.headers(false);
@@ -400,6 +426,74 @@ const LMW = {
             throw new Error(`${text || res.statusText}`);
         }
         return res.json();
+    },
+
+    getJasnaJob(id) {
+        return this.request(`/api/jasna/jobs/${id}`, { headers: this.headers(false) });
+    },
+
+    listJasnaJobs(params = {}) {
+        const q = new URLSearchParams();
+        if (params.status) q.set("status", params.status);
+        if (params.media_id != null) q.set("media_id", String(params.media_id));
+        if (params.limit != null) q.set("limit", String(params.limit));
+        const qs = q.toString();
+        return this.request(`/api/jasna/jobs${qs ? "?" + qs : ""}`, {
+            headers: this.headers(false),
+        });
+    },
+
+    /**
+     * Poll jasna jobs for given media ids; call onUpdate(statusText, jobs).
+     * Resolves when all related jobs finished or timeout.
+     */
+    async waitJasnaForMediaIds(mediaIds, { timeoutMs = 3600000, intervalMs = 2000, onUpdate } = {}) {
+        const ids = [...new Set((mediaIds || []).map(Number).filter((n) => n > 0))];
+        if (!ids.length) return [];
+        const start = Date.now();
+        const seen = new Map(); // media_id -> latest job snapshot
+        while (Date.now() - start < timeoutMs) {
+            for (const mid of ids) {
+                try {
+                    const res = await this.listJasnaJobs({ media_id: mid, limit: 1 });
+                    const j = (res.items || [])[0];
+                    if (j) seen.set(mid, j);
+                } catch (e) {
+                    /* keep last */
+                }
+            }
+            const jobs = ids.map((mid) => seen.get(mid)).filter(Boolean);
+            if (typeof onUpdate === "function") {
+                const parts = jobs.map((j) => {
+                    const pct = Math.round(Number(j.progress) || 0);
+                    return `#${j.id} m${j.media_id} ${j.status} ${pct}%`;
+                });
+                onUpdate(
+                    jobs.length
+                        ? `jasna: ${parts.join(" · ")}`
+                        : `jasna: 等待入队（媒体 ${ids.join(",")})…`,
+                    jobs
+                );
+            }
+            if (
+                jobs.length >= ids.length &&
+                jobs.every((j) => ["success", "failed", "cancelled"].includes(j.status))
+            ) {
+                return jobs;
+            }
+            // if some media never got a job after 15s, stop waiting on those
+            if (Date.now() - start > 15000) {
+                const pending = ids.filter((mid) => !seen.has(mid));
+                if (pending.length && jobs.length) {
+                    const rest = jobs.filter(
+                        (j) => !["success", "failed", "cancelled"].includes(j.status)
+                    );
+                    if (!rest.length) return jobs;
+                }
+            }
+            await new Promise((r) => setTimeout(r, intervalMs));
+        }
+        return ids.map((mid) => seen.get(mid)).filter(Boolean);
     },
 
     /** Absolute API URL for relative paths like /api/media/1/thumb */
@@ -450,6 +544,27 @@ const LMW = {
         });
     },
 
+    /** Enqueue jasna demosaic for one media item. */
+    enqueueJasna(mediaId, { force = false } = {}) {
+        const q = force ? "?force=1" : "";
+        return this.request(`/api/media/${mediaId}/jasna${q}`, {
+            method: "POST",
+            headers: this.headers(false),
+        });
+    },
+
+    /** Batch enqueue jasna for selected media ids (video/m3u8 only). */
+    batchEnqueueJasna(ids, { force = false } = {}) {
+        return this.request("/api/media/jasna-batch", {
+            method: "POST",
+            headers: this.headers(true),
+            body: JSON.stringify({
+                ids: (ids || []).slice(0, 200).map(Number).filter((n) => n > 0),
+                force: !!force,
+            }),
+        });
+    },
+
     batchTags(ids, tags, mode = "merge") {
         return this.request("/api/media/tags/batch", {
             method: "POST",
@@ -474,6 +589,7 @@ const LMW = {
         const payload = {};
         if (body.title != null) payload.title = body.title;
         if (body.tags != null) payload.tags = this.normalizeTags(body.tags);
+        if (body.restricted != null) payload.restricted = !!body.restricted;
         return this.request(`/api/media/${id}`, {
             method: "PATCH",
             headers: this.headers(true),
@@ -505,7 +621,8 @@ const LMW = {
 
     /**
      * Fetch media/thumb/file with auth headers as blob URL.
-     * Cache key is the absolute URL; call revokeBlobUrl when done.
+     * Cache key is the absolute URL (include ?v= from API after jasna replace).
+     * Use force:true or invalidateBlobCacheForMedia after re-encode.
      */
     _blobCache: new Map(),
     async fetchAuthedBlobUrl(pathOrUrl, options = {}) {
@@ -517,6 +634,7 @@ const LMW = {
         const res = await fetch(url, {
             headers: this.headers(false),
             signal: options.signal,
+            cache: "no-store",
         });
         if (!res.ok) throw new Error(`${res.status} ${res.statusText}`);
         const blob = await res.blob();
@@ -525,6 +643,26 @@ const LMW = {
         if (prev) URL.revokeObjectURL(prev);
         this._blobCache.set(url, obj);
         return obj;
+    },
+
+    /** Drop cached blobs for one media id (file + thumb, any ?v=). */
+    invalidateBlobCacheForMedia(mediaId) {
+        const id = String(mediaId);
+        const keys = [];
+        for (const k of this._blobCache.keys()) {
+            if (
+                k.includes(`/api/media/${id}/file`) ||
+                k.includes(`/api/media/${id}/thumb`)
+            ) {
+                keys.push(k);
+            }
+        }
+        for (const k of keys) {
+            try {
+                URL.revokeObjectURL(this._blobCache.get(k));
+            } catch (e) { /* ignore */ }
+            this._blobCache.delete(k);
+        }
     },
 
     revokeAllBlobUrls() {
@@ -612,6 +750,12 @@ const LMW = {
 #lmw-ingest-dlg-root .lib-hint{font-size:11px;opacity:.65;margin-top:2px}
 #lmw-ingest-dlg-root .err{font-size:11px;color:#f88;min-height:16px;margin-top:4px}
 #lmw-ingest-dlg-root .soft{font-size:11px;color:#9cf;min-height:0;margin-top:4px}
+#lmw-ingest-dlg-root .jasna-row{display:flex;align-items:flex-start;gap:8px;margin:10px 0 0;padding:10px 12px;border-radius:10px;background:rgba(90,130,255,.12);border:1px solid rgba(120,160,255,.25);font-size:13px;line-height:1.35;cursor:pointer;user-select:none}
+#lmw-ingest-dlg-root .jasna-row.restricted{background:rgba(244,114,182,.1);border-color:rgba(244,114,182,.35)}
+#lmw-ingest-dlg-root .jasna-row input{margin-top:2px;flex-shrink:0;accent-color:#3b82f6}
+#lmw-ingest-dlg-root .jasna-row.restricted input{accent-color:#ec4899}
+#lmw-ingest-dlg-root .jasna-row .sub{display:block;font-size:11px;opacity:.7;margin-top:2px}
+#lmw-ingest-dlg-root .opt-stack{display:flex;flex-direction:column;gap:6px;margin:12px 0 4px}
 </style>
 <div class="card" role="dialog" aria-modal="true">
   <h3>${count > 1 ? `入库 ${count} 项媒体` : "入库详情"}</h3>
@@ -619,6 +763,20 @@ const LMW = {
     <div><b>标题</b> ${escapeHtml(String(title).slice(0, 120))}</div>
     <div><b>类型</b> ${escapeHtml(mtype || "—")}${count > 1 ? " · 将共用标签" : ""}</div>
     <div><b>地址</b> ${escapeHtml(String(url).slice(0, 160))}</div>
+  </div>
+  <div class="opt-stack">
+  <label class="jasna-row restricted" title="入库后打上「限制级」标签；Feed 默认不展示，需在前端设置开启">
+    <input type="checkbox" id="lmwDlgRestricted" />
+    <span>限制级
+      <span class="sub">打上「限制级」标签；浏览端默认隐藏，可在设置中开启</span>
+    </span>
+  </label>
+  <label class="jasna-row" title="仅视频；成功后替换为 h264/mp4；多任务串行排队">
+    <input type="checkbox" id="lmwDlgUseJasna" />
+    <span>使用 jasna 去马赛克
+      <span class="sub">入库成功后服务器调用本机 jasna（GPU 串行队列）</span>
+    </span>
+  </label>
   </div>
   <div><b>已选标签</b>（点 × 移除）</div>
   <div class="row" id="lmwTagChips"></div>
@@ -883,6 +1041,58 @@ const LMW = {
                 }
             });
 
+            const jasnaCb = root.querySelector("#lmwDlgUseJasna");
+            const restrictedCb = root.querySelector("#lmwDlgRestricted");
+            if (jasnaCb) {
+                try {
+                    const pref =
+                        (typeof G !== "undefined" && G.lmwUseJasna === true) ||
+                        false;
+                    jasnaCb.checked = !!pref;
+                } catch (e) {
+                    jasnaCb.checked = false;
+                }
+            }
+            if (restrictedCb) {
+                try {
+                    restrictedCb.checked = !!(
+                        typeof G !== "undefined" && G.lmwRestricted === true
+                    );
+                } catch (e) {
+                    restrictedCb.checked = false;
+                }
+            }
+            function readUseJasna() {
+                return !!(jasnaCb && jasnaCb.checked);
+            }
+            function readRestricted() {
+                return !!(restrictedCb && restrictedCb.checked);
+            }
+            function persistUseJasna(on) {
+                try {
+                    if (typeof G !== "undefined") G.lmwUseJasna = on;
+                    chrome.storage.sync.set({ lmwUseJasna: on });
+                    chrome.storage.local.set({ lmwUseJasna: on });
+                } catch (e) { /* ignore */ }
+            }
+            function persistRestricted(on) {
+                try {
+                    if (typeof G !== "undefined") G.lmwRestricted = on;
+                    chrome.storage.sync.set({ lmwRestricted: on });
+                    chrome.storage.local.set({ lmwRestricted: on });
+                } catch (e) { /* ignore */ }
+            }
+            if (jasnaCb) {
+                jasnaCb.addEventListener("change", () => {
+                    persistUseJasna(!!jasnaCb.checked);
+                });
+            }
+            if (restrictedCb) {
+                restrictedCb.addEventListener("change", () => {
+                    persistRestricted(!!restrictedCb.checked);
+                });
+            }
+
             function finish(result) {
                 root.remove();
                 // 入库后标签库可能变化，下次强制刷新
@@ -891,11 +1101,21 @@ const LMW = {
             }
             root.querySelector("#lmwDlgCancel").onclick = (e) => {
                 e.stopPropagation();
-                finish({ ok: false, cancelled: true, tags: [] });
+                finish({
+                    ok: false,
+                    cancelled: true,
+                    tags: [],
+                    use_jasna: false,
+                    restricted: false,
+                });
             };
             root.querySelector("#lmwDlgSkip").onclick = (e) => {
                 e.stopPropagation();
-                finish({ ok: true, tags: [] });
+                const uj = readUseJasna();
+                const rs = readRestricted();
+                persistUseJasna(uj);
+                persistRestricted(rs);
+                finish({ ok: true, tags: [], use_jasna: uj, restricted: rs });
             };
             root.querySelector("#lmwDlgOk").onclick = (e) => {
                 e.stopPropagation();
@@ -914,11 +1134,21 @@ const LMW = {
                     return nd || t;
                 });
                 tags = self.normalizeTags(tags);
-                finish({ ok: true, tags });
+                const uj = readUseJasna();
+                const rs = readRestricted();
+                persistUseJasna(uj);
+                persistRestricted(rs);
+                finish({ ok: true, tags, use_jasna: uj, restricted: rs });
             };
             root.addEventListener("click", (e) => {
                 if (e.target === root)
-                    finish({ ok: false, cancelled: true, tags: [] });
+                    finish({
+                        ok: false,
+                        cancelled: true,
+                        tags: [],
+                        use_jasna: false,
+                        restricted: false,
+                    });
             });
             render();
             setTimeout(() => input.focus(), 50);
@@ -1390,6 +1620,12 @@ const LMW = {
         else if (ct.includes("webp")) ext = "webp";
         else if (ct.includes("mp4")) ext = "mp4";
         else if (ct.includes("webm")) ext = "webm";
+        const useJasna =
+            item.use_jasna === true ||
+            (typeof G !== "undefined" && G.lmwUseJasna === true);
+        const restricted =
+            item.restricted === true ||
+            (typeof G !== "undefined" && G.lmwRestricted === true);
         return this.uploadBlob(blob, {
             category,
             title: item.title || "",
@@ -1397,22 +1633,44 @@ const LMW = {
             media_type: item.media_type || "",
             filename: `${(item.title || "media").slice(0, 40)}.${ext}`,
             tags: item.tags || [],
+            use_jasna: !!useJasna,
+            restricted: !!restricted,
         });
     },
 
     /**
      * Ingest items; optionally fallback upload on auth/network failure.
      */
-    async pushItems(items, category, { autoFallback, wait = true, onProgress, tags } = {}) {
+    async pushItems(items, category, { autoFallback, wait = true, onProgress, tags, use_jasna, restricted } = {}) {
         const cat = category || (typeof G !== "undefined" && G.lmwDefaultCategory) || "default";
         const fallback = autoFallback ?? (typeof G !== "undefined" ? G.lmwAutoFallback : true) ?? true;
-        const sharedTags = this.normalizeTags(tags || []);
+        const useJasna =
+            use_jasna === true ||
+            (typeof G !== "undefined" && G.lmwUseJasna === true);
+        const useRestricted =
+            restricted === true ||
+            (typeof G !== "undefined" && G.lmwRestricted === true);
+        const sharedTags = this.applyRestrictedTag(tags || [], useRestricted);
         if (sharedTags.length) {
             for (const it of items) {
                 if (!it.tags || !it.tags.length) it.tags = sharedTags;
+                else if (useRestricted) it.tags = this.applyRestrictedTag(it.tags, true);
             }
         }
-        const ingestRes = await this.ingest(cat, items, sharedTags);
+        if (useJasna) {
+            for (const it of items) {
+                if (it.use_jasna == null) it.use_jasna = true;
+            }
+        }
+        if (useRestricted) {
+            for (const it of items) {
+                it.restricted = true;
+            }
+        }
+        const ingestRes = await this.ingest(cat, items, sharedTags, {
+            use_jasna: !!useJasna,
+            restricted: !!useRestricted,
+        });
         const jobIds = ingestRes.job_ids || [];
         if (!wait) {
             return { ...ingestRes, jobs: [], fallbackOk: 0, failed: 0, success: 0, pending: jobIds.length };
@@ -1481,8 +1739,16 @@ const LMW = {
         fd.append("title", meta.title || "");
         fd.append("source_url", meta.source_url || meta.url || "");
         fd.append("media_type", meta.media_type || "");
-        const tags = this.normalizeTags(meta.tags || []);
+        const restricted = !!(
+            meta.restricted === true ||
+            meta.restricted === 1 ||
+            meta.restricted === "1" ||
+            s.lmwRestricted === true
+        );
+        const tags = this.applyRestrictedTag(meta.tags || [], restricted);
         if (tags.length) fd.append("tags", JSON.stringify(tags));
+        if (meta.use_jasna) fd.append("use_jasna", "1");
+        if (restricted) fd.append("restricted", "1");
         const name = meta.filename || "upload.bin";
         fd.append("file", blob, name);
         const headers = {};

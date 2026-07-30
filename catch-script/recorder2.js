@@ -103,6 +103,12 @@
             <label style="color:#fff;font-size:12px;display:flex;align-items:center;gap:4px;white-space:nowrap;">
                 <input type="checkbox" id="ingestLmw" checked style="-webkit-appearance:auto;">入库
             </label>
+            <label style="color:#fff;font-size:12px;display:flex;align-items:center;gap:4px;white-space:nowrap;" title="入库标记限制级">
+                <input type="checkbox" id="useRestricted" style="-webkit-appearance:auto;" ${localStorage.getItem("CatCatchRecorder2_useRestricted") || ""}>限制级
+            </label>
+            <label style="color:#fff;font-size:12px;display:flex;align-items:center;gap:4px;white-space:nowrap;" title="入库后 jasna 去马赛克">
+                <input type="checkbox" id="useJasna" style="-webkit-appearance:auto;" ${localStorage.getItem("CatCatchRecorder2_useJasna") || ""}>jasna
+            </label>
             <label style="color:#fff;font-size:12px;display:flex;align-items:center;gap:4px;white-space:nowrap;">
                 <input type="checkbox" id="alsoDownload" style="-webkit-appearance:auto;">下载
             </label>
@@ -288,6 +294,8 @@
                 else finish(() => reject(new Error(event.data.error || "ingest failed")));
             };
             window.addEventListener("message", onMsg);
+            const useJasna = !!cat?.querySelector?.("#useJasna")?.checked || !!meta.use_jasna;
+            const restricted = !!cat?.querySelector?.("#useRestricted")?.checked || !!meta.restricted;
             window.postMessage({
                 action: "catCatchIngestBlob",
                 requestId,
@@ -297,6 +305,8 @@
                 media_type: meta.media_type || "video",
                 source_url: location.href,
                 tags: meta.tags || [],
+                use_jasna: useJasna,
+                restricted,
             }, location.origin);
             const timer = setTimeout(() => {
                 finish(() => reject(new Error("入库超时")));

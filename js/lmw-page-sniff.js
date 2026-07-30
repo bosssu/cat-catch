@@ -401,6 +401,7 @@
             return;
         }
         const tags = dlg.tags || [];
+        const restricted = dlg.restricted === true;
 
         busy = true;
         badge.classList.add("busy");
@@ -416,6 +417,7 @@
                     title: String(title).slice(0, 200),
                     source_page: location.href,
                     tags,
+                    restricted,
                 });
             } else {
                 result = await new Promise((resolve, reject) => {
@@ -429,6 +431,7 @@
                             source_page: location.href,
                             page_url: location.href,
                             tags,
+                            restricted,
                         },
                         (resp) => {
                             if (chrome.runtime.lastError) {

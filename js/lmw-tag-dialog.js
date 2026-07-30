@@ -314,9 +314,25 @@
         }
     });
 
+    function readRestricted() {
+        const cb = $("dlgRestricted");
+        return !!(cb && cb.checked);
+    }
+    function persistRestricted(on) {
+        try {
+            if (typeof G !== "undefined") G.lmwRestricted = on;
+            chrome.storage.sync.set({ lmwRestricted: on });
+            chrome.storage.local.set({ lmwRestricted: on });
+        } catch (e) { /* ignore */ }
+    }
+
     $("btnCancel").onclick = () =>
-        finish({ ok: false, cancelled: true, tags: [] });
-    $("btnSkip").onclick = () => finish({ ok: true, tags: [] });
+        finish({ ok: false, cancelled: true, tags: [], restricted: false });
+    $("btnSkip").onclick = () => {
+        const rs = readRestricted();
+        persistRestricted(rs);
+        finish({ ok: true, tags: [], restricted: rs });
+    };
     $("btnOk").onclick = () => {
         const leftover = input.value.trim();
         if (leftover) {
@@ -335,7 +351,9 @@
             );
         }
         tags = normalizeTags(tags);
-        finish({ ok: true, tags });
+        const rs = readRestricted();
+        persistRestricted(rs);
+        finish({ ok: true, tags, restricted: rs });
     };
 
     function waitGReady() {
@@ -439,6 +457,19 @@
             setTimeout(() => input.focus(), 40);
 
             await waitGReady();
+            const rCb = $("dlgRestricted");
+            if (rCb) {
+                try {
+                    rCb.checked = !!(
+                        typeof G !== "undefined" && G.lmwRestricted === true
+                    );
+                } catch (e) {
+                    rCb.checked = false;
+                }
+                rCb.addEventListener("change", () => {
+                    persistRestricted(!!rCb.checked);
+                });
+            }
             // ensure G has lmw settings (init may already)
             await enrichFromLibrary(title, url, mtype, sourcePage, baseSuggest);
         }

@@ -40,6 +40,35 @@
         );
     }
 
+    async function pollJasnaJob(jobId, { timeoutMs = 3600000, intervalMs = 2000 } = {}) {
+        if (!jobId || !LMW.getJasnaJob) return;
+        const start = Date.now();
+        while (Date.now() - start < timeoutMs) {
+            try {
+                const j = await LMW.getJasnaJob(jobId);
+                const st = j.status || "";
+                const pct = Math.round(Number(j.progress) || 0);
+                $("mmUploadProg").textContent = `jasna #${jobId} · ${st} ${pct}%`;
+                if (["success", "failed", "cancelled"].includes(st)) {
+                    if (st === "success") {
+                        setStatus(`jasna #${jobId} 完成`);
+                        if (j.media_id && typeof LMW.invalidateBlobCacheForMedia === "function") {
+                            LMW.invalidateBlobCacheForMedia(j.media_id);
+                        }
+                        await loadList({ reset: true });
+                    } else {
+                        setStatus(`jasna #${jobId} ${st}${j.error_message ? ": " + j.error_message : ""}`);
+                    }
+                    return j;
+                }
+            } catch (e) {
+                console.warn("jasna poll", e);
+            }
+            await new Promise((r) => setTimeout(r, intervalMs));
+        }
+        return null;
+    }
+
     function waitGReady() {
         return new Promise((resolve) => {
             const tick = () => {
@@ -160,19 +189,31 @@
         }
     }
 
+    const RESTRICTED_TAG = "限制级";
+
+    function isRestricted(m) {
+        return (m.tags || []).includes(RESTRICTED_TAG);
+    }
+
     function cardHtml(m) {
         const tags = (m.tags || []).map((t) => "#" + t).join(" ");
         const liked = m.liked ? "♥ " : "";
-        return `<article class="mm-card" data-id="${m.id}" data-type="${escapeHtml(m.media_type || "")}">
+        const restricted = isRestricted(m);
+        return `<article class="mm-card${restricted ? " is-restricted" : ""}" data-id="${m.id}" data-type="${escapeHtml(m.media_type || "")}">
   <input type="checkbox" class="mm-card-check" data-id="${m.id}" aria-label="选择 #${m.id}" />
   <div class="mm-thumb-wrap" data-preview="${m.id}" title="预览">
     <div class="mm-thumb-ph" data-thumb-ph="${m.id}">${escapeHtml(m.media_type || "media")}</div>
     <img alt="" data-thumb="${m.id}" data-src="${escapeHtml(m.thumb_url || "")}" hidden />
+    ${restricted ? `<span class="mm-badge-r" title="限制级">R</span>` : ""}
   </div>
   <div class="mm-card-body">
     <div class="mm-card-title" title="${escapeHtml(m.title || "")}">${escapeHtml(m.title || "(无标题)")}</div>
     <div class="mm-card-meta">${liked}#${m.id} · ${escapeHtml(m.media_type || "")} · ${formatSize(m.file_size)}</div>
     <div class="mm-card-tags">${escapeHtml(tags || "无标签")}</div>
+    <label class="mm-card-restricted" title="切换「限制级」标签">
+      <input type="checkbox" class="mm-restricted-toggle" data-id="${m.id}" ${restricted ? "checked" : ""} />
+      限制级
+    </label>
     <div class="mm-card-actions">
       <button type="button" data-act="edit" data-id="${m.id}">编辑</button>
       <button type="button" data-act="like" data-id="${m.id}">${m.liked ? "取消♥" : "喜欢"}</button>
@@ -255,6 +296,10 @@
             state.items = [];
             state.selected.clear();
             if (state.listAbort) state.listAbort.abort();
+            // Drop stale file/thumb blobs so jasna-replaced media re-fetches
+            if (typeof LMW.revokeAllBlobUrls === "function") {
+                LMW.revokeAllBlobUrls();
+            }
         }
         state.listAbort = new AbortController();
         const offset = state.offset;
@@ -341,6 +386,61 @@
         }
     }
 
+    async function batchJasna() {
+        const ids = selectedIds();
+        if (!ids.length) {
+            setStatus("请先勾选媒体");
+            return;
+        }
+        if (
+            !confirm(
+                `对选中的 ${ids.length} 项执行 jasna 去码？\n仅视频/m3u8 会入队；GPU 串行处理，成功后替换为 h264/mp4。`
+            )
+        ) {
+            return;
+        }
+        const btn = $("btnBatchJasna");
+        if (btn) btn.disabled = true;
+        try {
+            setStatus(`jasna 入队中…（${ids.length} 项）`);
+            const r = await LMW.batchEnqueueJasna(ids);
+            const queued = r.queued || 0;
+            const skipped = r.skipped || 0;
+            const jobIds = (r.items || [])
+                .map((it) => it.jasna_job_id)
+                .filter(Boolean);
+            setStatus(
+                `jasna 已排队 ${queued} 项` +
+                    (skipped ? ` · 跳过 ${skipped}` : "") +
+                    (jobIds.length ? ` · job ${jobIds.slice(0, 5).join(",")}${jobIds.length > 5 ? "…" : ""}` : "")
+            );
+            if (jobIds.length && typeof LMW.waitJasnaForMediaIds === "function") {
+                const mediaIds = (r.items || []).map((it) => it.id).filter(Boolean);
+                LMW.waitJasnaForMediaIds(mediaIds, {
+                    onUpdate: (text) => setStatus(text),
+                })
+                    .then(async (jobs) => {
+                        const ok = (jobs || []).filter((j) => j.status === "success").length;
+                        const fail = (jobs || []).filter((j) =>
+                            ["failed", "cancelled"].includes(j.status)
+                        ).length;
+                        for (const mid of mediaIds) {
+                            if (typeof LMW.invalidateBlobCacheForMedia === "function") {
+                                LMW.invalidateBlobCacheForMedia(mid);
+                            }
+                        }
+                        setStatus(`jasna 结束：成功 ${ok}` + (fail ? ` · 失败/取消 ${fail}` : ""));
+                        await loadList({ reset: true });
+                    })
+                    .catch((e) => setStatus("jasna 轮询失败：" + (e.message || e)));
+            }
+        } catch (e) {
+            setStatus("jasna 入队失败：" + (e.message || e));
+        } finally {
+            if (btn) btn.disabled = false;
+        }
+    }
+
     /* ---------- upload ---------- */
 
     function guessMediaType(file) {
@@ -416,14 +516,27 @@
                 const title = (file.name || "upload").replace(/\.[^.]+$/, "");
                 $("mmUploadProg").textContent = `上传中 ${done + failed + 1}/${files.length} · ${file.name}`;
                 try {
-                    await LMW.uploadBlob(file, {
+                    const useJasna = !!(
+                        $("mmUseJasna") && $("mmUseJasna").checked
+                    );
+                    const restricted = !!(
+                        $("mmRestricted") && $("mmRestricted").checked
+                    );
+                    const up = await LMW.uploadBlob(file, {
                         title,
                         filename: file.name,
                         media_type: guessMediaType(file),
                         tags,
                         remux: "1",
+                        use_jasna: useJasna,
+                        restricted,
                     });
                     done++;
+                    if (up && up.jasna_job_id) {
+                        $("mmUploadProg").textContent =
+                            `上传中 ${done + failed}/${files.length} · jasna #${up.jasna_job_id} 排队`;
+                        pollJasnaJob(up.jasna_job_id).catch(() => {});
+                    }
                 } catch (e) {
                     failed++;
                     console.warn("upload fail", file.name, e);
@@ -609,6 +722,8 @@
         $("btnBatchMerge").onclick = () => batchTags("merge");
         $("btnBatchReplace").onclick = () => batchTags("replace");
         $("btnBatchDel").onclick = () => batchDelete();
+        const btnJasna = $("btnBatchJasna");
+        if (btnJasna) btnJasna.onclick = () => batchJasna();
 
         // Tag library autocomplete: batch bar / upload / edit modal
         if (typeof LMW.attachTagAutocomplete === "function") {
@@ -636,6 +751,30 @@
         });
         $("btnUpload").onclick = () => runUploadQueue();
         $("btnClearPending").onclick = () => clearPendingFiles();
+        const restrictedCb = $("mmRestricted");
+        if (restrictedCb) {
+            restrictedCb.checked = !!(G && G.lmwRestricted);
+            restrictedCb.addEventListener("change", () => {
+                const on = !!restrictedCb.checked;
+                if (typeof G !== "undefined") G.lmwRestricted = on;
+                try {
+                    chrome.storage.sync.set({ lmwRestricted: on });
+                    chrome.storage.local.set({ lmwRestricted: on });
+                } catch (e) { /* ignore */ }
+            });
+        }
+        const jasnaCb = $("mmUseJasna");
+        if (jasnaCb) {
+            jasnaCb.checked = !!(G && G.lmwUseJasna);
+            jasnaCb.addEventListener("change", () => {
+                const on = !!jasnaCb.checked;
+                if (typeof G !== "undefined") G.lmwUseJasna = on;
+                try {
+                    chrome.storage.sync.set({ lmwUseJasna: on });
+                    chrome.storage.local.set({ lmwUseJasna: on });
+                } catch (e) { /* ignore */ }
+            });
+        }
 
         const drop = $("mmDrop");
         ["dragenter", "dragover"].forEach((ev) => {
@@ -679,13 +818,47 @@
                 openPreview(Number(prev.dataset.preview));
             }
         });
-        $("mmGrid").addEventListener("change", (e) => {
+        $("mmGrid").addEventListener("change", async (e) => {
             const t = e.target;
             if (t.classList.contains("mm-card-check")) {
                 const id = Number(t.dataset.id);
                 if (t.checked) state.selected.add(id);
                 else state.selected.delete(id);
                 updateSelUi();
+                return;
+            }
+            if (t.classList.contains("mm-restricted-toggle")) {
+                const id = Number(t.dataset.id);
+                const on = !!t.checked;
+                t.disabled = true;
+                try {
+                    const item = await LMW.patchMedia(id, { restricted: on });
+                    const idx = state.items.findIndex((x) => x.id === id);
+                    if (idx >= 0) state.items[idx] = { ...state.items[idx], ...item };
+                    const merged = idx >= 0 ? state.items[idx] : item;
+                    const card = $("mmGrid").querySelector(`.mm-card[data-id="${id}"]`);
+                    if (card && merged) {
+                        const wrap = document.createElement("div");
+                        wrap.innerHTML = cardHtml(merged);
+                        const next = wrap.firstElementChild;
+                        if (next) {
+                            card.replaceWith(next);
+                            observeThumbs($("mmGrid"));
+                            updateSelUi();
+                        }
+                    }
+                    setStatus(
+                        on
+                            ? `已标记 #${id} 为限制级`
+                            : `已取消 #${id} 限制级`
+                    );
+                    await loadTagOptions();
+                } catch (err) {
+                    t.checked = !on;
+                    setStatus("限制级切换失败：" + (err.message || err));
+                } finally {
+                    t.disabled = false;
+                }
             }
         });
 

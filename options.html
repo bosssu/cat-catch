@@ -391,6 +391,30 @@
             <input id="lmwFloatMinPx" save="input" type="number" min="16" max="2000" step="1" class="width100" placeholder="72">
           </div>
           <div class="item">
+            <div>
+              <span>使用 jasna 去马赛克</span>
+              <p class="explain" style="margin:4px 0 0;font-size:12px;opacity:.85;">视频入库成功后，由 LocalMediaWeb 调用本机 jasna CLI 去码（GPU 串行队列；成功后替换为 h264/mp4）。需在服务器 settings.yaml 配置 jasna_path。管理库/录制/缓存捕捉也可单独勾选。</p>
+            </div>
+            <div class="switch">
+              <label class="switchLabel switchRadius">
+                <input type="checkbox" id="lmwUseJasna" save="click" class="switchInput" />
+                <span class="switchRound switchRadius"><em class="switchRoundBtn switchRadius"></em></span>
+              </label>
+            </div>
+          </div>
+          <div class="item">
+            <div>
+              <span>入库默认标记为限制级</span>
+              <p class="explain" style="margin:4px 0 0;font-size:12px;opacity:.85;">开启后，各入库入口的「限制级」开关默认勾选，文件会打上「限制级」标签。浏览端需在 LocalMediaWeb 设置中打开「限制级内容」才会展示。</p>
+            </div>
+            <div class="switch">
+              <label class="switchLabel switchRadius">
+                <input type="checkbox" id="lmwRestricted" save="click" class="switchInput" />
+                <span class="switchRound switchRadius"><em class="switchRoundBtn switchRadius"></em></span>
+              </label>
+            </div>
+          </div>
+          <div class="item">
             <div><span>服务器地址</span></div>
             <input id="lmwURL" save="input" type="text" class="width100" placeholder="http://127.0.0.1:8790">
           </div>

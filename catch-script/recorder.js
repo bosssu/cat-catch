@@ -26,6 +26,8 @@
         <span data-i18n="recordEncoding">录制编码</span> <select id="mimeTypeList" style="max-width: 200px;"></select>
         <label><input type="checkbox" id="ffmpeg" ${checkboxStyle}><span data-i18n="ffmpeg">使用ffmpeg转码</span></label>
         <label><input type="checkbox" id="ingestLmw" checked ${checkboxStyle}><span>停止后入库到媒体库</span></label>
+        <label><input type="checkbox" id="useRestricted" ${localStorage.getItem("CatCatchRecorder_useRestricted") || ""} ${checkboxStyle}><span>限制级</span></label>
+        <label><input type="checkbox" id="useJasna" ${localStorage.getItem("CatCatchRecorder_useJasna") || ""} ${checkboxStyle}><span>使用 jasna 去马赛克</span></label>
         <label><input type="checkbox" id="alsoDownload" ${checkboxStyle}><span>同时下载到浏览器</span></label>
         <label><input type="checkbox" id="autoSave1"} ${checkboxStyle} data-i18n="save1hour">1小时保存一次</label>
         <label>
@@ -396,6 +398,8 @@
                 else finish(() => reject(new Error(event.data.error || "ingest failed")));
             };
             window.addEventListener("message", onMsg);
+            const useJasna = !!CatCatch?.querySelector?.("#useJasna")?.checked || !!meta.use_jasna;
+            const restricted = !!CatCatch?.querySelector?.("#useRestricted")?.checked || !!meta.restricted;
             window.postMessage({
                 action: "catCatchIngestBlob",
                 requestId,
@@ -405,6 +409,8 @@
                 media_type: meta.media_type || "video",
                 source_url: location.href,
                 tags: meta.tags || [],
+                use_jasna: useJasna,
+                restricted,
             }, location.origin);
             const timer = setTimeout(() => {
                 finish(() => reject(new Error("入库超时")));

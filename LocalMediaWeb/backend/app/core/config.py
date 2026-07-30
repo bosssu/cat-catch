@@ -72,6 +72,14 @@ class Settings(BaseSettings):
     gopeed_connections: int = 16
     gopeed_min_bytes: int = 5 * 1024 * 1024  # only try when Content-Length >= this
 
+    # Jasna demosaic CLI (post-ingest; serial GPU queue)
+    jasna_enabled: bool = True
+    jasna_path: str = ""  # exe or install dir; empty = auto probe
+    jasna_cwd: str = ""  # empty = directory of jasna.exe
+    jasna_codec: str = "h264"
+    jasna_extra_args: list[str] = Field(default_factory=list)
+    jasna_concurrency: int = 1  # keep 1 (GPU); >1 not recommended
+
     hls_concurrency: int = 8
     hls_segment_retries: int = 3
     hls_max_segment_failure_ratio: float = 0.02
@@ -148,3 +156,11 @@ def gopeed_binary_available() -> bool:
     from app.services.gopeed import resolve_gopeed_path
 
     return resolve_gopeed_path("") is not None
+
+
+def jasna_binary_available() -> bool:
+    """True if jasna CLI can be resolved (ignores jasna_enabled flag)."""
+    from app.services.jasna import resolve_jasna_path
+
+    s = get_settings()
+    return resolve_jasna_path(getattr(s, "jasna_path", "") or "") is not None

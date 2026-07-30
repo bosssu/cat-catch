@@ -11,6 +11,9 @@ from urllib.parse import urlparse
 SUGGEST_DEFAULT_LIMIT = 12
 TAG_RE = re.compile(r"^[\w\u4e00-\u9fff][\w\u4e00-\u9fff\-+.#]{0,31}$", re.UNICODE)
 
+# Special content flag: applied on ingest / manage toggle; filtered by feed when off.
+RESTRICTED_TAG = "限制级"
+
 # Common host → short tag
 HOST_TAGS = {
     "bilibili.com": "bilibili",
@@ -109,8 +112,33 @@ WEAK_TAGS = frozenset(
         "vimeo",
         "twitch",
         "pinterest",
+        RESTRICTED_TAG,
     }
 )
+
+
+def apply_restricted_flag(tags, restricted: bool = False) -> list[str]:
+    """When restricted=True, ensure RESTRICTED_TAG is present; otherwise leave tags as-is."""
+    out = normalize_tags(tags)
+    if restricted and RESTRICTED_TAG not in out:
+        out = out + [RESTRICTED_TAG]
+    return out
+
+
+def set_restricted_flag(tags, restricted: bool) -> list[str]:
+    """Force-add or remove RESTRICTED_TAG."""
+    out = [t for t in normalize_tags(tags) if t != RESTRICTED_TAG]
+    if restricted:
+        out.append(RESTRICTED_TAG)
+    return out
+
+
+def is_restricted_tags(tags) -> bool:
+    return RESTRICTED_TAG in normalize_tags(tags)
+
+
+def tags_json_has_restricted(tags_json: str | None) -> bool:
+    return is_restricted_tags(tags_from_json(tags_json))
 
 # Normalize near-synonyms before store / compare.
 TAG_ALIASES = {

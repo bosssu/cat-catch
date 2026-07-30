@@ -5,7 +5,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover" />
   <meta name="theme-color" content="#0c0c12" />
   <title>LocalMediaWeb</title>
-  <link rel="stylesheet" href="/assets/app.css" />
+  <link rel="stylesheet" href="/assets/app.css?v=20260730r4" />
 </head>
 <body>
   <div id="app">
@@ -35,6 +35,9 @@
         </button>
       </div>
       <div class="nav-filters">
+        <button type="button" id="btnOpenSearch" class="nav-icon-btn" title="搜索" aria-label="搜索" data-action="open-search">
+          <svg class="ico" viewBox="0 0 24 24" aria-hidden="true" style="pointer-events:none"><path fill="currentColor" d="M15.5 14h-.79l-.28-.27A6.47 6.47 0 0016 9.5 6.5 6.5 0 109.5 16c1.61 0 3.09-.59 4.23-1.57l.27.28v.79l5 4.99L20.49 19l-4.99-5zm-6 0C7.01 14 5 11.99 5 9.5S7.01 5 9.5 5 14 7.01 14 9.5 11.99 14 9.5 14z"/></svg>
+        </button>
         <label class="select-wrap" title="Feed 排序方式">
           <select id="feedModeNav" aria-label="Feed 排序">
             <option value="random">随机</option>
@@ -42,6 +45,7 @@
             <option value="recommend">推荐</option>
             <option value="recent">最新</option>
             <option value="liked">已喜欢</option>
+            <option value="search">搜索</option>
           </select>
         </label>
       </div>
@@ -72,6 +76,45 @@
       <div id="grid" class="grid"></div>
     </section>
 
+    <!-- 短视频 App 式全屏搜索页 -->
+    <section id="view-search" class="view hide">
+      <div class="search-page">
+        <div class="search-bar-row">
+          <button type="button" id="btnSearchBack" class="nav-icon-btn" title="返回" aria-label="返回">
+            <svg class="ico" viewBox="0 0 24 24" aria-hidden="true"><path fill="currentColor" d="M20 11H7.83l5.59-5.59L12 4l-8 8 8 8 1.41-1.41L7.83 13H20v-2z"/></svg>
+          </button>
+          <div class="search-input-wrap">
+            <svg class="search-input-ico" viewBox="0 0 24 24" aria-hidden="true"><path fill="currentColor" d="M15.5 14h-.79l-.28-.27A6.47 6.47 0 0016 9.5 6.5 6.5 0 109.5 16c1.61 0 3.09-.59 4.23-1.57l.27.28v.79l5 4.99L20.49 19l-4.99-5zm-6 0C7.01 14 5 11.99 5 9.5S7.01 5 9.5 5 14 7.01 14 9.5 11.99 14 9.5 14z"/></svg>
+            <input type="search" id="searchInput" class="search-input" placeholder="搜索标题、URL、标签" enterkeyhint="search" autocomplete="off" spellcheck="false" />
+            <button type="button" id="btnSearchClear" class="search-clear hide" title="清除" aria-label="清除">×</button>
+          </div>
+          <button type="button" id="btnSearchSubmit" class="search-go">搜索</button>
+        </div>
+        <div id="searchDiscover" class="search-discover">
+          <div class="search-block" id="searchHistoryBlock">
+            <div class="search-block-head">
+              <span>搜索历史</span>
+              <button type="button" id="btnClearHistory" class="search-link-btn">清空</button>
+            </div>
+            <div id="searchHistory" class="search-chips"></div>
+          </div>
+          <div class="search-block">
+            <div class="search-block-head"><span>热门标签</span></div>
+            <div id="searchHotTags" class="search-chips"></div>
+          </div>
+        </div>
+        <div id="searchResultHead" class="search-result-head hide">
+          <span id="searchResultMeta" class="muted"></span>
+          <span class="muted search-result-hint">点击进入 Feed 全屏播放</span>
+        </div>
+        <div id="searchGrid" class="grid search-grid"></div>
+        <div id="searchEmpty" class="search-empty hide muted">未找到相关媒体</div>
+        <div id="searchMoreWrap" class="search-more-wrap hide">
+          <button type="button" id="btnSearchMore" class="btn ghost">加载更多</button>
+        </div>
+      </div>
+    </section>
+
     <section id="view-admin" class="view hide">
       <div class="page-head">
         <h1>管理</h1>
@@ -89,9 +132,10 @@
             <option value="recommend">推荐</option>
             <option value="recent">最新</option>
             <option value="liked">已喜欢</option>
+            <option value="search">搜索</option>
           </select>
         </label>
-        <p class="muted tip">与右上角一致：随机（默认）/ 相似 / 推荐 / 最新 / 已喜欢。偏好保存在本机。</p>
+        <p class="muted tip">与右上角一致：随机（默认）/ 相似 / 推荐 / 最新 / 已喜欢 / 搜索。搜索为虚拟模式，播放搜索结果时自动显示，不写入本机偏好。</p>
         <label>访问 Token（可选）
           <input id="tokenInput" type="password" placeholder="X-LMW-Token" autocomplete="off" />
         </label>
@@ -101,6 +145,11 @@
             保存 Token
           </button>
         </div>
+        <label class="switch-row" title="关闭时 Feed / 搜索 / 网格不展示带「限制级」标签的内容">
+          <span>限制级内容</span>
+          <input type="checkbox" id="includeRestrictedToggle" />
+        </label>
+        <p class="muted tip">默认关闭：服务端只推送不含「限制级」标签的内容。打开后才会推送带该标签的内容。</p>
       </div>
       <div class="admin-card">
         <h2>
@@ -126,11 +175,16 @@
           <svg class="ico" viewBox="0 0 24 24" aria-hidden="true"><path fill="currentColor" d="M6 19c0 1.1.9 2 2 2h8c1.1 0 2-.9 2-2V7H6v12zM19 4h-3.5l-1-1h-5l-1 1H5v2h14V4z"/></svg>
           媒体库
         </h2>
-        <p class="muted tip">删除会移除磁盘文件与索引，不可恢复。可勾选后统一打标签。</p>
+        <p class="muted tip">删除会移除磁盘文件与索引，不可恢复。可勾选后统一打标签。搜索匹配标题 / URL / 标签。</p>
+        <div class="row" style="margin-bottom:10px;gap:8px;flex-wrap:wrap;">
+          <input id="adminMediaQ" type="search" placeholder="搜索媒体库（标题 / URL / 标签）" style="flex:1;min-width:160px" autocomplete="off" />
+          <button type="button" id="btnAdminMediaSearch" class="btn ghost">搜索</button>
+        </div>
         <div class="row" style="margin-bottom:10px;gap:8px;flex-wrap:wrap;">
           <input id="batchTagsInput" type="text" placeholder="标签，逗号分隔" style="flex:1;min-width:140px" />
           <button type="button" id="btnBatchTags" class="btn primary">给选中打标签</button>
         </div>
+        <div id="adminMediaMeta" class="muted tip" style="margin-bottom:8px;"></div>
         <div id="adminMedia" class="admin-media"></div>
       </div>
       <div class="admin-card">
@@ -150,6 +204,6 @@
       <div id="lbBody" class="lb-body"></div>
     </div>
   </div>
-  <script src="/assets/app.js"></script>
+  <script src="/assets/app.js?v=20260730r4"></script>
 </body>
 </html>

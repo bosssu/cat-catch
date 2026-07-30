@@ -63,6 +63,26 @@ class DownloadJob(Base):
     segments_done: Mapped[int] = mapped_column(Integer, default=0)
     media_id: Mapped[int | None] = mapped_column(Integer, nullable=True)
     url_hash: Mapped[str] = mapped_column(String(64), index=True, default="")
+    # After successful download, enqueue jasna demosaic when True
+    use_jasna: Mapped[bool] = mapped_column(Boolean, default=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=_utcnow, onupdate=_utcnow
+    )
+
+
+class JasnaJob(Base):
+    """Serial GPU queue for jasna demosaic after ingest."""
+
+    __tablename__ = "jasna_jobs"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    media_id: Mapped[int] = mapped_column(Integer, index=True, default=0)
+    status: Mapped[str] = mapped_column(String(32), index=True, default="queued")
+    progress: Mapped[float] = mapped_column(Float, default=0.0)
+    error_message: Mapped[str] = mapped_column(Text, default="")
+    input_path: Mapped[str] = mapped_column(String(2048), default="")
+    output_path: Mapped[str] = mapped_column(String(2048), default="")
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow)
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), default=_utcnow, onupdate=_utcnow

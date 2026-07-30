@@ -18,6 +18,10 @@ class IngestItem(BaseModel):
     start_sec: float | None = None
     end_sec: float | None = None
     tags: list[str] = Field(default_factory=list)
+    # After successful download, run jasna demosaic (video only)
+    use_jasna: bool = False
+    # Mark item with 限制级 tag on ingest
+    restricted: bool = False
 
 
 class IngestRequest(BaseModel):
@@ -26,6 +30,10 @@ class IngestRequest(BaseModel):
     items: list[IngestItem]
     # Default tags applied to items that omit tags
     tags: list[str] = Field(default_factory=list)
+    # Default use_jasna for items that omit the flag
+    use_jasna: bool = False
+    # Default restricted for items that omit the flag
+    restricted: bool = False
 
 
 class CategoryCreate(BaseModel):
@@ -76,7 +84,22 @@ class JobOut(BaseModel):
     segments_done: int
     media_id: int | None
     tags: list[str] = Field(default_factory=list)
+    use_jasna: bool = False
     created_at: datetime | None = None
+
+    model_config = {"from_attributes": True}
+
+
+class JasnaJobOut(BaseModel):
+    id: int
+    media_id: int
+    status: str
+    progress: float
+    error_message: str = ""
+    input_path: str = ""
+    output_path: str = ""
+    created_at: datetime | None = None
+    updated_at: datetime | None = None
 
     model_config = {"from_attributes": True}
 
@@ -95,10 +118,18 @@ class MediaDeleteBatch(BaseModel):
     ids: list[int] = Field(default_factory=list)
 
 
+class MediaJasnaBatch(BaseModel):
+    """Enqueue jasna demosaic for selected media ids (video/m3u8 only)."""
+    ids: list[int] = Field(default_factory=list)
+    force: bool = False
+
+
 class MediaPatch(BaseModel):
     """Partial update for a single media item."""
     title: str | None = None
     tags: list[str] | None = None
+    # When set, add/remove the 限制级 tag (applied after optional tags replace)
+    restricted: bool | None = None
 
 
 class TagSuggestRequest(BaseModel):

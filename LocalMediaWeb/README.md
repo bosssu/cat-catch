@@ -70,6 +70,22 @@ gopeed_min_bytes: 5242880
 
 `/api/health` 中 `gopeed: true` 表示开关已开且找到了二进制。成功任务的 `warning` 字段为 `gopeed`。
 
+### Jasna 去马赛克（可选）
+
+视频入库时若客户端勾选 **「使用 jasna 去马赛克」**（管理库上传 / 浮动入库 / 录制 / 缓存捕捉；扩展选项里也有全局默认），服务端在入库成功后把任务加入 **串行 GPU 队列**，调用本机 [jasna](https://github.com/Kruk2/jasna) CLI：
+
+```yaml
+jasna_enabled: true
+jasna_path: "D:/TMP/jasna-windows-nvidia-0.8.1/jasna.exe"
+jasna_codec: "h264"   # 输出 mp4，成功后替换原文件
+```
+
+- 同一时刻只跑 **1** 个 jasna 进程；后续任务 `queued` 排队。
+- **独立控制台**：`jasna.exe` 在**新开的黑窗口**里跑（默认**最小化**，任务栏可点开看 tqdm），与 LocalMediaWeb **无管道连接**，避免拖死媒体库 API。
+- API 侧进度为粗略估计（输出文件体积）；失败保留原片。
+- 健康检查：`/api/health` 的 `jasna: true` 表示 enabled 且找到了二进制。
+- 手动：`POST /api/media/{id}/jasna`。
+
 ### 手机打不开、电脑要刷新两遍
 
 **根因（已修）：**
@@ -83,33 +99,76 @@ gopeed_min_bytes: 5242880
 4. Wi‑Fi 设为**专用网络**；Clash **TUN** 勾选允许/绕过局域网
 5. PC 浏览器先打开 `http://192.168.x.x:8790/api/health` 应返回 `"ok":true` 和 `lan_ips`；手机浏览器同样测这个 URL
 
-## Feed 推荐（轻量）
+## Feed 浏览（短视频式）
+
+默认打开 **竖滑 Feed**（类似短视频）：一屏一条、snap 吸附、单击显示进度条、双击沉浸（隐藏顶栏/HUD）。另有 **网格缩略图**、**搜索**、**管理** 页。
+
+| 操作 | 说明 |
+|------|------|
+| 上下滑 | 切下一条 / 上一条 |
+| 单击画面 | 显示进度与暂停键 |
+| 双击画面 | 隐藏/恢复界面 |
+| 喇叭 | 静音 ↔ 有声（见下方「手机有声」） |
+| ♥ | 喜欢 |
+| 🗑 | 删除磁盘文件 + 索引 |
+
+### 推荐模式（轻量）
 
 个人局域网库，**不做**社交协同过滤 / 深度学习。
 
 | mode | 含义 |
 |------|------|
-| `recommend`（默认） | 喜欢↑、停留/浏览↑、跳过↓、新内容↑、分类偏好↑ + 少量随机 |
+| `random` | 随机（前端常用默认） |
+| `recommend` | 喜欢↑、停留/浏览↑、跳过↓、新内容↑、标签偏好↑ + 少量随机 |
 | `recent` | 最新入库 |
-| `random` | 随机 |
 | `liked` | 仅已喜欢 |
-
-前端：Feed 右侧 **♥ / ⏭ / 🗑**；管理页可批量看列表并删除。
+| `similar` | 按当前媒体或标签的相似推荐（`similar_to` / `tag`） |
+| 搜索 | 搜索结果可点进同一套 Feed UI，尾部按页预取 |
 
 - `POST /api/media/{id}/like` 切换喜欢  
 - `POST /api/media/{id}/interact` `{event: view|dwell|skip, dwell_ms?}`  
 - `DELETE /api/media/{id}` 删文件+索引  
+
+### 手机 Feed：单例播放器与有声
+
+浏览器**禁止**「每个新 `<video>` 自动有声播放」；解锁有声通常绑定在**收到过用户手势的那个元素**上。
+
+因此 Feed 采用 **全页唯一 `#lmwFeedPlayer`**：
+
+1. 用户点一次喇叭 **打开声音** → 在该元素上解锁有声（session 记住偏好）。
+2. 上下滑切条时 **只改 `src`、把同一节点挪到当前页**，不再每条新建 `<video>`。
+3. 切图时 park 播放器；切回视频再 mount。历史过长时 **外科式裁剪 DOM**（不整页 `innerHTML` 毁掉正在播的节点）。
+
+**使用注意：**
+
+- 首次进入仍可能静音起播（策略要求）；点一次喇叭后，后续切条应能保持有声。
+- 若系统短暂拦截有声，画面可继续、界面仍显示「开声」；再点一次喇叭即可重新解锁。
+- 改 `frontend/public/assets/*` 后手机请 **强刷**（静态资源约 `max-age=60`）。
+
+### 手机黑屏 / 一直 loading（已针对性修过）
+
+常见原因与现状：
+
+| 现象 | 原因方向 | 现状 |
+|------|----------|------|
+| 仅手机黑屏，PC 正常 | 解码器槽位 / 多 `<video>` | 单例 + 非当前页卸流 |
+| 滑几条后整段挂 | 裁历史时 `scrollTop` 触发假滚动、打断激活 | 程序化滚动护栏；加载中不裁剪 |
+| 开声后隔几秒转圈重载 | unmute 短暂停住被当成卡死 → 硬重载 | 看门狗只软 `play()`；有缓冲不整段 `load()` |
+| 开声后下一条没声音 | 每条新 video 丢失解锁 | 单例播放器 |
+
+仍异常时：看服务端是否在拉 `/api/media/{id}/file`（Range）；强刷后再试。
 
 ## API 摘要
 
 - `GET /api/health` — 健康检查（无需 Token）
 - `POST /api/ingest` — 插件批量提交 URL（含 headers）
 - `POST /api/upload` — 插件回退上传本地已下载文件
-- `GET /api/feed?mode=recommend|recent|random|liked`
-- `GET /api/media`、`/api/jobs` …
+- `GET /api/feed?mode=recommend|recent|random|liked|similar&limit=&exclude_ids=&similar_to=&tag=`
+- `GET /api/media`（含搜索 `q`）、`/api/jobs` …
+- `GET /api/media/{id}/file` — 文件流（**支持 Range**，原生 `<video>` 用）
 - 文档：服务启动后访问 `/docs`
 
-可选 Header：`X-LMW-Token`。
+鉴权：Header `X-LMW-Token`，或媒体 URL 查询参数 `?token=`（`<video>` / `<img>` 无法自定义 Header）。
 
 ## 与猫抓
 

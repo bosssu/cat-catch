@@ -6,19 +6,36 @@ import sys
 from contextlib import asynccontextmanager
 from pathlib import Path
 
-from fastapi import FastAPI
+from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, Response
 from fastapi.staticfiles import StaticFiles
+from starlette.middleware.base import BaseHTTPMiddleware
 
 from app import __version__
 from app.api.routes import public_router, router
 from app.core.config import PROJECT_ROOT, get_settings
 from app.core.db import init_db
 from app.services.download import start_worker
+from app.services.jasna import start_jasna_worker
 
 STATIC_DIR = PROJECT_ROOT / "frontend" / "public"
 logger = logging.getLogger("lmw")
+
+
+class NoCacheHtmlMiddleware(BaseHTTPMiddleware):
+    """Avoid stale SPA shell / assets after deploys (esp. mobile WebView)."""
+
+    async def dispatch(self, request: Request, call_next):
+        response: Response = await call_next(request)
+        path = request.url.path or ""
+        if path == "/" or path.endswith(".html"):
+            response.headers["Cache-Control"] = "no-cache, no-store, must-revalidate"
+            response.headers["Pragma"] = "no-cache"
+        elif path.startswith("/assets/"):
+            # short cache; query-string versioning (?v=) busts on release
+            response.headers.setdefault("Cache-Control", "public, max-age=60, must-revalidate")
+        return response
 
 
 def _install_asyncio_quiet_handler() -> None:
@@ -62,6 +79,7 @@ async def lifespan(_app: FastAPI):
     get_settings().ensure_dirs()
     init_db()
     await start_worker()
+    await start_jasna_worker()
     yield
 
 
@@ -74,6 +92,7 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+app.add_middleware(NoCacheHtmlMiddleware)
 
 app.include_router(public_router)
 app.include_router(router)
@@ -83,7 +102,13 @@ app.include_router(router)
 def index():
     index_path = STATIC_DIR / "index.html"
     if index_path.is_file():
-        return FileResponse(index_path)
+        return FileResponse(
+            index_path,
+            headers={
+                "Cache-Control": "no-cache, no-store, must-revalidate",
+                "Pragma": "no-cache",
+            },
+        )
     return {"message": "LocalMediaWeb API", "docs": "/docs", "health": "/api/health"}
 
 

@@ -236,6 +236,8 @@
         lmwURL: "http://127.0.0.1:8790",
         lmwToken: "",
         lmwDefaultCategory: "default",
+        lmwUseJasna: false,
+        lmwRestricted: false,
     };
     let _lmwSettings = null;
     async function getLmwSettings() {
@@ -277,11 +279,25 @@
         fd.append("source_url", source_url || location.href || "");
         fd.append("media_type", media_type || "video");
         fd.append("remux", "1");
+        const restricted =
+            payload.restricted === true ||
+            payload.restricted === 1 ||
+            payload.restricted === "1" ||
+            s.lmwRestricted === true;
+        let cleaned = [];
         if (payload.tags) {
             const tags = Array.isArray(payload.tags) ? payload.tags : String(payload.tags).split(/[,，\s]+/);
-            const cleaned = tags.map((t) => String(t).trim()).filter(Boolean);
-            if (cleaned.length) fd.append("tags", JSON.stringify(cleaned));
+            cleaned = tags.map((t) => String(t).trim()).filter(Boolean);
         }
+        if (restricted && !cleaned.includes("限制级")) cleaned = cleaned.concat(["限制级"]);
+        if (cleaned.length) fd.append("tags", JSON.stringify(cleaned));
+        const useJasna =
+            payload.use_jasna === true ||
+            payload.use_jasna === 1 ||
+            payload.use_jasna === "1" ||
+            s.lmwUseJasna === true;
+        if (useJasna) fd.append("use_jasna", "1");
+        if (restricted) fd.append("restricted", "1");
         const name = filename || `${(title || document.title || "capture").slice(0, 40)}.bin`;
         fd.append("file", blob, name);
         const headers = {};
@@ -308,11 +324,25 @@
         fd.append("category", category || s.lmwDefaultCategory || "default");
         fd.append("title", title || document.title || "");
         fd.append("source_url", source_url || location.href || "");
+        const restricted =
+            payload.restricted === true ||
+            payload.restricted === 1 ||
+            payload.restricted === "1" ||
+            s.lmwRestricted === true;
+        let cleaned = [];
         if (payload.tags) {
             const tags = Array.isArray(payload.tags) ? payload.tags : String(payload.tags).split(/[,，\s]+/);
-            const cleaned = tags.map((t) => String(t).trim()).filter(Boolean);
-            if (cleaned.length) fd.append("tags", JSON.stringify(cleaned));
+            cleaned = tags.map((t) => String(t).trim()).filter(Boolean);
         }
+        if (restricted && !cleaned.includes("限制级")) cleaned = cleaned.concat(["限制级"]);
+        if (cleaned.length) fd.append("tags", JSON.stringify(cleaned));
+        const useJasna =
+            payload.use_jasna === true ||
+            payload.use_jasna === 1 ||
+            payload.use_jasna === "1" ||
+            s.lmwUseJasna === true;
+        if (useJasna) fd.append("use_jasna", "1");
+        if (restricted) fd.append("restricted", "1");
         const baseName = (filename || title || document.title || "capture").replace(/\.[^.]+$/, "");
         fd.append("video", vBlob, `${baseName}_video.mp4`);
         if (audioBlobUrl) {

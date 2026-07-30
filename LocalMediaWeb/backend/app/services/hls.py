@@ -12,6 +12,11 @@ import httpx
 
 from app.core.config import ffmpeg_available, get_settings
 from app.services.http_client import iter_http_modes, proxy_env_for_subprocess
+from app.services.media_process import (
+    align_av_timeline,
+    before_av_not_ok,
+    format_av_align_warning,
+)
 from app.services.util import is_probably_html
 
 logger = logging.getLogger(__name__)
@@ -318,6 +323,11 @@ async def _download_hls_segments(
         str(list_path),
         "-c",
         "copy",
+        # Help AAC-in-TS → MP4 when copy succeeds
+        "-bsf:a",
+        "aac_adtstoasc",
+        "-movflags",
+        "+faststart",
         str(out_file),
     ]
     proc = await asyncio.to_thread(
@@ -328,20 +338,64 @@ async def _download_hls_segments(
         timeout=600,
     )
     if proc.returncode != 0 or not out_file.is_file():
-        ts_out = out_file.with_suffix(".ts")
-        with ts_out.open("wb") as out:
-            for i in range(total):
-                if state.get("segments", {}).get(str(i)) != "ok":
-                    continue
-                p = work_dir / f"seg_{i:05d}.ts"
-                out.write(p.read_bytes())
-        if ts_out.is_file() and ts_out.stat().st_size > 0:
-            result_out = ts_out
-        else:
-            raise HlsError(
-                f"ffmpeg merge failed: {(proc.stderr or '')[-500:]}",
-                need_client=True,
+        # retry concat without bitstream filter
+        cmd_plain = [
+            "ffmpeg",
+            "-y",
+            "-f",
+            "concat",
+            "-safe",
+            "0",
+            "-i",
+            str(list_path),
+            "-c",
+            "copy",
+            str(out_file),
+        ]
+        if out_file.is_file():
+            try:
+                out_file.unlink()
+            except OSError:
+                pass
+        proc2 = await asyncio.to_thread(
+            subprocess.run,
+            cmd_plain,
+            capture_output=True,
+            text=True,
+            timeout=600,
+        )
+        if proc2.returncode != 0 or not out_file.is_file():
+            ts_out = out_file.with_suffix(".ts")
+            with ts_out.open("wb") as out:
+                for i in range(total):
+                    if state.get("segments", {}).get(str(i)) != "ok":
+                        continue
+                    p = work_dir / f"seg_{i:05d}.ts"
+                    out.write(p.read_bytes())
+            if ts_out.is_file() and ts_out.stat().st_size > 0:
+                result_out = ts_out
+            else:
+                raise HlsError(
+                    f"ffmpeg merge failed: {(proc2.stderr or proc.stderr or '')[-500:]}",
+                    need_client=True,
+                )
+
+    # Concat / mid-playlist clips: probe; remux only when before is skew/error.
+    result_out, av_report = await asyncio.to_thread(
+        align_av_timeline, result_out, force=False
+    )
+    av_warn = format_av_align_warning(av_report)
+    if av_warn:
+        warning = f"{warning}; {av_warn}".strip("; ") if warning else av_warn
+    # JSON only when pre-align probe was not ok (post-mortem of real skew)
+    if before_av_not_ok(av_report):
+        try:
+            (work_dir / "av_timeline.json").write_text(
+                json.dumps(av_report, ensure_ascii=False, indent=2),
+                encoding="utf-8",
             )
+        except Exception as e:
+            logger.debug("write av_timeline.json skip: %s", e)
 
     return {
         "partial": partial,
@@ -350,6 +404,7 @@ async def _download_hls_segments(
         "segments_total": total,
         "segments_done": ok_count,
         "out_file": result_out,
+        "av_timeline": av_report,
     }
 
 
@@ -423,8 +478,26 @@ async def _download_hls_ffmpeg_direct(
             raise HlsError(f"ffmpeg m3u8 download failed: {err}", need_client=True)
 
     note = "ffmpeg-direct"
-    if s0 > 0 or (end_sec is not None and float(end_sec) > 0):
+    is_clip = s0 > 0 or (end_sec is not None and float(end_sec) > 0)
+    if is_clip:
         note = f"ffmpeg-direct clip {s0:.1f}s–{end_sec or 'end'}"
+
+    # Probe; remux only when before is skew/error (clip or full).
+    out_file, av_report = await asyncio.to_thread(
+        align_av_timeline, out_file, force=False
+    )
+    av_warn = format_av_align_warning(av_report)
+    if av_warn:
+        note = f"{note}; {av_warn}"
+    if before_av_not_ok(av_report):
+        try:
+            dbg = out_file.parent / "av_timeline.json"
+            dbg.write_text(
+                json.dumps(av_report, ensure_ascii=False, indent=2), encoding="utf-8"
+            )
+        except Exception:
+            pass
+
     return {
         "partial": False,
         "warning": note,
@@ -432,6 +505,7 @@ async def _download_hls_ffmpeg_direct(
         "segments_total": 0,
         "segments_done": 0,
         "out_file": out_file,
+        "av_timeline": av_report,
     }
 
 

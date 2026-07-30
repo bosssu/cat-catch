@@ -669,7 +669,8 @@
                 };
             };
 
-            const tryAddFromInputs = ({ clearOnSuccess } = { clearOnSuccess: true }) => {
+            // 添加成功后保留输入框内容，便于在相近时间段上微调再加
+            const tryAddFromInputs = () => {
                 const r = readInputRange();
                 if (!r) return false;
                 // 若输入全是默认开头且结束为空，且已有候选，则不重复加「完整片」
@@ -687,17 +688,13 @@
                 }
                 draft.push(r);
                 renderList();
-                if (clearOnSuccess) {
-                    $start.val("00:00:00");
-                    $end.val("");
-                    setTimeout(() => $start.trigger("focus").select(), 20);
-                }
                 setStatus("已添加候选 " + formatOneRange(r));
                 return true;
             };
 
+            // 打开弹框时默认开始/结束均为 00:00:00（结束 00:00:00 视为「到末尾」）
             $start.val("00:00:00");
-            $end.val("");
+            $end.val("00:00:00");
             renderList();
             $m.removeClass("hide").attr("aria-hidden", "false");
             setTimeout(() => $start.trigger("focus").select(), 30);
@@ -744,7 +741,7 @@
                 resolve(!!ok);
             };
             $("#lmRangeAdd").on("click.range", () => {
-                tryAddFromInputs({ clearOnSuccess: true });
+                tryAddFromInputs();
             });
             $("#lmRangeOk").on("click.range", () => finish(true));
             $("#lmRangeCancel").on("click.range", () => finish(false));
@@ -755,14 +752,16 @@
                 if (e.key === "Escape") finish(false);
                 if (e.key === "Enter" && !e.shiftKey) {
                     e.preventDefault();
-                    // Enter：有内容时优先「添加」，否则确定
+                    // Enter：有有效截取段时优先「添加」，默认 00:00:00~00:00:00 则确定
                     const endFilled = String($end.val() || "").trim();
                     const startRaw = String($start.val() || "").trim();
-                    const wantsAdd =
-                        endFilled ||
-                        (startRaw && startRaw !== "00:00:00" && startRaw !== "0");
+                    const endIsDefault =
+                        !endFilled || endFilled === "00:00:00" || endFilled === "0";
+                    const startIsDefault =
+                        !startRaw || startRaw === "00:00:00" || startRaw === "0";
+                    const wantsAdd = !startIsDefault || !endIsDefault;
                     if (wantsAdd) {
-                        tryAddFromInputs({ clearOnSuccess: true });
+                        tryAddFromInputs();
                     } else {
                         finish(true);
                     }
@@ -2710,6 +2709,14 @@
             return;
         }
         const tags = dlg.tags || [];
+        const useJasna =
+            dlg.use_jasna === true ||
+            !!(document.getElementById("lmUseJasna") && document.getElementById("lmUseJasna").checked) ||
+            (typeof G !== "undefined" && G.lmwUseJasna === true);
+        const restricted =
+            dlg.restricted === true ||
+            !!(document.getElementById("lmRestricted") && document.getElementById("lmRestricted").checked) ||
+            (typeof G !== "undefined" && G.lmwRestricted === true);
         try {
             const payload = [];
             let clipCount = 0;
@@ -2730,15 +2737,23 @@
                         if (hasEnd) row.end_sec = +r.endSec;
                         clipCount++;
                     }
+                    if (useJasna) row.use_jasna = true;
+                    if (restricted) row.restricted = true;
                     payload.push(row);
                 }
             }
             setStatus(
                 `提交 ${payload.length} 项…` +
                     (clipCount ? `（含 ${clipCount} 个时间段）` : "") +
-                    (tags.length ? " 标签 " + tags.join(",") : "")
+                    (tags.length ? " 标签 " + tags.join(",") : "") +
+                    (restricted ? " · 限制级" : "") +
+                    (useJasna ? " · jasna 去码" : "")
             );
-            const result = await LMW.pushItems(payload, "default", { tags });
+            const result = await LMW.pushItems(payload, "default", {
+                tags,
+                use_jasna: useJasna,
+                restricted: restricted,
+            });
             const rangeHints = chosen
                 .map((it) => formatRangeLabel(it))
                 .filter(Boolean)
@@ -2752,7 +2767,38 @@
             }
             if (rangeHints) msg += " · 本次范围 " + rangeHints;
             if (tags.length) msg += " · 标签 " + tags.join(",");
-            setStatus(msg);
+            if (useJasna) {
+                const mediaIds = [];
+                for (const j of result.jobs || []) {
+                    if (j && j.media_id && j.status === "success") mediaIds.push(j.media_id);
+                }
+                if (mediaIds.length) {
+                    msg += ` · jasna 排队（媒体 ${mediaIds.join(",")})`;
+                    setStatus(msg);
+                    LMW.waitJasnaForMediaIds(mediaIds, {
+                        onUpdate: (t) => setStatus(msg + " · " + t),
+                    })
+                        .then((jjobs) => {
+                            const ok = (jjobs || []).filter((j) => j.status === "success").length;
+                            const fail = (jjobs || []).filter((j) => j.status === "failed").length;
+                            setStatus(
+                                msg +
+                                    ` · jasna 结束：成功 ${ok}` +
+                                    (fail ? ` · 失败 ${fail}` : "") +
+                                    ((jjobs || [])
+                                        .filter((j) => j.status === "failed" && j.error_message)
+                                        .map((j) => ` #${j.id}:${String(j.error_message).slice(0, 80)}`)
+                                        .join("") || "")
+                            );
+                        })
+                        .catch((e) => setStatus(msg + " · jasna 轮询失败: " + (e.message || e)));
+                } else {
+                    msg += " · jasna：无成功媒体可去码（下载失败或重复跳过）";
+                    setStatus(msg);
+                }
+            } else {
+                setStatus(msg);
+            }
         } catch (e) {
             setStatus("入库失败: " + e.message);
         }
@@ -2825,8 +2871,39 @@
     $("#typeFilter, #resFilter, #longFilter, #cookieFilter").on("change", render);
     $("#btnIngest").on("click", doIngest);
 
+    const $restricted = $("#lmRestricted");
+    if ($restricted.length) {
+        $restricted.prop("checked", !!(typeof G !== "undefined" && G.lmwRestricted));
+        $restricted.on("change", function () {
+            const on = !!this.checked;
+            if (typeof G !== "undefined") G.lmwRestricted = on;
+            try {
+                chrome.storage.sync.set({ lmwRestricted: on });
+                chrome.storage.local.set({ lmwRestricted: on });
+            } catch (e) { /* ignore */ }
+        });
+    }
+    const $jasna = $("#lmUseJasna");
+    if ($jasna.length) {
+        $jasna.prop("checked", !!(typeof G !== "undefined" && G.lmwUseJasna));
+        $jasna.on("change", function () {
+            const on = !!this.checked;
+            if (typeof G !== "undefined") G.lmwUseJasna = on;
+            try {
+                chrome.storage.sync.set({ lmwUseJasna: on });
+                chrome.storage.local.set({ lmwUseJasna: on });
+            } catch (e) { /* ignore */ }
+        });
+    }
+
     try {
-        await LMW.health();
+        const h = await LMW.health();
+        if (h && h.jasna === false && $jasna.length) {
+            $jasna.attr(
+                "title",
+                "服务器未检测到 jasna（检查 settings.yaml 的 jasna_path 并 restart）"
+            );
+        }
     } catch (e) {
         setStatus("无法连接 LocalMediaWeb: " + ((e && e.message) || e) + "（请先 start.bat）");
     }

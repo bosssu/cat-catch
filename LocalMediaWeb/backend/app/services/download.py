@@ -200,6 +200,10 @@ async def enqueue_jobs(
                 continue
 
             item_tags = normalize_tags(it.get("tags") if it.get("tags") is not None else top_tags)
+            use_jasna = bool(
+                it.get("use_jasna") is True
+                or str(it.get("use_jasna") or "").strip().lower() in ("1", "true", "yes", "on")
+            )
             job = DownloadJob(
                 category=cat,
                 url=url,
@@ -211,6 +215,7 @@ async def enqueue_jobs(
                 status="queued",
                 url_hash=uh,
                 client_fallback_allowed=True,
+                use_jasna=use_jasna,
             )
             db.add(job)
             db.flush()
@@ -646,6 +651,15 @@ async def _run_m3u8(
         return
 
     out_file: Path = meta["out_file"]
+    av_tl = meta.get("av_timeline") or {}
+    if av_tl:
+        logger.info(
+            "m3u8 av-timeline job=%s action=%s ok=%s note=%s",
+            job_id,
+            av_tl.get("action"),
+            av_tl.get("ok"),
+            (av_tl.get("note") or "")[:240],
+        )
     # Same m3u8 URL + different clips must not share one dest / rel_path
     clip_key = clip_disambiguator(start_sec, end_sec)
     fname = safe_filename(
@@ -654,7 +668,27 @@ async def _run_m3u8(
     dest = settings.medias_path() / fname
     dest.parent.mkdir(parents=True, exist_ok=True)
     dest = ensure_unique_path(dest)
+    # Snapshot A/V probe next to media only when before probe was not ok
+    work_json = work / "av_timeline.json"
     shutil.move(str(out_file), str(dest))
+    try:
+        from app.services.media_process import before_av_not_ok
+
+        if before_av_not_ok(av_tl):
+            if work_json.is_file():
+                shutil.copy2(
+                    str(work_json),
+                    str(dest.with_name(dest.name + ".av_timeline.json")),
+                )
+            else:
+                import json as _json
+
+                dest.with_name(dest.name + ".av_timeline.json").write_text(
+                    _json.dumps(av_tl, ensure_ascii=False, indent=2),
+                    encoding="utf-8",
+                )
+    except Exception as e:
+        logger.debug("copy av_timeline.json skip: %s", e)
     display_title = title or dest.stem
     if clip_key and title:
         display_title = f"{title} [{clip_key}]"
@@ -790,6 +824,7 @@ async def _register_media(
         db.add(item)
         db.flush()
         media_id = item.id
+        want_jasna = bool(job and getattr(job, "use_jasna", False))
         if job:
             job.status = "success"
             job.media_id = media_id
@@ -807,6 +842,14 @@ async def _register_media(
             if item:
                 item.thumb_rel = thumb_rel
                 db.commit()
+
+    if want_jasna:
+        try:
+            from app.services.jasna import enqueue_jasna_for_media
+
+            enqueue_jasna_for_media(media_id)
+        except Exception:
+            logger.exception("jasna enqueue after download failed media=%s", media_id)
 
 
 def _finish_fail(

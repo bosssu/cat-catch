@@ -49,6 +49,7 @@ def _migrate_sqlite_columns(engine) -> None:
         ("media_items", "last_viewed_at", "DATETIME"),
         ("media_items", "tags_json", "TEXT DEFAULT '[]'"),
         ("download_jobs", "tags_json", "TEXT DEFAULT '[]'"),
+        ("download_jobs", "use_jasna", "INTEGER DEFAULT 0"),
     ]
     with engine.begin() as conn:
         for table, col, typedef in alters:
