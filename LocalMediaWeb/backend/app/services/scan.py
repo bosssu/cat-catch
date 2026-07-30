@@ -12,6 +12,7 @@ from app.services.util import url_hash
 
 IMAGE_EXT = {".jpg", ".jpeg", ".png", ".gif", ".webp", ".avif", ".bmp"}
 VIDEO_EXT = {".mp4", ".webm", ".mkv", ".mov", ".ts", ".m4v"}
+AUDIO_EXT = {".mp3", ".m4a", ".aac", ".ogg", ".opus", ".wav", ".flac"}
 
 
 def purge_missing_media() -> dict:
@@ -93,6 +94,8 @@ def rescan_medias(*, purge: bool = False) -> dict:
             mtype = "gif" if ext == ".gif" else "image"
         elif ext in VIDEO_EXT:
             mtype = "video"
+        elif ext in AUDIO_EXT:
+            mtype = "audio"
         else:
             skipped += 1
             continue

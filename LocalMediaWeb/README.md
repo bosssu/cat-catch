@@ -1,6 +1,8 @@
 # LocalMediaWeb
 
-本地媒体聚合浏览服务：把网页上的图片 / 动图 / 视频 / m3u8 **下载到本机 `Medias/`**，局域网用手机或 PC 以 **短视频 Feed（默认）** 或 **网格缩略图** 浏览。
+本地媒体聚合浏览服务：把网页上的图片 / 动图 / 视频 / 音频 / m3u8 **下载到本机 `Medias/`**，局域网用手机或 PC 以 **短视频 Feed（默认）** 或 **网格缩略图** 浏览。
+
+支持的音频类型（扫描与识别）：`mp3` / `m4a` / `aac` / `ogg` / `opus` / `wav` / `flac`（`media_type=audio`；Feed 共用进度条控件，网格/灯箱可播放）。
 
 配套浏览器扩展：同仓库 **猫抓 (cat-catch)** 的「解析页面图片 + 多选入库」。
 
@@ -99,6 +101,24 @@ jasna_codec: "h264"   # 输出 mp4，成功后替换原文件
 4. Wi‑Fi 设为**专用网络**；Clash **TUN** 勾选允许/绕过局域网
 5. PC 浏览器先打开 `http://192.168.x.x:8790/api/health` 应返回 `"ok":true` 和 `lan_ips`；手机浏览器同样测这个 URL
 
+### 手机 PWA（推荐：去掉 Safari 地址栏 / 页签）
+
+普通 Safari 标签页里，网页**无法**强制隐藏系统地址栏和页签栏。自用可「添加到主屏幕」，用 **独立模式** 打开——仍是完整 LocalMediaWeb（Feed / 网格 / 搜索 / 管理），不是只能播视频。
+
+**iPhone / iPad：**
+
+1. Safari 打开 `http://<电脑局域网IP>:8790/`
+2. 底部分享 → **添加到主屏幕** → 添加  
+3. 以后从 **主屏幕图标** 进入（不要从 Safari 历史再开标签）
+
+**Android Chrome：** 菜单 → **安装应用** / 添加到主屏幕（读 `/manifest.webmanifest`）。
+
+说明：
+
+- 未做 Service Worker（避免局域网媒体 Range/缓存踩坑）；不要求离线。
+- 主屏幕 App 与 Safari 标签的 localStorage **可能隔离**，token/偏好要在图标里再设一次。
+- 前端改版后若界面旧：划掉后台里的 LocalMedia 再从图标打开，或强刷一次。
+
 ## Feed 浏览（短视频式）
 
 默认打开 **竖滑 Feed**（类似短视频）：一屏一条、snap 吸附、单击显示进度条、双击沉浸（隐藏顶栏/HUD）。另有 **网格缩略图**、**搜索**、**管理** 页。
@@ -114,16 +134,18 @@ jasna_codec: "h264"   # 输出 mp4，成功后替换原文件
 
 ### 推荐模式（轻量）
 
-个人局域网库，**不做**社交协同过滤 / 深度学习。
+个人局域网库，**不做**社交协同过滤 / 深度学习。形态对齐主流短视频「多通道 + 探索 + 疲劳 + 多样性」。
 
 | mode | 含义 |
 |------|------|
-| `random` | 随机（前端常用默认） |
-| `recommend` | 喜欢↑、停留/浏览↑、跳过↓、新内容↑、标签偏好↑ + 少量随机 |
+| `random` | **全库** `ORDER BY RANDOM()` 抽样 + 类型/标签防扎堆（前端常用默认） |
+| `recommend` | 多通道：兴趣 / 新鲜 / 探索 / 回访；喜欢与停留↑、跳过与刚看过↓；标签亲和 + Gumbel + MMR 打散 + 周期探索位 |
 | `recent` | 最新入库 |
 | `liked` | 仅已喜欢 |
 | `similar` | 按当前媒体或标签的相似推荐（`similar_to` / `tag`） |
 | 搜索 | 搜索结果可点进同一套 Feed UI，尾部按页预取 |
+
+可调：`config/settings.yaml` 中 `feed_*`（见 `settings.example.yaml`）。
 
 - `POST /api/media/{id}/like` 切换喜欢  
 - `POST /api/media/{id}/interact` `{event: view|dwell|skip, dwell_ms?}`  

@@ -16,6 +16,9 @@ def generate_thumb(src: Path, media_id: int, media_type: str) -> str:
     dest = thumb_path_for(media_id)
     dest.parent.mkdir(parents=True, exist_ok=True)
     try:
+        if media_type == "audio":
+            # No video frame; frontend uses a CSS/SVG note placeholder.
+            return ""
         if media_type in ("image", "gif"):
             from PIL import Image
 

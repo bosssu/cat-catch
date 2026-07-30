@@ -17,6 +17,17 @@
   --glass: rgba(18, 18, 28, 0.42);
   --glass-border: rgba(255, 255, 255, 0.1);
   --font: "Segoe UI", system-ui, -apple-system, "PingFang SC", "Microsoft YaHei", sans-serif;
+  /* Safe areas: apply on chrome only — never pad body (breaks 100dvh feed center) */
+  --safe-top: env(safe-area-inset-top, 0px);
+  --safe-bottom: env(safe-area-inset-bottom, 0px);
+  --safe-left: env(safe-area-inset-left, 0px);
+  --safe-right: env(safe-area-inset-right, 0px);
+  /* Feed bottom chrome: home indicator + breathing room so title/tags sit above cut */
+  --feed-hud-pad-x: 14px;
+  --feed-hud-pad-bottom: max(18px, calc(var(--safe-bottom) + 14px));
+  /* Progress sits above meta (up to 2-line title) + action column */
+  --feed-progress-bottom: calc(var(--feed-hud-pad-bottom) + 92px);
+  --feed-top-chrome: calc(var(--safe-top) + var(--nav-h));
   font-family: var(--font);
   color-scheme: dark;
 }
@@ -36,22 +47,129 @@ button, select, input { font: inherit; color: inherit; }
 button { cursor: pointer; }
 .hide { display: none !important; }
 .muted { color: var(--muted); }
+
+/*
+ * PWA standalone (iOS home screen):
+ * - Edge-to-edge layout (viewport-fit=cover + black-translucent status bar).
+ * - Do NOT pad <body> with safe-area — that shrinks the box while feed stays
+ *   100dvh, so video looks off-center and bottom HUD is clipped.
+ * - Safe areas only on fixed chrome (topnav / HUD / progress / tip).
+ */
+html.lmw-standalone,
+html.lmw-standalone body {
+  height: 100%;
+  height: 100dvh;
+  max-height: 100dvh;
+  overflow: hidden;
+  background: #000;
+}
+html.lmw-standalone #app {
+  height: 100%;
+  height: 100dvh;
+  max-height: 100dvh;
+  overflow: hidden;
+}
+/* Admin / grid / search need page scroll inside standalone */
+html.lmw-standalone body.is-scroll-page {
+  overflow: auto;
+  max-height: none;
+  height: auto;
+  min-height: 100dvh;
+  background: var(--bg);
+}
+html.lmw-standalone body.is-scroll-page #app {
+  height: auto;
+  max-height: none;
+  overflow: visible;
+}
+html.lmw-standalone #view-feed,
+html.lmw-standalone .feed-scroller {
+  height: 100%;
+  height: 100dvh;
+  max-height: 100dvh;
+}
+html.lmw-standalone .snap-slide {
+  height: 100%;
+  height: 100dvh;
+  min-height: 100dvh;
+  max-height: 100dvh;
+}
+/* Grid/admin headers clear status bar + topnav (search hides topnav) */
+html.lmw-standalone .page-head {
+  padding-top: calc(var(--feed-top-chrome) + 12px);
+}
+html.lmw-standalone .search-page {
+  padding-top: max(12px, var(--safe-top));
+  padding-bottom: max(48px, calc(var(--safe-bottom) + 28px));
+}
+
+/* One-shot tip: add to home screen (Safari tab only) */
+.lmw-pwa-tip {
+  position: fixed;
+  left: 12px;
+  right: 12px;
+  bottom: calc(12px + env(safe-area-inset-bottom, 0px));
+  z-index: 80;
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  padding: 12px 14px;
+  border-radius: 14px;
+  background: rgba(18, 18, 28, 0.94);
+  border: 1px solid var(--glass-border);
+  box-shadow: var(--shadow);
+  font-size: 13px;
+  line-height: 1.45;
+  color: var(--fg);
+  backdrop-filter: blur(12px);
+  -webkit-backdrop-filter: blur(12px);
+}
+.lmw-pwa-tip .lmw-pwa-tip-text {
+  flex: 1;
+  min-width: 0;
+}
+.lmw-pwa-tip strong {
+  color: #fff;
+  font-weight: 600;
+}
+.lmw-pwa-tip .muted {
+  display: block;
+  margin-top: 4px;
+  font-size: 12px;
+}
+.lmw-pwa-tip-x {
+  flex-shrink: 0;
+  width: 32px;
+  height: 32px;
+  border: 0;
+  border-radius: 8px;
+  background: rgba(255, 255, 255, 0.08);
+  color: var(--fg);
+  font-size: 18px;
+  line-height: 1;
+}
+.lmw-pwa-tip-x:active {
+  background: rgba(255, 255, 255, 0.16);
+}
 .ico { width: 18px; height: 18px; flex-shrink: 0; }
 .ico-sm { width: 14px; height: 14px; opacity: 0.75; flex-shrink: 0; }
 
 /* —— Top nav：半透玻璃质感、紧凑 —— */
 .topnav {
   position: fixed;
-  top: 0; left: 0; right: 0;
+  top: 0;
+  left: 0;
+  right: 0;
   z-index: 30;
   display: flex;
   align-items: center;
   gap: 6px;
   min-height: var(--nav-h);
-  padding: 6px 10px;
-  padding-top: max(6px, env(safe-area-inset-top));
+  padding: 6px max(10px, var(--safe-right)) 6px max(10px, var(--safe-left));
+  padding-top: max(6px, var(--safe-top));
+  box-sizing: border-box;
   /* 轻量顶渐变，不压暗画面 */
-  background: linear-gradient(to bottom, rgba(8, 8, 14, 0.28) 0%, transparent 100%);
+  background: linear-gradient(to bottom, rgba(8, 8, 14, 0.42) 0%, rgba(8, 8, 14, 0.12) 70%, transparent 100%);
   pointer-events: none;
 }
 .topnav > * { pointer-events: auto; }
@@ -413,6 +531,8 @@ body.search-open .topnav { display: none; }
   touch-action: manipulation;
   -webkit-tap-highlight-color: transparent;
   user-select: none;
+  /* Always center media in the full slide (PWA must not offset stage for safe-area) */
+  place-items: center;
 }
 /*
  * Unified stage fit (desktop / phone / headset):
@@ -431,10 +551,17 @@ body.search-open .topnav { display: none; }
   -webkit-user-drag: none;
   pointer-events: none; /* 事件落到 stage，双触更稳 */
   transform-origin: center center;
+  flex-shrink: 0;
 }
 .media-stage img.fit-cover,
 .media-stage video.fit-cover {
   object-fit: cover;
+  object-position: center center;
+}
+.media-stage img.fit-contain,
+.media-stage video.fit-contain {
+  object-fit: contain;
+  object-position: center center;
 }
 /*
  * Video stays visible. Spinner overlay covers until load finishes.
@@ -449,6 +576,40 @@ body.search-open .topnav { display: none; }
 .media-stage video.is-ready,
 #lmwFeedPlayer.is-ready {
   opacity: 1;
+}
+/* Audio feed: gradient art + hidden singleton <audio> driving progress chrome */
+.media-stage-audio {
+  background: radial-gradient(ellipse at 50% 40%, #2a3550 0%, #12161f 65%, #0a0c10 100%);
+}
+.media-stage-audio .audio-stage-art {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  pointer-events: none;
+  z-index: 1;
+}
+.media-stage-audio .audio-note {
+  font-size: clamp(64px, 18vw, 120px);
+  line-height: 1;
+  opacity: 0.55;
+  filter: drop-shadow(0 8px 24px rgba(0, 0, 0, 0.45));
+  user-select: none;
+}
+.media-stage-audio audio.feed-audio-player,
+#lmwFeedAudio {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  opacity: 0;
+  pointer-events: none;
+  left: 0;
+  top: 0;
+}
+.lightbox .lb-audio {
+  width: min(92vw, 480px);
+  max-width: 100%;
 }
 /* Loading spinner while single-stream buffer is empty */
 .media-loading {
@@ -542,9 +703,10 @@ body.is-chrome-hidden .media-play-toggle {
   position: absolute;
   left: 0;
   right: 0;
-  bottom: max(92px, calc(env(safe-area-inset-bottom) + 78px));
+  bottom: var(--feed-progress-bottom);
   z-index: 8;
-  padding: 8px 12px 4px;
+  padding: 8px max(12px, var(--safe-right)) 4px max(12px, var(--safe-left));
+  box-sizing: border-box;
   background: linear-gradient(transparent, rgba(0, 0, 0, 0.28));
   opacity: 0;
   pointer-events: none;
@@ -626,23 +788,85 @@ body.is-chrome-hidden .media-play-toggle {
 }
 .hud {
   position: absolute;
-  left: 0; right: 0; bottom: 0;
+  left: 0;
+  right: 0;
+  bottom: 0;
   z-index: 7; /* above progress bar so side buttons stay clickable */
-  /* 上 padding 仅覆盖文字上方薄渐变，避免大片压暗画面 */
-  padding: 18px 12px max(12px, calc(env(safe-area-inset-bottom) + 8px));
+  box-sizing: border-box;
+  /* Top pad = gradient only; bottom pad clears home indicator (once, not doubled) */
+  padding: 36px var(--feed-hud-pad-x) var(--feed-hud-pad-bottom);
+  padding-left: max(var(--feed-hud-pad-x), var(--safe-left));
+  padding-right: max(var(--feed-hud-pad-x), var(--safe-right));
   background: linear-gradient(
     to top,
-    rgba(0, 0, 0, 0.72) 0%,
-    rgba(0, 0, 0, 0.38) 55%,
-    rgba(0, 0, 0, 0.12) 82%,
+    rgba(0, 0, 0, 0.78) 0%,
+    rgba(0, 0, 0, 0.42) 42%,
+    rgba(0, 0, 0, 0.14) 72%,
     transparent 100%
   );
   display: flex;
   align-items: flex-end;
   justify-content: space-between;
-  gap: 10px;
+  gap: 12px;
   pointer-events: none;
   transition: opacity 0.22s ease, transform 0.22s ease;
+}
+
+/*
+ * Viewport freeze (any rotate / big resize): kill snap + scroll while geometry rebuilds.
+ */
+body.lmw-viewport-freeze {
+  overflow: hidden !important;
+}
+body.lmw-viewport-freeze #feedScroller {
+  overflow: hidden !important;
+  overflow-y: hidden !important;
+  scroll-snap-type: none !important;
+  touch-action: none !important;
+  overscroll-behavior: none !important;
+}
+
+/*
+ * Orient shield: fixed layer holds the playing <video> while scroller rebuilds underneath.
+ * User never sees snap/scroll thrash — only continuous picture, then UI in one cut.
+ */
+#lmwOrientShield {
+  position: fixed;
+  inset: 0;
+  z-index: 200;
+  display: none;
+  align-items: center;
+  justify-content: center;
+  background: #000;
+  pointer-events: none;
+  /* contain paint so underlay thrash cannot composite through */
+  isolation: isolate;
+}
+#lmwOrientShield.is-on {
+  display: flex;
+}
+#lmwOrientShield video,
+#lmwOrientShield img {
+  width: 100%;
+  height: 100%;
+  max-width: 100%;
+  max-height: 100%;
+  object-fit: contain;
+  object-position: center center;
+  background: #000;
+  pointer-events: none;
+}
+/* Hide feed + chrome while shield is up — layout may thrash invisibly */
+body.lmw-orient-shielded #view-feed,
+body.lmw-orient-shielded #feedScroller {
+  visibility: hidden !important;
+}
+body.lmw-orient-shielded .topnav,
+body.lmw-orient-shielded .lmw-pwa-tip,
+body.lmw-orient-shielded .lmw-land-controls {
+  visibility: hidden !important;
+  opacity: 0 !important;
+  pointer-events: none !important;
 }
 
 /*
@@ -663,11 +887,38 @@ body.lmw-phone-landscape #feedScroller {
   height: 100dvh;
   max-height: 100dvh;
   background: #000;
+  /* full-bleed media; do not pad scroller (would un-center video) */
+  padding: 0;
+  /* Hard freeze: no snap physics, no fling, no mid-slide rest */
+  overflow: hidden !important;
+  overflow-y: hidden !important;
+  scroll-snap-type: none !important;
+  touch-action: none;
+  overscroll-behavior: none;
 }
+/*
+ * Landscape = single-slide stage. Hide neighbors so scrollTop cannot land
+ * between two pages (root cause of mid-snap + "next black / prev audio").
+ */
 body.lmw-phone-landscape .snap-slide {
-  height: 100%;
-  height: 100dvh;
-  min-height: 100dvh;
+  display: none !important;
+  height: 0 !important;
+  min-height: 0 !important;
+  max-height: 0 !important;
+  overflow: hidden !important;
+  pointer-events: none !important;
+  visibility: hidden !important;
+}
+body.lmw-phone-landscape .snap-slide.is-feed-frozen {
+  display: flex !important;
+  visibility: visible !important;
+  pointer-events: auto !important;
+  height: 100% !important;
+  height: 100dvh !important;
+  min-height: 100dvh !important;
+  max-height: 100dvh !important;
+  overflow: hidden !important;
+  position: relative;
 }
 body.lmw-phone-landscape .topnav {
   opacity: 0 !important;
@@ -676,7 +927,226 @@ body.lmw-phone-landscape .topnav {
 }
 body.lmw-phone-landscape .hud {
   opacity: 0.92;
-  /* keep mute/like reachable at edge if needed; mostly cinematic */
+  /* notch / home indicator on landscape sides + bottom */
+  padding-left: max(var(--feed-hud-pad-x), var(--safe-left));
+  padding-right: max(var(--feed-hud-pad-x), var(--safe-right));
+  padding-bottom: max(12px, calc(var(--safe-bottom) + 8px));
+}
+body.lmw-phone-landscape .feed-progress {
+  /* portrait progress unused in landscape — dedicated land controls */
+  display: none !important;
+}
+body.lmw-phone-landscape .media-play-toggle {
+  display: none !important;
+}
+/* Standalone landscape: slightly tighter cinematic chrome */
+html.lmw-standalone body.lmw-phone-landscape .hud {
+  padding-bottom: max(14px, calc(var(--safe-bottom) + 10px));
+}
+
+/*
+ * Landscape fullscreen playback chrome (independent of portrait HUD / is-chrome-hidden).
+ * Bottom transport: play/pause + scrub + time. Center play when paused & bar hidden.
+ */
+.lmw-land-controls {
+  display: none;
+  position: fixed;
+  inset: 0;
+  z-index: 90;
+  pointer-events: none;
+  --land-safe-l: max(12px, var(--safe-left));
+  --land-safe-r: max(12px, var(--safe-right));
+  --land-safe-b: max(10px, var(--safe-bottom));
+}
+body.lmw-phone-landscape .lmw-land-controls {
+  display: block;
+}
+body.lmw-phone-landscape .lmw-land-controls.is-no-video {
+  display: none;
+}
+.lmw-land-controls .lmw-land-hit {
+  position: absolute;
+  inset: 0;
+  z-index: 1;
+  /* Capture taps to re-open transport after auto-hide (stage/video click is unreliable on iOS) */
+  pointer-events: auto;
+  background: transparent;
+  touch-action: manipulation;
+  -webkit-tap-highlight-color: transparent;
+}
+/* Meta HUD visible + bar closed: let like/mute through; stage can still show bar */
+body.lmw-phone-landscape:not(.is-chrome-hidden) .lmw-land-controls:not(.is-open) .lmw-land-hit {
+  pointer-events: none;
+}
+.lmw-land-controls .lmw-land-center {
+  position: absolute;
+  left: 50%;
+  top: 50%;
+  z-index: 2;
+  width: 76px;
+  height: 76px;
+  margin: 0;
+  padding: 0;
+  border: none;
+  border-radius: 50%;
+  transform: translate(-50%, -50%) scale(0.9);
+  background: rgba(0, 0, 0, 0.48);
+  color: #fff;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  cursor: pointer;
+  opacity: 0;
+  pointer-events: none;
+  backdrop-filter: blur(6px);
+  -webkit-backdrop-filter: blur(6px);
+  box-shadow: 0 6px 28px rgba(0, 0, 0, 0.4);
+  transition: opacity 0.2s ease, transform 0.2s ease, background 0.15s ease;
+  -webkit-tap-highlight-color: transparent;
+}
+.lmw-land-controls .lmw-land-center svg {
+  width: 36px;
+  height: 36px;
+  display: block;
+}
+.lmw-land-controls .lmw-land-center.is-paused svg {
+  margin-left: 3px;
+}
+.lmw-land-controls.is-open .lmw-land-center,
+.lmw-land-controls.is-paused-hold .lmw-land-center {
+  opacity: 1;
+  pointer-events: auto;
+  transform: translate(-50%, -50%) scale(1);
+}
+.lmw-land-controls .lmw-land-center:active {
+  transform: translate(-50%, -50%) scale(0.94);
+  background: rgba(0, 0, 0, 0.62);
+}
+.lmw-land-controls .lmw-land-dock {
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  z-index: 3;
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 18px var(--land-safe-r) calc(14px + var(--land-safe-b)) var(--land-safe-l);
+  box-sizing: border-box;
+  background: linear-gradient(transparent, rgba(0, 0, 0, 0.55) 40%, rgba(0, 0, 0, 0.72));
+  opacity: 0;
+  transform: translateY(10px);
+  pointer-events: none;
+  transition: opacity 0.22s ease, transform 0.22s ease;
+}
+.lmw-land-controls.is-open .lmw-land-dock {
+  opacity: 1;
+  transform: translateY(0);
+  pointer-events: auto;
+}
+.lmw-land-controls .lmw-land-play {
+  flex: 0 0 auto;
+  width: 44px;
+  height: 44px;
+  margin: 0;
+  padding: 0;
+  border: none;
+  border-radius: 50%;
+  background: rgba(255, 255, 255, 0.14);
+  color: #fff;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  cursor: pointer;
+  -webkit-tap-highlight-color: transparent;
+}
+.lmw-land-controls .lmw-land-play svg {
+  width: 22px;
+  height: 22px;
+  display: block;
+}
+.lmw-land-controls .lmw-land-play.is-paused svg {
+  margin-left: 2px;
+}
+.lmw-land-controls .lmw-land-play:active {
+  background: rgba(255, 255, 255, 0.24);
+  transform: scale(0.96);
+}
+.lmw-land-controls .lmw-land-time {
+  flex: 0 0 auto;
+  min-width: 2.6em;
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+  color: rgba(255, 255, 255, 0.92);
+  text-shadow: 0 1px 2px rgba(0, 0, 0, 0.45);
+  user-select: none;
+}
+.lmw-land-controls .lmw-land-time.is-dur {
+  text-align: right;
+}
+.lmw-land-controls .lmw-land-track {
+  position: relative;
+  flex: 1 1 auto;
+  height: 28px;
+  display: flex;
+  align-items: center;
+  cursor: pointer;
+  touch-action: none;
+  -webkit-user-select: none;
+  user-select: none;
+}
+.lmw-land-controls .lmw-land-track::before {
+  content: "";
+  position: absolute;
+  left: 0;
+  right: 0;
+  height: 4px;
+  border-radius: 99px;
+  background: rgba(255, 255, 255, 0.28);
+}
+.lmw-land-controls.is-seeking .lmw-land-track::before,
+.lmw-land-controls .lmw-land-track:active::before {
+  height: 6px;
+}
+.lmw-land-controls .lmw-land-fill {
+  position: absolute;
+  left: 0;
+  height: 4px;
+  border-radius: 99px;
+  background: #fff;
+  width: 0%;
+  pointer-events: none;
+  transition: height 0.12s ease;
+}
+.lmw-land-controls.is-seeking .lmw-land-fill {
+  height: 6px;
+}
+.lmw-land-controls .lmw-land-knob {
+  position: absolute;
+  top: 50%;
+  left: 0%;
+  width: 14px;
+  height: 14px;
+  margin-left: -7px;
+  margin-top: -7px;
+  border-radius: 50%;
+  background: #fff;
+  box-shadow: 0 1px 6px rgba(0, 0, 0, 0.4);
+  pointer-events: none;
+  opacity: 0;
+  transform: scale(0.6);
+  transition: opacity 0.15s ease, transform 0.15s ease;
+}
+.lmw-land-controls.is-open .lmw-land-knob,
+.lmw-land-controls.is-seeking .lmw-land-knob {
+  opacity: 1;
+  transform: scale(1);
+}
+.lmw-land-controls.is-seeking .lmw-land-knob {
+  width: 18px;
+  height: 18px;
+  margin-left: -9px;
+  margin-top: -9px;
 }
 
 /* 沉浸模式：双击媒体区隐藏顶栏 / HUD / 进度；再双击恢复 */
@@ -704,10 +1174,14 @@ body.is-chrome-hidden .lmw-toast {
   pointer-events: none;
 }
 .hud .meta {
-  max-width: min(70%, 420px);
+  flex: 1 1 auto;
+  min-width: 0;
+  max-width: min(72%, 440px);
   word-break: break-word;
   /* meta stays none so empty padding doesn't block stage taps */
   pointer-events: none;
+  /* Lift text block slightly so it doesn't hug the home indicator */
+  padding-bottom: 2px;
 }
 .hud .type {
   display: inline-flex;
@@ -716,10 +1190,10 @@ body.is-chrome-hidden .lmw-toast {
   align-items: center;
   /* re-enable only the chip row so #tags are clickable */
   pointer-events: auto;
-  color: rgba(255,255,255,0.65);
+  color: rgba(255,255,255,0.72);
   font-size: 11px;
-  margin-bottom: 3px;
-  max-height: 42px;
+  margin-bottom: 5px;
+  max-height: 48px;
   overflow: hidden;
 }
 .hud .type .chip:not(button) {
@@ -731,22 +1205,26 @@ body.is-chrome-hidden .lmw-toast {
   z-index: 2;
 }
 .hud .title {
-  font-size: 13px;
+  font-size: 14px;
   font-weight: 600;
-  line-height: 1.25;
-  text-shadow: 0 1px 6px rgba(0,0,0,0.55);
-  /* 左下角标题：超长省略尾部 */
+  line-height: 1.3;
+  text-shadow: 0 1px 8px rgba(0,0,0,0.65);
+  /* 左下角标题：最多两行，避免裁成半截字 */
   max-width: 100%;
   overflow: hidden;
   text-overflow: ellipsis;
-  white-space: nowrap;
+  display: -webkit-box;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+  white-space: normal;
+  word-break: break-word;
 }
 .hud .stats {
   display: flex;
   gap: 10px;
-  margin-top: 4px;
+  margin-top: 5px;
   font-size: 11px;
-  color: rgba(255,255,255,0.5);
+  color: rgba(255,255,255,0.55);
 }
 .hud .stats span {
   display: inline-flex;
@@ -801,12 +1279,16 @@ button.chip.tag.is-active {
 .hud .actions {
   display: flex;
   flex-direction: column;
-  gap: 8px;
+  gap: 10px;
+  flex: 0 0 auto;
   pointer-events: auto;
+  /* Keep last button fully above home indicator (parent already pads bottom) */
+  padding-bottom: 0;
+  margin-bottom: 0;
 }
 .hud .round {
-  width: 40px;
-  height: 40px;
+  width: 42px;
+  height: 42px;
   border-radius: 50%;
   border: 1px solid rgba(255,255,255,0.12);
   background: rgba(20, 20, 28, 0.48);
@@ -927,6 +1409,21 @@ button.chip.tag.is-active {
   inset: 0;
   width: 100%;
   height: 100%;
+}
+.grid .cell .cell-thumb-audio {
+  background: radial-gradient(ellipse at 50% 45%, #2a3550 0%, #141820 100%);
+  object-fit: none;
+}
+.grid .cell .cell-thumb-audio::after {
+  content: "♪";
+  position: absolute;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 42px;
+  opacity: 0.7;
+  pointer-events: none;
 }
 .grid .cell .cell-motion {
   position: absolute;

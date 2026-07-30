@@ -145,10 +145,121 @@
   }
 
   /** True while orientation / FS exit must not switch slides or pause the active clip. */
+  /**
+   * ─── Feed identity (simple) ───
+   * committedFeedId: only written by user swipe / cold start.
+   * On any rotate: lock to committed, freeze scroller (no snap), never switch.
+   */
+  function isOrientLockActive() {
+    return !!state._orientLockActive;
+  }
+
+  function getCommittedFeedId() {
+    return state.committedFeedId != null ? String(state.committedFeedId) : null;
+  }
+
+  function getLockedFeedId() {
+    return state._lockedFeedId != null ? String(state._lockedFeedId) : null;
+  }
+
+  function getClipFreezeId() {
+    return getLockedFeedId() || getCommittedFeedId();
+  }
+
+  function markFrozenSlide(id) {
+    const scroller = document.getElementById("feedScroller");
+    if (!scroller) return;
+    const sid = id != null ? String(id) : "";
+    scroller.querySelectorAll(".snap-slide").forEach((el) => {
+      el.classList.toggle("is-feed-frozen", sid !== "" && String(el.dataset.id) === sid);
+    });
+  }
+
+  function clearFrozenSlideMarks() {
+    document.querySelectorAll("#feedScroller .snap-slide.is-feed-frozen").forEach((el) => {
+      el.classList.remove("is-feed-frozen");
+    });
+  }
+
+  /** User / cold-start only. Source of truth for rotate lock. */
+  function commitFeedId(id, index) {
+    if (id == null) return;
+    state.committedFeedId = String(id);
+    if (index != null && Number.isFinite(Number(index))) {
+      state.committedFeedIndex = Number(index) | 0;
+    } else {
+      const slide = document.querySelector(
+        `#feedScroller .snap-slide[data-id="${state.committedFeedId}"]`
+      );
+      state.committedFeedIndex =
+        slide && slide.dataset.index != null
+          ? Number(slide.dataset.index) || 0
+          : state.feedIndex | 0;
+    }
+    state.activeFeedId = state.committedFeedId;
+    state.feedIndex = state.committedFeedIndex | 0;
+  }
+
+  /**
+   * Lock to committed (never to a drifted activeFeedId).
+   * Once locked, id is immutable until unlockFeedId.
+   */
+  function lockFeedId(_preferIgnored, reason) {
+    if (state._lockedFeedId == null) {
+      const id = getCommittedFeedId() || state.activeFeedId;
+      if (id == null) return null;
+      state._lockedFeedId = String(id);
+      state._lockedFeedIndex =
+        state.committedFeedIndex != null
+          ? state.committedFeedIndex | 0
+          : state.feedIndex | 0;
+      const slide = document.querySelector(
+        `#feedScroller .snap-slide[data-id="${state._lockedFeedId}"]`
+      );
+      if (slide && slide.dataset.index != null) {
+        state._lockedFeedIndex = Number(slide.dataset.index) || 0;
+      }
+      state._lockReason = reason || "";
+    }
+    state.activeFeedId = String(state._lockedFeedId);
+    state.feedIndex = state._lockedFeedIndex | 0;
+    // Keep committed aligned (rotate must not invent a new commit)
+    state.committedFeedId = String(state._lockedFeedId);
+    state.committedFeedIndex = state._lockedFeedIndex | 0;
+    markFrozenSlide(state._lockedFeedId);
+    state._userScrollPending = false;
+    return state._lockedFeedId;
+  }
+
+  function unlockFeedId() {
+    state._lockedFeedId = null;
+    state._lockedFeedIndex = null;
+    state._lockReason = "";
+    clearFrozenSlideMarks();
+  }
+
+  function captureClipFreeze() {
+    return lockFeedId(null, "freeze");
+  }
+  function releaseClipFreeze() {
+    unlockFeedId();
+  }
+
+  function isFeedIdentityLocked() {
+    return (
+      state._lockedFeedId != null ||
+      !!state._landscapeImmersive ||
+      isOrientLockActive() ||
+      document.body.classList.contains("lmw-viewport-freeze")
+    );
+  }
+
   function isPlaybackGuarded() {
     return (
       !!state._viewportResizing ||
       !!state._programmaticScroll ||
+      isOrientLockActive() ||
+      document.body.classList.contains("lmw-viewport-freeze") ||
       (Number(state._playbackGuardUntil) || 0) > Date.now()
     );
   }
@@ -159,10 +270,27 @@
     state._layoutResumeIgnoreUserPause = true;
     clearTimeout(state._playbackGuardClearT);
     state._playbackGuardClearT = setTimeout(() => {
-      if ((Number(state._playbackGuardUntil) || 0) <= Date.now()) {
+      if ((Number(state._playbackGuardUntil) || 0) <= Date.now() && !state._orientLockActive) {
         state._layoutResumeIgnoreUserPause = false;
       }
     }, ms + 50);
+  }
+
+  function resetPlaybackGuard(ms = 0) {
+    state._playbackGuardUntil = Date.now() + Math.max(0, ms | 0);
+    state._layoutResumeIgnoreUserPause = ms > 0;
+    clearTimeout(state._playbackGuardClearT);
+    if (ms > 0) {
+      state._playbackGuardClearT = setTimeout(() => {
+        state._layoutResumeIgnoreUserPause = false;
+      }, ms + 40);
+    } else {
+      state._layoutResumeIgnoreUserPause = false;
+    }
+  }
+
+  function setActiveFeedIdFromUser(id, index) {
+    commitFeedId(id, index);
   }
 
   function exitDocFullscreen() {
@@ -175,46 +303,525 @@
     return Promise.resolve();
   }
 
+  function lockScrollerPhysics(scroller) {
+    if (!scroller) return;
+    scroller.dataset.orientLock = "1";
+    scroller.style.scrollSnapType = "none";
+    scroller.style.overflowY = "hidden";
+  }
+
+  function unlockScrollerPhysics(scroller) {
+    if (!scroller) return;
+    try {
+      scroller.style.scrollSnapType = "";
+      scroller.style.overflowY = "";
+      delete scroller.dataset.orientLock;
+    } catch (_) {}
+  }
+
   /**
-   * Phone landscape "fullscreen":
-   * - NEVER call video.requestFullscreen / webkitEnterFullscreen — exit leaves
-   *   the shared <video> paused and often unrecoverable (play-then-stop loops).
-   * - Primary: CSS immersive class on <body> (reliable on all mobile browsers).
-   * - Optional: Fullscreen API on #feedScroller / documentElement only (not video).
+   * Full-viewport shield: move shared video (or image) onto a fixed layer so
+   * scroller reflow / snap / class toggles are invisible. Layout finishes under
+   * visibility:hidden; we cut back in one frame — no visible shake.
    */
+  function ensureOrientShield() {
+    let el = document.getElementById("lmwOrientShield");
+    if (!el) {
+      el = document.createElement("div");
+      el.id = "lmwOrientShield";
+      el.setAttribute("aria-hidden", "true");
+      document.body.appendChild(el);
+    }
+    return el;
+  }
+
+  function showOrientShield() {
+    // After settle, ignore re-entry that would flash UI away again
+    if (Date.now() < (Number(state._orientGraceUntil) || 0) && !state._orientLockActive) {
+      return;
+    }
+    const shield = ensureOrientShield();
+    document.body.classList.add("lmw-orient-shielded");
+    shield.classList.add("is-on");
+    state._orientShieldOn = true;
+
+    // Prefer shared feed video; keep decoding uninterrupted
+    let media =
+      state._feedPlayer ||
+      document.getElementById("lmwFeedPlayer") ||
+      document.querySelector("#feedScroller .media-stage video") ||
+      document.querySelector("#feedScroller .media-stage img");
+
+    if (!media) {
+      // Try active slide image
+      const id = getLockedFeedId() || getCommittedFeedId() || state.activeFeedId;
+      if (id != null) {
+        media = document.querySelector(
+          `#feedScroller .snap-slide[data-id="${id}"] .media-stage img, #feedScroller .snap-slide[data-id="${id}"] .media-stage video`
+        );
+      }
+    }
+    if (media && media.parentNode !== shield) {
+      try {
+        // Clear inline styles that might fight contain layout
+        media.style.width = "";
+        media.style.height = "";
+        shield.appendChild(media);
+        if (media.tagName === "VIDEO") {
+          media.classList.add("is-ready");
+          try {
+            if (media.paused && media.dataset.userPaused !== "1") media.play().catch(() => {});
+          } catch (_) {}
+        }
+      } catch (_) {}
+    }
+  }
+
+  /** Pin scroller, put media back on slide, drop shield — one visual cut. */
+  function hideOrientShield() {
+    const shield = document.getElementById("lmwOrientShield");
+    const id = getLockedFeedId() || getCommittedFeedId() || state.activeFeedId;
+    const slide = pinFeedIdOnce(id, {
+      stayLocked: isOrientLockActive() || !!state._landscapeImmersive,
+    });
+
+    // Media currently on shield (or already moved)
+    let media =
+      (shield && (shield.querySelector("video") || shield.querySelector("img"))) ||
+      state._feedPlayer ||
+      document.getElementById("lmwFeedPlayer");
+
+    if (slide && media) {
+      try {
+        if (media.tagName === "VIDEO") {
+          mountFeedPlayer(slide);
+          media = getSharedFeedVideo() || media;
+          applyMediaStageFit(media);
+          media.dataset.userPaused = "0";
+          if (media.paused) softResumeFeedVideo(media);
+          if (!media.paused) media.classList.add("is-ready");
+          setSlideLoading(slide, false);
+        } else if (media.tagName === "IMG") {
+          const stage = slide.querySelector(".media-stage");
+          if (stage && media.parentNode !== stage) {
+            const loading = stage.querySelector(".media-loading");
+            if (loading) loading.after(media);
+            else stage.insertBefore(media, stage.firstChild);
+          }
+          applyMediaStageFit(media);
+          setSlideLoading(slide, false);
+        }
+      } catch (_) {}
+    }
+
+    if (shield) {
+      shield.classList.remove("is-on");
+      // Video should already be remounted; clear any non-player leftovers only
+      try {
+        [...shield.childNodes].forEach((n) => {
+          if (n && n.id !== "lmwFeedPlayer" && n !== state._feedPlayer) {
+            try {
+              n.remove();
+            } catch (_) {}
+          }
+        });
+      } catch (_) {}
+    }
+    document.body.classList.remove("lmw-orient-shielded");
+    state._orientShieldOn = false;
+  }
+
+  /** Mark orientation session finished — block re-shield from residual resize noise. */
+  function markOrientSettled(orientation) {
+    const vp = detectViewportProfile();
+    const o = orientation || vp.orientation || "portrait";
+    state._settledOrientation = o;
+    state._lastViewportKey = viewportKey(vp);
+    state._orientGraceUntil = Date.now() + 900;
+    state._orientTarget = null;
+    state._orientFinishing = false;
+  }
+
+  /**
+   * Single pin of scroll position.
+   * stayLocked=true only during orient session — normal settle must NOT leave overflow:hidden
+   * (cold start resize/pin was freezing the feed until a rotate cycle unlocked it).
+   */
+  function pinFeedIdOnce(forceId, opts = {}) {
+    const scroller = document.getElementById("feedScroller");
+    if (!scroller || state.view !== "feed") return null;
+    const id =
+      getLockedFeedId() ||
+      forceId ||
+      getCommittedFeedId() ||
+      state.activeFeedId;
+    if (id == null) return null;
+    let slide = scroller.querySelector(`.snap-slide[data-id="${id}"]`);
+    if (!slide) {
+      const idx =
+        state._lockedFeedIndex != null
+          ? state._lockedFeedIndex
+          : state.committedFeedIndex != null
+            ? state.committedFeedIndex
+            : state.feedIndex | 0;
+      slide = scroller.querySelector(`.snap-slide[data-index="${idx}"]`);
+    }
+    if (!slide) return null;
+
+    state.activeFeedId = String(slide.dataset.id || id);
+    if (slide.dataset.index != null) {
+      const ix = Number(slide.dataset.index);
+      if (Number.isFinite(ix)) state.feedIndex = ix;
+    }
+
+    const stayLocked =
+      opts.stayLocked === true ||
+      (opts.stayLocked !== false &&
+        (isOrientLockActive() ||
+          !!state._landscapeImmersive ||
+          !!state._orientShieldOn));
+
+    state._programmaticScroll = true;
+    clearTimeout(state._pinScrollClearT);
+
+    if (stayLocked) {
+      lockScrollerPhysics(scroller);
+      document.body.classList.add("lmw-viewport-freeze");
+    } else {
+      try {
+        scroller.style.scrollSnapType = "none";
+      } catch (_) {}
+    }
+
+    const landscape = document.body.classList.contains("lmw-phone-landscape");
+    if (landscape) {
+      scroller.scrollTop = 0;
+    } else {
+      void scroller.offsetHeight;
+      let top = slide.offsetTop;
+      const ch = scroller.clientHeight || window.innerHeight || 1;
+      const ix = Number(slide.dataset.index);
+      if (Number.isFinite(ix) && ix > 0 && top === 0) top = ix * ch;
+      scroller.scrollTop = top;
+    }
+
+    if (!stayLocked) {
+      // Restore snap immediately after pin — keep scroll enabled
+      try {
+        scroller.style.scrollSnapType = "";
+        if (scroller.style.overflowY === "hidden") scroller.style.overflowY = "";
+        delete scroller.dataset.orientLock;
+      } catch (_) {}
+      state._pinScrollClearT = setTimeout(() => {
+        state._programmaticScroll = false;
+      }, 80);
+    }
+    return slide;
+  }
+
+  function hardSnapToFeedId(forceId, opts = {}) {
+    return pinFeedIdOnce(forceId, opts);
+  }
+
+  function pinActiveFeedSlide(forceId) {
+    // Default: soft pin that does not freeze the scroller
+    return pinFeedIdOnce(forceId, { stayLocked: false });
+  }
+
+  /** Emergency / cold-start / stuck-after-rotate: always re-enable feed scrolling + UI. */
+  function forceEnableFeedScroll() {
+    const scroller = document.getElementById("feedScroller");
+    const portrait =
+      !state._landscapeImmersive &&
+      !document.body.classList.contains("lmw-phone-landscape");
+    try {
+      document.body.classList.remove("lmw-viewport-freeze");
+      document.body.classList.remove("lmw-orient-shielded");
+      const shield = document.getElementById("lmwOrientShield");
+      if (shield) shield.classList.remove("is-on");
+      // If video still on shield, put it back on committed slide
+      const id =
+        getLockedFeedId() || getCommittedFeedId() || state.activeFeedId;
+      const slide =
+        id != null
+          ? document.querySelector(`#feedScroller .snap-slide[data-id="${id}"]`)
+          : null;
+      const v =
+        (shield && (shield.querySelector("video") || shield.querySelector("img"))) ||
+        state._feedPlayer ||
+        document.getElementById("lmwFeedPlayer");
+      if (slide && v) {
+        try {
+          if (v.tagName === "VIDEO") {
+            mountFeedPlayer(slide);
+            applyMediaStageFit(v);
+            if (v.paused && v.dataset.userPaused !== "1") {
+              try {
+                softResumeFeedVideo(v);
+              } catch (_) {}
+            }
+          } else if (v.tagName === "IMG") {
+            const stage = slide.querySelector(".media-stage");
+            if (stage && v.parentNode !== stage) {
+              const loading = stage.querySelector(".media-loading");
+              if (loading) loading.after(v);
+              else stage.insertBefore(v, stage.firstChild);
+            }
+            applyMediaStageFit(v);
+          }
+        } catch (_) {}
+      }
+      // Orphan media left on shield after is-on removed → black feed
+      if (shield) {
+        try {
+          [...shield.childNodes].forEach((n) => {
+            if (n && n.id !== "lmwFeedPlayer" && n !== state._feedPlayer) {
+              try {
+                n.remove();
+              } catch (_) {}
+            }
+          });
+        } catch (_) {}
+      }
+      unlockScrollerPhysics(scroller);
+      if (scroller) {
+        scroller.style.overflowY = "";
+        scroller.style.scrollSnapType = "";
+        scroller.style.touchAction = "";
+        delete scroller.dataset.orientLock;
+      }
+    } catch (_) {}
+    if (portrait) {
+      unlockFeedId();
+      state._orientLockActive = false;
+      // Landscape entry hides chrome; portrait must show UI again unless user hid it
+      if (state._fsRestore) {
+        setChromeHidden(!!state._fsRestore.chromeHidden);
+        state._fsRestore = null;
+      } else if (!isChromeHidden()) {
+        /* already visible */
+      } else {
+        // Stuck after L→P with chrome still hidden from immersive
+        setChromeHidden(false);
+      }
+      // Pin committed slide without re-freezing
+      try {
+        pinFeedIdOnce(getCommittedFeedId() || state.activeFeedId, {
+          stayLocked: false,
+        });
+      } catch (_) {}
+    }
+    state._viewportResizing = false;
+    state._programmaticScroll = false;
+    state._userScrollPending = false;
+    state._feedScrolling = false;
+    state._orientShieldOn = false;
+    resetPlaybackGuard(0);
+  }
+
+  /**
+   * After viewport settles, apply landscape shell from final geometry only.
+   * Prevents intermediate L↔P flicker from leaving immersive stuck on portrait.
+   */
+  function reconcilePhoneShellFromProfile(vp) {
+    const profile = vp || detectViewportProfile();
+    if (profile.isPhoneLandscape || profile.isHeadset) {
+      if (!state._landscapeImmersive) {
+        enterPhoneLandscapeImmersive();
+      } else {
+        document.body.classList.add("lmw-phone-landscape");
+        markFrozenSlide(getLockedFeedId() || getCommittedFeedId());
+      }
+      return true;
+    }
+    // Portrait (or non-phone): leave immersive if still on
+    if (
+      state._landscapeImmersive ||
+      document.body.classList.contains("lmw-phone-landscape")
+    ) {
+      // shield only if a real orient session is mid-flight (not post-unlock cleanup)
+      leavePhoneLandscapeImmersive({
+        shield: !!state._orientLockActive && !state._orientFinishing,
+      });
+    } else {
+      document.body.classList.remove("lmw-phone-landscape");
+      state._landscapeImmersive = false;
+    }
+    return false;
+  }
+
+  /**
+   * Instant freeze on real rotate only (before scroll can rewrite active id).
+   */
+  function freezeViewportNow(reason) {
+    const scroller = document.getElementById("feedScroller");
+    const keepId = lockFeedId(null, reason || "viewport");
+    state._orientLockActive = true;
+    state._orientLockId = keepId;
+    if (!state._orientLockGen) state._orientLockGen = 0;
+    state._viewportResizing = true;
+    state._feedScrolling = false;
+    state._userScrollPending = false;
+    document.body.classList.add("lmw-viewport-freeze");
+    lockScrollerPhysics(scroller);
+    showOrientShield();
+    pinFeedIdOnce(keepId, { stayLocked: true });
+    return keepId;
+  }
+
+  function beginOrientLock(reason, targetOrient) {
+    // Same in-flight session: keep gen, do not restart (restart = UI flash)
+    if (
+      state._orientLockActive &&
+      targetOrient &&
+      state._orientTarget === targetOrient
+    ) {
+      freezeViewportNow(reason || "orient-keep");
+      return state._orientLockGen || 1;
+    }
+    state._orientLockGen = (state._orientLockGen || 0) + 1;
+    state._orientTarget = targetOrient || null;
+    state._orientFinishing = false;
+    // Real new orient: cancel grace so shield can show
+    state._orientGraceUntil = 0;
+    freezeViewportNow(reason || "orient");
+    return state._orientLockGen;
+  }
+
+  /**
+   * End orient: pin under shield, then drop shield + unlock in one cut.
+   * Portrait ALWAYS force-enables scroll + UI (L→P was leaving freeze/shield/chrome stuck).
+   */
+  function endOrientLock(gen, opts = {}) {
+    if (gen != null && gen !== state._orientLockGen) return;
+    if (state._orientFinishing && opts.force !== true) return;
+    state._orientFinishing = true;
+
+    const scroller = document.getElementById("feedScroller");
+    const keepId = getLockedFeedId() || getCommittedFeedId() || state.activeFeedId;
+
+    // Prefer explicit opts; else final geometry after settle
+    let land =
+      opts.landscape != null
+        ? !!opts.landscape
+        : !!state._landscapeImmersive ||
+          document.body.classList.contains("lmw-phone-landscape");
+    if (opts.unlock === true) land = false;
+    if (opts.unlock === false) land = true;
+
+    document.body.classList.add("lmw-viewport-freeze");
+    lockScrollerPhysics(scroller);
+    pinFeedIdOnce(keepId, { stayLocked: true });
+
+    if (land) {
+      // Still landscape: reveal into single-slide stage under shield, then drop shield
+      markFrozenSlide(keepId);
+      state._orientLockActive = false;
+      hideOrientShield();
+      document.body.classList.remove("lmw-viewport-freeze");
+      document.body.classList.remove("lmw-orient-shielded");
+      state._viewportResizing = false;
+      state._userScrollPending = false;
+      state._programmaticScroll = false;
+      state._orientShieldOn = false;
+      state._orientFinishing = false;
+      markOrientSettled("landscape");
+      resetPlaybackGuard(0);
+      try {
+        // Bind transport only — stay hidden until user single-taps
+        ensureLandControls();
+        syncLandControlsVideo();
+        hideLandControls();
+        state._landSuppressAutoShowUntil = Date.now() + 800;
+      } catch (_) {}
+      return;
+    }
+
+    // Portrait: one frame under shield then full unlock (avoid double-rAF race with new locks)
+    const finishPortrait = () => {
+      // Allow finish even if a size-only event tried to keep same gen; abort only on NEW gen
+      if (gen != null && gen !== state._orientLockGen) return;
+      // Ensure shell is not stuck landscape
+      document.body.classList.remove("lmw-phone-landscape");
+      state._landscapeImmersive = false;
+      if (scroller) {
+        const slide = scroller.querySelector(`.snap-slide[data-id="${keepId}"]`);
+        if (slide) {
+          void scroller.offsetHeight;
+          let top = slide.offsetTop;
+          const ch = scroller.clientHeight || window.innerHeight || 1;
+          const ix = Number(slide.dataset.index);
+          if (Number.isFinite(ix) && ix > 0 && top === 0) top = ix * ch;
+          scroller.scrollTop = top;
+        }
+      }
+      // hideOrientShield must not re-freeze while we unlock
+      state._orientLockActive = false;
+      hideOrientShield();
+      unlockFeedId();
+      forceEnableFeedScroll();
+      pinFeedIdOnce(keepId, { stayLocked: false });
+      state._postOrientReload = true;
+      state._orientFinishing = false;
+      markOrientSettled("portrait");
+    };
+
+    requestAnimationFrame(finishPortrait);
+  }
+
   function enterPhoneLandscapeImmersive() {
+    // Already immersive: do not re-freeze/re-shield (causes UI flash)
+    if (state._landscapeImmersive && document.body.classList.contains("lmw-phone-landscape")) {
+      markFrozenSlide(getLockedFeedId() || getCommittedFeedId());
+      const scroller = document.getElementById("feedScroller");
+      if (scroller) scroller.scrollTop = 0;
+      try {
+        ensureLandControls();
+        syncLandControlsVideo();
+        hideLandControls();
+      } catch (_) {}
+      return getLockedFeedId() || getCommittedFeedId();
+    }
+    const freezeId =
+      state._orientLockActive && state._orientShieldOn
+        ? lockFeedId(null, "landscape")
+        : freezeViewportNow("landscape");
     if (state._fsRestore == null) {
       state._fsRestore = { chromeHidden: isChromeHidden() };
     }
     document.body.classList.add("lmw-phone-landscape");
     setChromeHidden(true);
     state._landscapeImmersive = true;
-    state._landscapeFsRequested = true;
+    state._landscapeFsRequested = false;
     state._pendingLandscapeFs = false;
-
-    // Optional browser FS on container only (never the <video>)
+    markFrozenSlide(freezeId);
     const scroller = document.getElementById("feedScroller");
-    const tryFs = (el) => {
-      if (!el) return Promise.reject(new Error("no el"));
-      try {
-        if (el.requestFullscreen) return el.requestFullscreen();
-        if (el.webkitRequestFullscreen) return el.webkitRequestFullscreen();
-      } catch (e) {
-        return Promise.reject(e);
-      }
-      return Promise.reject(new Error("no fs api"));
-    };
-    // Fire-and-forget; CSS immersive already applied even if FS is blocked
-    tryFs(scroller)
-      .catch(() => tryFs(document.documentElement))
-      .catch(() => {});
+    if (scroller) scroller.scrollTop = 0;
+    pinFeedIdOnce(freezeId, { stayLocked: true });
+    try {
+      ensureLandControls();
+      syncLandControlsVideo();
+      hideLandControls();
+      state._landSuppressAutoShowUntil = Date.now() + 800;
+    } catch (_) {}
+    return freezeId;
   }
 
-  function leavePhoneLandscapeImmersive() {
+  function leavePhoneLandscapeImmersive(opts = {}) {
+    // Do NOT re-open shield if we are finishing unlock or in grace — that is the
+    // "UI shows then vanishes" flash. Shield is already up during a real orient lock.
+    const wantShield = opts.shield !== false && !!state._orientLockActive && !state._orientFinishing;
+    if (wantShield && !state._orientShieldOn) showOrientShield();
+    try {
+      tearDownLandControls();
+    } catch (_) {}
     document.body.classList.remove("lmw-phone-landscape");
     state._landscapeImmersive = false;
     state._landscapeFsRequested = false;
     state._pendingLandscapeFs = false;
+    if (state._orientLockActive) {
+      document.body.classList.add("lmw-viewport-freeze");
+    }
     if (state._fsRestore) {
       setChromeHidden(!!state._fsRestore.chromeHidden);
       state._fsRestore = null;
@@ -224,47 +831,10 @@
     return exitDocFullscreen().catch(() => {});
   }
 
-  /**
-   * Pin the active snap-slide after viewport geometry changes so scrollTop
-   * (pixel-based) does not land on a different item when 100dvh resizes.
-   */
-  function pinActiveFeedSlide(forceId) {
-    const scroller = $("#feedScroller");
-    if (!scroller || state.view !== "feed") return null;
-    const id = forceId != null ? forceId : state.activeFeedId;
-    let slide = null;
-    if (id != null) {
-      slide = scroller.querySelector(`.snap-slide[data-id="${id}"]`);
-    }
-    if (!slide) {
-      const idx = state.feedIndex | 0;
-      slide = scroller.querySelector(`.snap-slide[data-index="${idx}"]`);
-    }
-    if (!slide) return null;
-    state._programmaticScroll = true;
-    try {
-      // Prefer exact offsetTop after layout; scrollIntoView can land mid-snap
-      const top = slide.offsetTop;
-      scroller.scrollTop = top;
-      if (typeof scroller.scrollTo === "function") {
-        scroller.scrollTo(0, top);
-      }
-    } catch (_) {
-      try {
-        slide.scrollIntoView({ block: "start", behavior: "auto" });
-      } catch (__) {}
-    }
-    clearTimeout(state._pinScrollClearT);
-    state._pinScrollClearT = setTimeout(() => {
-      state._programmaticScroll = false;
-    }, 450);
-    return slide;
-  }
-
   function reapplyActiveMediaFit() {
     const scroller = $("#feedScroller");
     if (!scroller) return;
-    const id = state.activeFeedId;
+    const id = getClipFreezeId() || state.activeFeedId;
     const slide =
       (id != null && scroller.querySelector(`.snap-slide[data-id="${id}"]`)) ||
       scroller.querySelector(`.snap-slide[data-index="${state.feedIndex | 0}"]`);
@@ -276,7 +846,12 @@
   function getActiveFeedSlideEl(keepId) {
     const scroller = $("#feedScroller");
     if (!scroller) return null;
-    const id = keepId != null ? keepId : state.activeFeedId;
+    const id =
+      keepId != null
+        ? keepId
+        : state._orientLockActive && state._orientLockId != null
+          ? state._orientLockId
+          : state.activeFeedId;
     if (id != null) {
       const el = scroller.querySelector(`.snap-slide[data-id="${id}"]`);
       if (el) return el;
@@ -288,254 +863,271 @@
     return (
       state._feedPlayer ||
       document.getElementById("lmwFeedPlayer") ||
+      document.querySelector("#lmwOrientShield video") ||
       document.querySelector("#feedScroller .media-stage video")
     );
   }
 
   /**
-   * Hard resume after orientation / immersive exit.
-   * Must NOT fullscreen the video; must remount into stage; must guard against
-   * scroll/IO pausing the clip for ~1–2s after layout settles.
+   * Wait until viewport size/orientation stops changing (iOS fires many resizes).
+   */
+  function waitViewportStable(stableMs = 220, timeoutMs = 1400) {
+    return new Promise((resolve) => {
+      let last = viewportKey();
+      let lastChange = Date.now();
+      const t0 = Date.now();
+      const step = () => {
+        const k = viewportKey();
+        if (k !== last) {
+          last = k;
+          lastChange = Date.now();
+        }
+        if (Date.now() - lastChange >= stableMs || Date.now() - t0 >= timeoutMs) {
+          resolve(last);
+          return;
+        }
+        setTimeout(step, 40);
+      };
+      setTimeout(step, 40);
+    });
+  }
+
+  /**
+   * Soft resume after orientation / immersive exit — SAME clip only.
+   * Never activate a different slide; remount singleton; avoid load() if possible.
+   */
+  /**
+   * Resume SAME clip under shield (do not remount off shield until hideOrientShield).
    */
   function resumeActiveFeedAfterLayout(keepId, opts = {}) {
     if (state.view !== "feed") return;
-    const hard = !!opts.hard;
-    const id = keepId != null ? keepId : state.activeFeedId;
+    const id =
+      getLockedFeedId() ||
+      getCommittedFeedId() ||
+      (keepId != null ? keepId : null) ||
+      state.activeFeedId;
     const resumeEpoch = (state._layoutResumeEpoch = (state._layoutResumeEpoch || 0) + 1);
-    armPlaybackGuard(hard ? 2400 : 1800);
-    state._viewportResizing = true;
+    state._userScrollPending = false;
     clearTimeout(state._layoutResumeRetryT);
 
     if (id != null) state.activeFeedId = String(id);
+    // Pin scroller only — video stays on shield if shield is up
+    pinFeedIdOnce(id, { stayLocked: true });
 
-    // Multi-pass pin: layout often not stable on first frame after rotate
-    const pinPass = (n) => {
-      if (resumeEpoch !== state._layoutResumeEpoch) return null;
-      const slide = pinActiveFeedSlide(id);
-      reapplyActiveMediaFit();
-      if (n < 3) {
-        requestAnimationFrame(() => pinPass(n + 1));
+    const v = getSharedFeedVideo();
+    const done = () => {
+      if (resumeEpoch !== state._layoutResumeEpoch) return;
+      if (typeof opts.onDone === "function") {
+        try {
+          opts.onDone();
+        } catch (_) {}
       }
-      return slide;
     };
-    let slide = pinPass(0) || getActiveFeedSlideEl(id);
 
-    // Ensure singleton is inside the correct stage
-    let v = getSharedFeedVideo();
-    if (slide) {
-      try {
-        v = mountFeedPlayer(slide) || v;
-      } catch (_) {}
-    }
     if (!v || v.tagName !== "VIDEO") {
-      state._viewportResizing = false;
+      done();
       return;
     }
 
-    // Exit immersive / rotate pause is never a deliberate user pause
     v.dataset.userPaused = "0";
     try {
       v.setAttribute("playsinline", "");
       v.setAttribute("webkit-playsinline", "");
       v.playsInline = true;
-      // Ensure we are NOT stuck in native video fullscreen layer
-      if (typeof v.webkitExitFullscreen === "function" && v.webkitDisplayingFullscreen) {
-        try {
-          v.webkitExitFullscreen();
-        } catch (_) {}
-      }
     } catch (_) {}
 
-    try {
-      pauseOtherFeedVideos(v);
-    } catch (_) {}
-    applyMediaStageFit(v);
-    if (slide) {
-      setSlideLoading(slide, false);
-      hideSlideVideoChrome(slide);
+    // Soft keep-alive on shield; remount happens in hideOrientShield
+    const gen = Number(v.dataset.playGen || "0") || bumpVideoPlayGen(v);
+    if (v.paused) {
+      playVideoRobust(v, gen).finally(() => {
+        if (!v.paused) v.classList.add("is-ready");
+        done();
+      });
+    } else {
+      v.classList.add("is-ready");
+      done();
     }
+  }
 
-    // Single gen for this resume session — concurrent ticks share it
-    const gen = bumpVideoPlayGen(v);
-
-    const finishGuard = () => {
-      if (resumeEpoch !== state._layoutResumeEpoch) return;
-      state._viewportResizing = false;
-    };
-
-    let n = 0;
-    let inFlight = false;
-    const tick = () => {
-      if (resumeEpoch !== state._layoutResumeEpoch) return;
-      if (state.view !== "feed") {
-        finishGuard();
-        return;
-      }
-      n += 1;
-
-      if (n === 1 || n === 3 || n === 6) {
-        slide = pinActiveFeedSlide(id) || slide || getActiveFeedSlideEl(id);
-        if (slide) {
-          try {
-            v = mountFeedPlayer(slide) || v || getSharedFeedVideo();
-          } catch (_) {
-            v = getSharedFeedVideo();
-          }
-        }
-      }
-
-      if (!v || !v.isConnected) {
-        v = getSharedFeedVideo();
-        if (slide && v) {
-          try {
-            mountFeedPlayer(slide);
-          } catch (_) {}
-        }
-      }
-      if (!v) {
-        if (n < 10) state._layoutResumeRetryT = setTimeout(tick, 150);
-        else finishGuard();
-        return;
-      }
-
-      v.dataset.userPaused = "0";
-      // Keep playGen stable unless something else invalidated us
-      if (String(v.dataset.playGen) !== String(gen)) {
-        // A newer activate owns the element — stop this resume chain
-        finishGuard();
-        return;
-      }
-      applyMediaStageFit(v);
-
-      if (inFlight) {
-        if (n < 12) state._layoutResumeRetryT = setTimeout(tick, 120);
-        return;
-      }
-      inFlight = true;
-      playVideoRobust(v, gen)
-        .then((ok) => {
-          inFlight = false;
-          if (resumeEpoch !== state._layoutResumeEpoch) return;
-          if ((!ok || v.paused) && v.dataset.userPaused !== "1") {
-            softResumeFeedVideo(v);
-          }
-          if (!v.paused) {
-            v.classList.add("is-ready");
-            if (slide) {
-              setSlideLoading(slide, false);
-              hideSlideVideoChrome(slide);
-            }
-            pinActiveFeedSlide(id);
-            // Stable after a couple of successes
-            if (n >= 2) {
-              finishGuard();
-              return;
-            }
-          }
-          if (n < 12) {
-            state._layoutResumeRetryT = setTimeout(tick, 110 + n * 60);
-          } else {
-            finishGuard();
-            if (slide && slide.isConnected && String(v.dataset.playGen) === String(gen)) {
-              try {
-                activateFeedSlide(slide, { force: true });
-              } catch (_) {}
-            }
-          }
-        })
-        .catch(() => {
-          inFlight = false;
-          if (resumeEpoch !== state._layoutResumeEpoch) return;
-          if (n < 12) state._layoutResumeRetryT = setTimeout(tick, 150);
-          else finishGuard();
-        });
-    };
-
-    // Staggered attempts (immediate + delayed) — first play after rotate often aborts
-    tick();
-    state._layoutResumeRetryT = setTimeout(tick, 160);
+  function viewportKey(vp) {
+    const p = vp || detectViewportProfile();
+    return `${p.profile}|${p.orientation}|${p.width}|${p.height}`;
   }
 
   /**
-   * Handle rotate / browser chrome resize:
-   * 1) freeze slide switches  2) pin active  3) re-fit
-   * 4) phone landscape → CSS immersive (+ optional container FS); portrait → leave
+   * Handle rotate after freezeViewportNow already ran.
+   * ONLY real orientation flips start a lock session.
+   * Size/chrome noise must never re-shield (that was "UI flash then gone").
    */
   function onViewportLayoutChange() {
     if (state.view !== "feed") {
       state._lastViewportKey = viewportKey();
       return;
     }
+    // Feed not interactive yet — never freeze (cold open was stuck unscrollable)
+    if (!state._feedScrollReady) {
+      state._lastViewportKey = viewportKey();
+      return;
+    }
     const vp = detectViewportProfile();
     const key = viewportKey(vp);
     const prevKey = state._lastViewportKey;
-    if (prevKey && key === prevKey) return;
-
-    const prevOrient = prevKey ? String(prevKey).split("|")[1] : "";
     const nextOrient = vp.orientation;
-    const orientChanged = !!prevOrient && prevOrient !== nextOrient;
-    // Ignore tiny chrome resize (address bar) when orientation unchanged
-    if (!orientChanged && prevKey) {
-      const prevParts = String(prevKey).split("|");
-      const prevProf = prevParts[0];
-      if (prevProf === vp.profile) {
-        const pw = Number(prevParts[2]) || 0;
-        const ph = Number(prevParts[3]) || 0;
-        if (pw && ph) {
-          const dw = Math.abs(pw - vp.width);
-          const dh = Math.abs(ph - vp.height);
-          // Only react if size jumped meaningfully (rotate / real resize)
-          if (dw < 80 && dh < 100) {
-            state._lastViewportKey = key;
-            return;
-          }
-        }
+    const settled = state._settledOrientation || "";
+    const prevOrient =
+      settled || (prevKey ? String(prevKey).split("|")[1] : "") || "";
+    const orientChanged = !!prevOrient && !!nextOrient && prevOrient !== nextOrient;
+    const nowLandscape = nextOrient === "landscape";
+    const wasLandscape = prevOrient === "landscape";
+    const inGrace = Date.now() < (Number(state._orientGraceUntil) || 0);
+
+    // ── Grace / size-only: never start a new shield session ──
+    if (!orientChanged) {
+      state._lastViewportKey = key;
+
+      // Mid real-orient session: only re-pin, do not bump gen / re-show shield
+      if (state._orientLockActive && !state._orientFinishing) {
+        pinFeedIdOnce(getLockedFeedId() || getCommittedFeedId(), {
+          stayLocked: true,
+        });
+        return;
+      }
+
+      // Stuck immersive flag while geometry is portrait
+      if (
+        (state._landscapeImmersive ||
+          document.body.classList.contains("lmw-phone-landscape")) &&
+        !vp.isPhoneLandscape &&
+        !nowLandscape
+      ) {
+        leavePhoneLandscapeImmersive({ shield: false });
+        forceEnableFeedScroll();
+        markOrientSettled("portrait");
+        return;
+      }
+
+      // Residual freeze/shield without an active session → clear
+      if (
+        !state._orientLockActive &&
+        (document.body.classList.contains("lmw-viewport-freeze") ||
+          document.body.classList.contains("lmw-orient-shielded") ||
+          (document.getElementById("feedScroller") || {}).style?.overflowY ===
+            "hidden")
+      ) {
+        forceEnableFeedScroll();
+      }
+      return;
+    }
+
+    // Real orient flip during grace is allowed (user rotated again quickly)
+    // Same target already in flight → do not restart session
+    if (
+      state._orientLockActive &&
+      state._orientTarget === nextOrient &&
+      !state._orientFinishing
+    ) {
+      state._lastViewportKey = key;
+      pinFeedIdOnce(getLockedFeedId() || getCommittedFeedId(), {
+        stayLocked: true,
+      });
+      return;
+    }
+
+    // Brief grace: ignore flaky intermediate flips that bounce back (iOS)
+    // unless matchMedia agrees and we're past a tiny debounce held by schedule()
+    if (inGrace && settled && nextOrient !== settled) {
+      // Require phone landscape detection to match claimed orient (anti-jitter)
+      if (nextOrient === "landscape" && !vp.isPhoneLandscape && !vp.isHeadset) {
+        state._lastViewportKey = key;
+        return;
+      }
+      if (nextOrient === "portrait" && vp.isPhoneLandscape) {
+        state._lastViewportKey = key;
+        return;
       }
     }
+
     state._lastViewportKey = key;
 
-    const keepId = state.activeFeedId;
-    armPlaybackGuard(orientChanged ? 2200 : 1200);
-    state._viewportResizing = true;
+    const lockGen = beginOrientLock(
+      nowLandscape ? "to-landscape" : "to-portrait",
+      nextOrient
+    );
+    const keepId = getLockedFeedId() || getCommittedFeedId();
     clearTimeout(state._viewportResizeT);
-
-    // —— Phone landscape: immersive UI (do not touch video FS) ——
-    if (vp.isPhoneLandscape) {
-      if (!state._landscapeImmersive) {
-        enterPhoneLandscapeImmersive();
-      }
-    } else if (vp.isPhone && !vp.landscape) {
-      if (state._landscapeImmersive || isDocumentFullscreen()) {
-        leavePhoneLandscapeImmersive();
-      } else {
-        document.body.classList.remove("lmw-phone-landscape");
-        state._landscapeImmersive = false;
-        state._landscapeFsRequested = false;
-        state._pendingLandscapeFs = false;
-        if (state._fsRestore) {
-          setChromeHidden(!!state._fsRestore.chromeHidden);
-          state._fsRestore = null;
+    clearTimeout(state._orientFinishT);
+    // Safety: never leave freeze/shield forever
+    clearTimeout(state._orientSafetyT);
+    state._orientSafetyT = setTimeout(() => {
+      if (state._orientLockGen !== lockGen) return;
+      try {
+        const finalVp = detectViewportProfile();
+        const land = reconcilePhoneShellFromProfile(finalVp);
+        if (land) {
+          endOrientLock(lockGen, { unlock: false, landscape: true, force: true });
+        } else {
+          endOrientLock(lockGen, { unlock: true, landscape: false, force: true });
+          forceEnableFeedScroll();
+          markOrientSettled("portrait");
         }
+      } catch (_) {
+        try {
+          leavePhoneLandscapeImmersive({ shield: false });
+        } catch (__) {}
+        forceEnableFeedScroll();
+        markOrientSettled(detectViewportProfile().orientation);
       }
+    }, 1600);
+
+    // Immediate shell guess (reconcile again after stable)
+    if (vp.isPhoneLandscape || nowLandscape) {
+      enterPhoneLandscapeImmersive();
+    } else if (wasLandscape || state._landscapeImmersive || isDocumentFullscreen()) {
+      leavePhoneLandscapeImmersive({ shield: true });
+    } else {
+      document.body.classList.remove("lmw-phone-landscape");
+      state._landscapeImmersive = false;
     }
 
-    const finish = () => {
-      resumeActiveFeedAfterLayout(keepId, { hard: orientChanged });
-    };
+    pinFeedIdOnce(keepId, { stayLocked: true });
 
-    requestAnimationFrame(() => {
-      requestAnimationFrame(() => {
-        pinActiveFeedSlide(keepId);
-        reapplyActiveMediaFit();
-        state._viewportResizeT = setTimeout(finish, orientChanged ? 260 : 140);
+    waitViewportStable(160, 800).then(() => {
+      if (lockGen !== state._orientLockGen) return;
+      clearTimeout(state._orientSafetyT);
+      const finalVp = detectViewportProfile();
+      state._lastViewportKey = viewportKey(finalVp);
+      const land = reconcilePhoneShellFromProfile(finalVp);
+      const id = getLockedFeedId() || getCommittedFeedId() || keepId;
+      pinFeedIdOnce(id, { stayLocked: true });
+      resumeActiveFeedAfterLayout(id, {
+        hard: true,
+        onDone: () => {
+          if (lockGen !== state._orientLockGen) return;
+          const vp2 = detectViewportProfile();
+          const land2 = reconcilePhoneShellFromProfile(vp2);
+          endOrientLock(lockGen, {
+            unlock: !land2,
+            landscape: land2,
+          });
+          if (!land2) {
+            requestAnimationFrame(() => {
+              if (state._orientLockGen !== lockGen) return;
+              if (
+                document.body.classList.contains("lmw-viewport-freeze") ||
+                document.body.classList.contains("lmw-orient-shielded") ||
+                document.body.classList.contains("lmw-phone-landscape") ||
+                state._orientShieldOn
+              ) {
+                document.body.classList.remove("lmw-phone-landscape");
+                state._landscapeImmersive = false;
+                forceEnableFeedScroll();
+                markOrientSettled("portrait");
+              }
+            });
+          }
+        },
       });
     });
-  }
-
-  function viewportKey(vp) {
-    const p = vp || detectViewportProfile();
-    // profile|orientation|w|h — parsed by onViewportLayoutChange
-    return `${p.profile}|${p.orientation}|${p.width}|${p.height}`;
   }
 
   function bindViewportLayout() {
@@ -543,82 +1135,140 @@
     window.__lmwViewportBound = true;
     state._lastViewportKey = viewportKey();
     let debounceT = null;
+
+    const freezeImmediate = (reason) => {
+      if (state.view !== "feed" || !state._feedScrollReady) return;
+      // During post-settle grace, do not flash shield for residual events
+      if (
+        Date.now() < (Number(state._orientGraceUntil) || 0) &&
+        !state._orientLockActive
+      ) {
+        return;
+      }
+      freezeViewportNow(reason || "event");
+    };
+
     const schedule = () => {
+      if (!state._feedScrollReady) {
+        state._lastViewportKey = viewportKey();
+        return;
+      }
       clearTimeout(debounceT);
       debounceT = setTimeout(() => {
         try {
           onViewportLayoutChange();
         } catch (e) {
           console.warn("viewport layout", e);
-          state._viewportResizing = false;
+          forceEnableFeedScroll();
         }
       }, 60);
     };
-    window.addEventListener("resize", schedule, { passive: true });
-    window.addEventListener("orientationchange", () => {
-      // Fire earlier than resize on many phones
-      armPlaybackGuard(2500);
-      state._viewportResizing = true;
+
+    const onPossiblyOrient = (reason) => {
+      // Only freeze on real orientation flip — not toolbar/visualViewport noise
+      try {
+        const vp = detectViewportProfile();
+        const settled = state._settledOrientation || "";
+        const prev = state._lastViewportKey;
+        const po = settled || (prev ? String(prev).split("|")[1] : "");
+        const no = vp.orientation;
+        if (po && no && po !== no) {
+          // Real flip: freeze only if not already handling this target
+          if (!(state._orientLockActive && state._orientTarget === no)) {
+            freezeImmediate(reason);
+          }
+        } else if (state._orientLockActive && !state._orientFinishing) {
+          // Mid orient settle: keep scroller frozen only (do not re-shield)
+          document.body.classList.add("lmw-viewport-freeze");
+          lockScrollerPhysics(document.getElementById("feedScroller"));
+        }
+      } catch (_) {}
       schedule();
-    });
+    };
+
+    window.addEventListener("resize", () => onPossiblyOrient("resize"), { passive: true });
+    window.addEventListener(
+      "orientationchange",
+      () => {
+        if (!state._feedScrollReady) return;
+        // orientationchange alone is noisy on iOS; only freeze if matchMedia flipped
+        try {
+          const vp = detectViewportProfile();
+          const settled = state._settledOrientation || "";
+          if (settled && vp.orientation && settled !== vp.orientation) {
+            freezeImmediate("orientationchange");
+          } else if (!settled) {
+            freezeImmediate("orientationchange");
+          }
+        } catch (_) {
+          freezeImmediate("orientationchange");
+        }
+        schedule();
+      },
+      { passive: true }
+    );
     try {
       if (window.visualViewport) {
-        window.visualViewport.addEventListener("resize", schedule, { passive: true });
+        window.visualViewport.addEventListener(
+          "resize",
+          () => onPossiblyOrient("visualViewport"),
+          { passive: true }
+        );
       }
     } catch (_) {}
 
     const onFsChange = () => {
-      // Only handle *exit* of container FS (we never FS the video)
       if (isDocumentFullscreen()) return;
-      const keepId = state.activeFeedId;
+      freezeImmediate("fs-exit");
+      const lockGen = state._orientLockGen;
+      const keepId = getLockedFeedId() || getCommittedFeedId();
       const vp = detectViewportProfile();
-      armPlaybackGuard(2000);
-      // If still phone-landscape, keep CSS immersive even without browser FS
       if (vp.isPhoneLandscape) {
-        document.body.classList.add("lmw-phone-landscape");
-        state._landscapeImmersive = true;
-        setChromeHidden(true);
+        enterPhoneLandscapeImmersive();
       } else {
-        document.body.classList.remove("lmw-phone-landscape");
-        state._landscapeImmersive = false;
-        state._landscapeFsRequested = false;
-        state._pendingLandscapeFs = false;
-        if (state._fsRestore) {
-          setChromeHidden(!!state._fsRestore.chromeHidden);
-          state._fsRestore = null;
-        }
+        leavePhoneLandscapeImmersive();
       }
       clearTimeout(state._fsExitResumeT);
       state._fsExitResumeT = setTimeout(() => {
-        resumeActiveFeedAfterLayout(keepId, { hard: true });
+        resumeActiveFeedAfterLayout(keepId, {
+          hard: true,
+          onDone: () =>
+            endOrientLock(lockGen, {
+              unlock: !detectViewportProfile().isPhoneLandscape,
+            }),
+        });
       }, 80);
     };
     document.addEventListener("fullscreenchange", onFsChange);
     document.addEventListener("webkitfullscreenchange", onFsChange);
 
-    // Safety: if any code path ever used webkit video FS historically, recover
     const bindVideoFsHooks = (v) => {
       if (!v || v.dataset.fsHooks === "1") return;
       v.dataset.fsHooks = "1";
-      const recover = () => {
-        armPlaybackGuard(2000);
-        const keepId = state.activeFeedId;
-        setTimeout(() => resumeActiveFeedAfterLayout(keepId, { hard: true }), 50);
-      };
-      v.addEventListener("webkitendfullscreen", recover);
+      v.addEventListener("webkitendfullscreen", () => {
+        freezeImmediate("webkit-fs");
+        const lockGen = state._orientLockGen;
+        const keepId = getLockedFeedId();
+        setTimeout(() => {
+          resumeActiveFeedAfterLayout(keepId, {
+            hard: true,
+            onDone: () =>
+              endOrientLock(lockGen, {
+                unlock: !detectViewportProfile().isPhoneLandscape,
+              }),
+          });
+        }, 40);
+      });
       v.addEventListener("webkitbeginfullscreen", () => {
-        // Native video FS is hostile — mark so we hard-recover on end
-        state._nativeVideoFs = true;
-        armPlaybackGuard(5000);
+        freezeImmediate("webkit-fs-begin");
       });
     };
-    // Hook current + future singleton
     const v0 = getSharedFeedVideo();
     if (v0) bindVideoFsHooks(v0);
     state._bindVideoFsHooks = bindVideoFsHooks;
   }
 
-  /** Stage tap: ensure landscape immersive is on (CSS); never video FS. */
+  /** Stage tap: ensure landscape immersive is on (CSS); container FS only on gesture. */
   function tryPendingLandscapeFullscreen() {
     const vp = detectViewportProfile();
     if (!vp.isPhoneLandscape) {
@@ -628,7 +1278,7 @@
     if (!state._landscapeImmersive) {
       enterPhoneLandscapeImmersive();
     }
-    // User gesture: try container FS if not already
+    // Optional container FS — user gesture only (not on auto-rotate)
     if (!isDocumentFullscreen()) {
       const scroller = document.getElementById("feedScroller");
       try {
@@ -636,12 +1286,12 @@
         else if (document.documentElement.requestFullscreen) {
           document.documentElement.requestFullscreen().catch(() => {});
         }
+        state._landscapeFsRequested = true;
       } catch (_) {}
     }
-    // Gesture is a good time to force-resume if stuck paused
     const v = getSharedFeedVideo();
-    if (v && v.paused && v.dataset.userPaused !== "1") {
-      resumeActiveFeedAfterLayout(state.activeFeedId, { hard: true });
+    if (v && v.paused && v.dataset.userPaused !== "1" && !isOrientLockActive()) {
+      resumeActiveFeedAfterLayout(state.activeFeedId, { hard: false });
     }
   }
 
@@ -741,12 +1391,29 @@
     return v || null;
   }
 
-  function parkFeedPlayer() {
-    const v = getFeedPlayer(false);
-    if (!v) return;
-    try {
-      if (!v.paused) v.pause();
-    } catch (_) {}
+  /**
+   * ONE persistent <audio> for feed audio slides (parallel to video singleton).
+   * Keeps mute unlock across swipes the same way the video player does.
+   */
+  function getFeedAudioPlayer(create = true) {
+    if (state._feedAudioPlayer && state._feedAudioPlayer.tagName === "AUDIO") {
+      return state._feedAudioPlayer;
+    }
+    let a = document.getElementById("lmwFeedAudio");
+    if (!a && create) {
+      a = document.createElement("audio");
+      a.id = "lmwFeedAudio";
+      a.className = "feed-audio-player";
+      a.loop = true;
+      a.preload = "auto";
+      a.muted = !state.wantSound;
+      if (a.muted) a.setAttribute("muted", "");
+    }
+    if (a) state._feedAudioPlayer = a;
+    return a || null;
+  }
+
+  function feedPlayerParkEl() {
     let park = document.getElementById("lmwFeedPlayerPark");
     if (!park) {
       park = document.createElement("div");
@@ -756,9 +1423,33 @@
         "position:fixed;left:-9999px;top:0;width:1px;height:1px;overflow:hidden;opacity:0;pointer-events:none";
       document.body.appendChild(park);
     }
+    return park;
+  }
+
+  function parkFeedPlayer() {
+    const v = getFeedPlayer(false);
+    if (!v) return;
+    try {
+      if (!v.paused) v.pause();
+    } catch (_) {}
+    const park = feedPlayerParkEl();
     if (v.parentNode !== park) {
       try {
         park.appendChild(v);
+      } catch (_) {}
+    }
+  }
+
+  function parkFeedAudio() {
+    const a = getFeedAudioPlayer(false);
+    if (!a) return;
+    try {
+      if (!a.paused) a.pause();
+    } catch (_) {}
+    const park = feedPlayerParkEl();
+    if (a.parentNode !== park) {
+      try {
+        park.appendChild(a);
       } catch (_) {}
     }
   }
@@ -768,6 +1459,7 @@
     if (!slideEl) return null;
     const stage = slideEl.querySelector(".media-stage");
     if (!stage) return null;
+    parkFeedAudio();
     const v = getFeedPlayer(true);
     if (!v) return null;
     // Remove any leftover per-slide <video> shells (old markup / recovery)
@@ -791,11 +1483,53 @@
     } catch (_) {}
     bindFeedProgress(stage);
     applySoundToVideo(v);
+    if (document.body.classList.contains("lmw-phone-landscape")) {
+      try {
+        syncLandControlsVideo();
+      } catch (_) {}
+    }
     return v;
+  }
+
+  function mountFeedAudioPlayer(slideEl) {
+    if (!slideEl) return null;
+    const stage = slideEl.querySelector(".media-stage");
+    if (!stage) return null;
+    parkFeedPlayer();
+    const a = getFeedAudioPlayer(true);
+    if (!a) return null;
+    stage.querySelectorAll("audio").forEach((el) => {
+      if (el !== a) {
+        try {
+          el.remove();
+        } catch (_) {}
+      }
+    });
+    if (a.parentNode !== stage) {
+      const loading = stage.querySelector(".media-loading");
+      if (loading) loading.after(a);
+      else stage.insertBefore(a, stage.firstChild);
+    }
+    const clip = stage.getAttribute("data-src") || "";
+    if (clip) a.setAttribute("data-src", clip);
+    try {
+      delete stage.dataset.progressBound;
+    } catch (_) {}
+    bindFeedProgress(stage);
+    applySoundToVideo(a);
+    return a;
   }
 
   function isFeedPlayer(el) {
     return !!(el && (el.id === "lmwFeedPlayer" || el === state._feedPlayer));
+  }
+
+  function isFeedAudioPlayer(el) {
+    return !!(el && (el.id === "lmwFeedAudio" || el === state._feedAudioPlayer));
+  }
+
+  function isFeedMediaEl(el) {
+    return isFeedPlayer(el) || isFeedAudioPlayer(el);
   }
 
   /**
@@ -803,7 +1537,7 @@
    * never rewrites state.wantSound.
    */
   function setVideoMutedProg(v, muted) {
-    if (!v || v.tagName !== "VIDEO") return;
+    if (!v || (v.tagName !== "VIDEO" && v.tagName !== "AUDIO")) return;
     const gen = String((Number(v.dataset.progSoundGen || "0") || 0) + 1);
     v.dataset.progSoundGen = gen;
     v.dataset.progSound = "1";
@@ -824,7 +1558,7 @@
   }
 
   function applySoundToVideo(v) {
-    if (!v || v.tagName !== "VIDEO") return;
+    if (!v || (v.tagName !== "VIDEO" && v.tagName !== "AUDIO")) return;
     const wantMute = !state.wantSound;
     // Always drive element from preference (HTML muted attr can stick after load())
     setVideoMutedProg(v, wantMute);
@@ -839,7 +1573,7 @@
   }
 
   function applySoundToAllVideos() {
-    document.querySelectorAll("video").forEach(applySoundToVideo);
+    document.querySelectorAll("video, audio").forEach(applySoundToVideo);
     document.querySelectorAll("[data-act='mute']").forEach(syncMuteBtn);
   }
 
@@ -1100,7 +1834,9 @@
     const scroller = $("#feedScroller");
     if (!scroller || state.view !== "feed") return;
     if (state._feedScrolling || state._feedCompacting || state._feedActivating) return;
-    if (state._programmaticScroll || isPlaybackGuarded()) return;
+    if (state._programmaticScroll || isPlaybackGuarded() || isOrientLockActive()) return;
+    // Never prune DOM while clip identity is frozen (landscape session)
+    if (getClipFreezeId() != null || state._landscapeImmersive) return;
 
     const mobile = isMobileFeedClient();
     // Mobile: keep more history before first prune; fewer <video> still via strip
@@ -1260,6 +1996,9 @@
     if (hard && stage.getAttribute("data-kind") === "video") {
       return mountFeedPlayer(slideEl);
     }
+    if (hard && stage.getAttribute("data-kind") === "audio") {
+      return mountFeedAudioPlayer(slideEl);
+    }
     return null;
   }
 
@@ -1285,7 +2024,7 @@
    * (toggling mute was pausing mobile and feeding a reload loop when wantSound).
    */
   function softResumeFeedVideo(v) {
-    if (!v || v.tagName !== "VIDEO") return false;
+    if (!v || (v.tagName !== "VIDEO" && v.tagName !== "AUDIO")) return false;
     if (v.dataset.userPaused === "1") return false;
     try {
       if (v.paused) {
@@ -1306,6 +2045,7 @@
   function checkStuckFeedPlayback() {
     if (state.view !== "feed") return;
     if (state._feedScrolling || state._feedCompacting || state._feedActivating) return;
+    if (isPlaybackGuarded() || isOrientLockActive() || state._viewportResizing) return;
 
     const scroller = $("#feedScroller");
     if (!scroller) return;
@@ -1314,7 +2054,7 @@
       (id != null && scroller.querySelector(`.snap-slide[data-id="${id}"]`)) ||
       scroller.querySelector(`.snap-slide[data-index="${state.feedIndex | 0}"]`);
     if (!slide) return;
-    const v = slide.querySelector("video");
+    const v = slide.querySelector("video, audio");
     if (!v || v.dataset.userPaused === "1") {
       state._stuckSince = 0;
       return;
@@ -1507,6 +2247,10 @@
     // First open / hard rebuild: force-play current slide (scroll settle alone often misses first paint on iOS Edge)
     kickFeedAutoplay(keepId != null ? keepId : state.items[0]?.id);
     state.libDirty = false;
+    // Allow swipe — and clear any accidental freeze from early resize events
+    state._feedScrollReady = true;
+    state._lastViewportKey = viewportKey();
+    forceEnableFeedScroll();
   }
 
   /**
@@ -1656,12 +2400,11 @@
   function slideHtml(item, i) {
     const liked = item.liked ? "on" : "";
     const isImg = item.media_type === "image" || item.media_type === "gif";
+    const isAudio = item.media_type === "audio";
     const loading = `<div class="media-loading is-on" aria-hidden="false" aria-label="加载中"><div class="media-loading-spinner"></div></div>`;
-    // Video slides: NO per-slide <video>. Shared #lmwFeedPlayer is mounted on activate
+    // Video/audio slides: NO per-slide media element. Shared players mount on activate
     // so the browser keeps the unmuted "unlock" across swipes.
-    const media = isImg
-      ? `${loading}<img data-src="${fileUrl(item)}" alt="" draggable="false" />`
-      : `${loading}
+    const progressChrome = `${loading}
           <button type="button" class="media-play-toggle" aria-label="暂停" title="暂停/播放" tabindex="-1">${ICO.pause}</button>
           <div class="feed-progress" aria-hidden="true">
             <div class="feed-progress-track">
@@ -1670,9 +2413,17 @@
             </div>
             <div class="feed-progress-time"><span class="cur">0:00</span><span class="sep">/</span><span class="dur">0:00</span></div>
           </div>`;
+    const audioArt = `<div class="audio-stage-art" aria-hidden="true"><span class="audio-note">♪</span></div>`;
+    const media = isImg
+      ? `${loading}<img data-src="${fileUrl(item)}" alt="" draggable="false" />`
+      : isAudio
+        ? `${audioArt}${progressChrome}`
+        : progressChrome;
     const stageAttrs = isImg
       ? `class="media-stage" title="单击显示进度 · 双击隐藏/恢复界面"`
-      : `class="media-stage" data-kind="video" data-src="${fileUrl(item)}" title="单击显示进度 · 双击隐藏/恢复界面"`;
+      : isAudio
+        ? `class="media-stage media-stage-audio" data-kind="audio" data-src="${fileUrl(item)}" title="单击显示进度 · 双击隐藏/恢复界面"`
+        : `class="media-stage" data-kind="video" data-src="${fileUrl(item)}" title="单击显示进度 · 双击隐藏/恢复界面"`;
     return `<section class="snap-slide" data-index="${i}" data-id="${item.id}">
           <div ${stageAttrs}>${media}</div>
           <div class="hud">
@@ -2041,6 +2792,19 @@
   }
 
   async function onSlideActive(index) {
+    // Locked / freeze: refuse index drift
+    if (isFeedIdentityLocked()) {
+      const li =
+        state._lockedFeedIndex != null
+          ? state._lockedFeedIndex
+          : state.committedFeedIndex;
+      const lid = getLockedFeedId() || getCommittedFeedId();
+      if (lid != null && (index | 0) !== (li | 0)) {
+        state.feedIndex = li | 0;
+        state.activeFeedId = String(lid);
+        return;
+      }
+    }
     const prev = state.feedIndex;
     state.feedIndex = index | 0;
     state.dwellStart = Date.now();
@@ -2117,7 +2881,12 @@
    */
   function bindFeedProgress(stage) {
     if (!stage || stage.dataset.progressBound === "1") return;
-    const video = stage.querySelector("video");
+    // Shared video or audio singleton (rebound after mount)
+    const video =
+      stage.querySelector("video") ||
+      stage.querySelector("audio") ||
+      (stage.getAttribute("data-kind") === "audio" ? getFeedAudioPlayer(false) : null) ||
+      (stage.getAttribute("data-kind") === "video" ? getFeedPlayer(false) : null);
     const bar = stage.querySelector(".feed-progress");
     if (!video || !bar) return;
     stage.dataset.progressBound = "1";
@@ -2370,10 +3139,21 @@
       try {
         tryPendingLandscapeFullscreen();
       } catch (_) {}
-      if (!pointHitsVideo(e.clientX, e.clientY)) return;
+      // Landscape: primarily hit-layer toggles; this is backup when meta HUD is up
+      // (hit has pointer-events:none) — do not require video pixel hit (letterbox OK).
+      const land = document.body.classList.contains("lmw-phone-landscape");
+      if (!land && !pointHitsVideo(e.clientX, e.clientY)) return;
       if (tapTimer) clearTimeout(tapTimer);
       tapTimer = setTimeout(() => {
         tapTimer = null;
+        if (document.body.classList.contains("lmw-phone-landscape")) {
+          try {
+            state._landSuppressAutoShowUntil = 0;
+            if (isLandControlsOpen()) hideLandControls();
+            else showLandControls({ force: true, fromUser: true });
+          } catch (_) {}
+          return;
+        }
         // immersive: don't pop chrome when UI is hidden
         if (!isChromeHidden()) showChrome();
       }, 260);
@@ -2502,6 +3282,511 @@
     paint();
   }
 
+  /**
+   * Landscape fullscreen transport: play/pause + scrub + time.
+   * Independent of portrait HUD / is-chrome-hidden (landscape always hides those).
+   */
+  function ensureLandControls() {
+    let root = document.getElementById("lmwLandControls");
+    if (root) return root;
+    root = document.createElement("div");
+    root.id = "lmwLandControls";
+    root.className = "lmw-land-controls";
+    root.setAttribute("aria-hidden", "true");
+    root.innerHTML = `
+      <div class="lmw-land-hit" data-land="hit" aria-hidden="true"></div>
+      <button type="button" class="lmw-land-center" data-land="center" aria-label="播放" title="播放/暂停" tabindex="-1">${ICO.play}</button>
+      <div class="lmw-land-dock" data-land="dock">
+        <button type="button" class="lmw-land-play" data-land="play" aria-label="播放" title="播放/暂停">${ICO.play}</button>
+        <span class="lmw-land-time lmw-land-cur" data-land="cur">0:00</span>
+        <div class="lmw-land-track" data-land="track">
+          <div class="lmw-land-fill" data-land="fill"></div>
+          <div class="lmw-land-knob" data-land="knob"></div>
+        </div>
+        <span class="lmw-land-time is-dur" data-land="dur">0:00</span>
+      </div>`;
+    document.body.appendChild(root);
+    bindLandControls(root);
+    return root;
+  }
+
+  function isLandControlsOpen() {
+    const root = document.getElementById("lmwLandControls");
+    return !!(root && root.classList.contains("is-open"));
+  }
+
+  function getLandVideo() {
+    return (
+      state._landBoundVideo ||
+      getSharedFeedVideo() ||
+      document.querySelector("#feedScroller .snap-slide.is-feed-frozen video") ||
+      document.querySelector("#feedScroller .media-stage video")
+    );
+  }
+
+  function bindLandControls(root) {
+    if (!root || root.dataset.bound === "1") return;
+    root.dataset.bound = "1";
+
+    const hit = root.querySelector('[data-land="hit"]');
+    const centerBtn = root.querySelector('[data-land="center"]');
+    const playBtn = root.querySelector('[data-land="play"]');
+    const track = root.querySelector('[data-land="track"]');
+    const fill = root.querySelector('[data-land="fill"]');
+    const knob = root.querySelector('[data-land="knob"]');
+    const curEl = root.querySelector('[data-land="cur"]');
+    const durEl = root.querySelector('[data-land="dur"]');
+    const dock = root.querySelector('[data-land="dock"]');
+
+    let hideTimer = null;
+    let seeking = false;
+    let surfaceTapTimer = null;
+    let surfaceTouchMoved = false;
+    let surfaceTouchX = 0;
+    let surfaceTouchY = 0;
+    let lastSurfaceToggleAt = 0;
+    let scrubTarget = null;
+    let pendingSeekT = null;
+    let seekInFlight = false;
+    let lastSeekIssuedAt = 0;
+    let resumeAfterScrub = false;
+    const HIDE_MS = 3200;
+    const SEEK_PREVIEW_MS = 110;
+    const SEEK_EPS = 0.04;
+
+    const syncIcons = () => {
+      const v = getLandVideo();
+      const paused = !v || v.paused;
+      const html = paused ? ICO.play : ICO.pause;
+      const label = paused ? "播放" : "暂停";
+      if (playBtn) {
+        playBtn.innerHTML = html;
+        playBtn.setAttribute("aria-label", label);
+        playBtn.classList.toggle("is-paused", paused);
+      }
+      if (centerBtn) {
+        centerBtn.innerHTML = html;
+        centerBtn.setAttribute("aria-label", label);
+        centerBtn.classList.toggle("is-paused", paused);
+      }
+      root.classList.toggle("is-paused-hold", !!(paused && v && v.dataset.userPaused === "1"));
+    };
+
+    const paintFromTime = (t) => {
+      const v = getLandVideo();
+      const d = v && isFinite(v.duration) ? v.duration : 0;
+      const tt = typeof t === "number" && isFinite(t) ? t : 0;
+      const ratio = d > 0 ? Math.min(1, Math.max(0, tt / d)) : 0;
+      if (fill) fill.style.width = `${ratio * 100}%`;
+      if (knob) knob.style.left = `${ratio * 100}%`;
+      if (curEl) curEl.textContent = formatMediaTime(tt);
+      if (durEl) durEl.textContent = formatMediaTime(d);
+    };
+
+    const paint = () => {
+      if (seeking && scrubTarget != null) {
+        paintFromTime(scrubTarget);
+        return;
+      }
+      const v = getLandVideo();
+      paintFromTime(v ? v.currentTime || 0 : 0);
+      syncIcons();
+    };
+
+    const flushSeek = (force) => {
+      const v = getLandVideo();
+      if (!v || pendingSeekT == null) return;
+      const d = v.duration;
+      if (!d || !isFinite(d) || d <= 0) return;
+      const t = Math.min(Math.max(0, pendingSeekT), Math.max(0, d - 0.05));
+      const now = performance.now();
+      if (!force) {
+        if (seekInFlight) return;
+        if (now - lastSeekIssuedAt < SEEK_PREVIEW_MS) return;
+      }
+      const cur = v.currentTime || 0;
+      if (!force && Math.abs(cur - t) < SEEK_EPS && !seekInFlight) {
+        pendingSeekT = null;
+        return;
+      }
+      pendingSeekT = null;
+      seekInFlight = true;
+      lastSeekIssuedAt = now;
+      try {
+        v.currentTime = t;
+      } catch (_) {
+        seekInFlight = false;
+      }
+    };
+
+    const scheduleSeek = (t, force) => {
+      pendingSeekT = t;
+      if (force) flushSeek(true);
+      else if (!seekInFlight && performance.now() - lastSeekIssuedAt >= SEEK_PREVIEW_MS) {
+        flushSeek(false);
+      }
+    };
+
+    const onSeeked = () => {
+      seekInFlight = false;
+      if (pendingSeekT != null) flushSeek(seeking ? false : true);
+      if (!seeking) paint();
+    };
+
+    const hideLandChrome = () => {
+      if (seeking) return;
+      root.classList.remove("is-open");
+      root.setAttribute("aria-hidden", "true");
+      const v = getLandVideo();
+      // Keep center play when user paused so resume is one tap
+      if (v && v.paused && v.dataset.userPaused === "1") {
+        root.classList.add("is-paused-hold");
+      } else {
+        root.classList.remove("is-paused-hold");
+      }
+    };
+
+    const showLandChrome = (opts = {}) => {
+      if (!document.body.classList.contains("lmw-phone-landscape")) return;
+      // After P→L settle: ignore auto show (pause/play events); user tap sets force
+      if (
+        !opts.force &&
+        Date.now() < (Number(state._landSuppressAutoShowUntil) || 0)
+      ) {
+        return;
+      }
+      root.classList.add("is-open");
+      root.classList.remove("is-paused-hold");
+      root.setAttribute("aria-hidden", "false");
+      paint();
+      syncIcons();
+      clearTimeout(hideTimer);
+      if (opts.sticky) return;
+      const v = getLandVideo();
+      if (v && v.paused && v.dataset.userPaused === "1") return;
+      hideTimer = setTimeout(() => {
+        if (!seeking) hideLandChrome();
+      }, HIDE_MS);
+    };
+
+    const togglePlay = async (e) => {
+      if (e) {
+        e.preventDefault();
+        e.stopPropagation();
+      }
+      const v = getLandVideo();
+      if (!v || v.tagName !== "VIDEO") return;
+      if (v.paused) {
+        v.dataset.userPaused = "0";
+        armPlaybackGuard(1500);
+        pauseOtherFeedVideos(v);
+        const slideEl = v.closest(".snap-slide");
+        if (slideEl) {
+          try {
+            mountFeedPlayer(slideEl);
+          } catch (_) {}
+        }
+        const gen = bumpVideoPlayGen(v);
+        await playVideoRobust(v, gen);
+        if (!v.paused) {
+          v.classList.add("is-ready");
+          if (slideEl) setSlideLoading(slideEl, false);
+        }
+      } else {
+        v.dataset.userPaused = "1";
+        try {
+          v.pause();
+        } catch (_) {}
+      }
+      syncIcons();
+      showLandChrome({ force: true });
+    };
+
+    const ratioFromEvent = (clientX) => {
+      const v = getLandVideo();
+      if (!v || !track) return null;
+      const rect = track.getBoundingClientRect();
+      const d = v.duration;
+      if (!rect.width || !d || !isFinite(d)) return null;
+      const r = Math.min(1, Math.max(0, (clientX - rect.left) / rect.width));
+      return { r, t: r * d, d };
+    };
+
+    const scrubFromEvent = (clientX, forceSeek) => {
+      const hitR = ratioFromEvent(clientX);
+      if (!hitR) return;
+      scrubTarget = hitR.t;
+      paintFromTime(hitR.t);
+      scheduleSeek(hitR.t, !!forceSeek);
+    };
+
+    const onPointerDown = (e) => {
+      if (!e.isPrimary && e.pointerType === "touch") return;
+      const v = getLandVideo();
+      if (!v) return;
+      seeking = true;
+      root.classList.add("is-seeking");
+      resumeAfterScrub = !v.paused && v.dataset.userPaused !== "1";
+      if (!v.paused) {
+        try {
+          v.pause();
+        } catch (_) {}
+      }
+      showLandChrome({ sticky: true, force: true });
+      track.setPointerCapture?.(e.pointerId);
+      scrubFromEvent(e.clientX, true);
+      e.preventDefault();
+      e.stopPropagation();
+    };
+    const onPointerMove = (e) => {
+      if (!seeking) return;
+      scrubFromEvent(e.clientX, false);
+      e.preventDefault();
+    };
+    const onPointerUp = (e) => {
+      if (!seeking) return;
+      seeking = false;
+      root.classList.remove("is-seeking");
+      try {
+        track.releasePointerCapture?.(e.pointerId);
+      } catch (_) {}
+      if (e && typeof e.clientX === "number") scrubFromEvent(e.clientX, true);
+      else if (scrubTarget != null) scheduleSeek(scrubTarget, true);
+      scrubTarget = null;
+      showLandChrome({ force: true });
+      if (resumeAfterScrub) {
+        resumeAfterScrub = false;
+        const v = getLandVideo();
+        if (v && v.dataset.userPaused !== "1") {
+          const gen = bumpVideoPlayGen(v);
+          playVideoRobust(v, gen).then(() => syncIcons());
+        }
+      }
+    };
+
+    /**
+     * Full-screen hit layer: only reliable way to re-open controls after auto-hide
+     * on iOS (video/stage often never get a synthetic click).
+     */
+    const toggleFromSurface = (src) => {
+      if (!document.body.classList.contains("lmw-phone-landscape")) return;
+      if (root.classList.contains("is-no-video")) return;
+      if (Date.now() < (Number(state._landUiCooldown) || 0)) return;
+      const now = Date.now();
+      // Debounce touchend + click ghost / double fire
+      if (now - lastSurfaceToggleAt < 320) return;
+      lastSurfaceToggleAt = now;
+      // User gesture always allowed (even during post-rotate suppress window)
+      state._landSuppressAutoShowUntil = 0;
+      if (root.classList.contains("is-open")) hideLandChrome();
+      else showLandChrome({ force: true });
+    };
+
+    const onSurfacePointer = (e) => {
+      // Ignore interactions meant for dock / center play
+      if (
+        e.target.closest(
+          '[data-land="dock"], [data-land="center"], [data-land="play"], [data-land="track"]'
+        )
+      ) {
+        return;
+      }
+      if (seeking) return;
+      if (Date.now() < (Number(state._landUiCooldown) || 0)) return;
+
+      // Delay so double-tap (immersive / meta HUD) can cancel
+      if (surfaceTapTimer) clearTimeout(surfaceTapTimer);
+      surfaceTapTimer = setTimeout(() => {
+        surfaceTapTimer = null;
+        toggleFromSurface(e.type);
+      }, 280);
+    };
+
+    if (hit) {
+      hit.addEventListener(
+        "touchstart",
+        (e) => {
+          if (!e.touches || e.touches.length !== 1) {
+            surfaceTouchMoved = true;
+            return;
+          }
+          const t = e.touches[0];
+          surfaceTouchX = t.clientX;
+          surfaceTouchY = t.clientY;
+          surfaceTouchMoved = false;
+        },
+        { passive: true }
+      );
+      hit.addEventListener(
+        "touchmove",
+        (e) => {
+          if (!e.touches || e.touches.length !== 1) {
+            surfaceTouchMoved = true;
+            return;
+          }
+          const t = e.touches[0];
+          if (
+            Math.hypot(t.clientX - surfaceTouchX, t.clientY - surfaceTouchY) > 12
+          ) {
+            surfaceTouchMoved = true;
+            if (surfaceTapTimer) {
+              clearTimeout(surfaceTapTimer);
+              surfaceTapTimer = null;
+            }
+          }
+        },
+        { passive: true }
+      );
+      hit.addEventListener(
+        "touchend",
+        (e) => {
+          if (surfaceTouchMoved || !e.changedTouches || e.changedTouches.length !== 1) {
+            return;
+          }
+          // Don't let the later ghost click also toggle
+          state._landSuppressClickUntil = Date.now() + 450;
+          onSurfacePointer(e);
+        },
+        { passive: true }
+      );
+      hit.addEventListener("click", (e) => {
+        if (Date.now() < (Number(state._landSuppressClickUntil) || 0)) {
+          e.preventDefault();
+          e.stopPropagation();
+          return;
+        }
+        onSurfacePointer(e);
+      });
+      hit.addEventListener("dblclick", (e) => {
+        if (surfaceTapTimer) {
+          clearTimeout(surfaceTapTimer);
+          surfaceTapTimer = null;
+        }
+        state._landUiCooldown = Date.now() + 520;
+        e.preventDefault();
+        e.stopPropagation();
+        // Double-tap on surface: toggle meta HUD (like/mute), same as stage immersive
+        try {
+          setChromeHidden(!isChromeHidden());
+          if (!isChromeHidden()) showLandChrome({ sticky: true, force: true });
+        } catch (_) {}
+      });
+    }
+
+    playBtn.addEventListener("click", togglePlay);
+    centerBtn.addEventListener("click", togglePlay);
+    dock.addEventListener("click", (e) => e.stopPropagation());
+    dock.addEventListener("dblclick", (e) => e.stopPropagation());
+
+    track.addEventListener("pointerdown", onPointerDown);
+    track.addEventListener("pointermove", onPointerMove);
+    track.addEventListener("pointerup", onPointerUp);
+    track.addEventListener("pointercancel", onPointerUp);
+
+    // Persist handlers for rebind
+    state._landCtrl = {
+      root,
+      paint,
+      syncIcons,
+      show: showLandChrome,
+      hide: hideLandChrome,
+      onSeeked,
+      attach(v) {
+        const prev = state._landBoundVideo;
+        if (prev && prev !== v) {
+          try {
+            prev.removeEventListener("timeupdate", paint);
+            prev.removeEventListener("loadedmetadata", paint);
+            prev.removeEventListener("durationchange", paint);
+            prev.removeEventListener("seeked", onSeeked);
+            prev.removeEventListener("play", onPlay);
+            prev.removeEventListener("pause", onPause);
+          } catch (_) {}
+        }
+        state._landBoundVideo = v || null;
+        if (!v) return;
+        v.addEventListener("timeupdate", paint);
+        v.addEventListener("loadedmetadata", paint);
+        v.addEventListener("durationchange", paint);
+        v.addEventListener("seeked", onSeeked);
+        v.addEventListener("play", onPlay);
+        v.addEventListener("pause", onPause);
+        paint();
+        syncIcons();
+      },
+    };
+
+    function onPlay() {
+      syncIcons();
+      if (root.classList.contains("is-open")) showLandChrome({ force: true });
+      else root.classList.remove("is-paused-hold");
+    }
+    function onPause() {
+      syncIcons();
+      const v = getLandVideo();
+      // Only after intentional user pause — never flash bar on rotate/layout pause
+      if (
+        v &&
+        v.dataset.userPaused === "1" &&
+        !seeking &&
+        Date.now() >= (Number(state._landSuppressAutoShowUntil) || 0)
+      ) {
+        root.classList.add("is-paused-hold");
+        showLandChrome({ sticky: true, force: true });
+      }
+    }
+  }
+
+  function syncLandControlsVideo() {
+    if (!document.body.classList.contains("lmw-phone-landscape")) return;
+    const root = ensureLandControls();
+    const v = getSharedFeedVideo();
+    const hasVideo = !!(v && v.tagName === "VIDEO");
+    root.classList.toggle("is-no-video", !hasVideo);
+    if (state._landCtrl && state._landCtrl.attach) {
+      state._landCtrl.attach(hasVideo ? v : null);
+    } else if (root) {
+      bindLandControls(root);
+      state._landCtrl?.attach?.(hasVideo ? v : null);
+    }
+  }
+
+  function showLandControls(opts) {
+    ensureLandControls();
+    syncLandControlsVideo();
+    const o = opts || {};
+    // Default force for explicit API callers that mean "user wants bar"
+    if (o.force == null && o.fromUser) o.force = true;
+    state._landCtrl?.show?.(o);
+  }
+
+  function hideLandControls() {
+    clearTimeout(state._landHideT);
+    const root = document.getElementById("lmwLandControls");
+    if (root) {
+      root.classList.remove("is-open", "is-seeking", "is-paused-hold");
+      root.setAttribute("aria-hidden", "true");
+    }
+    state._landCtrl?.hide?.();
+  }
+
+  function tearDownLandControls() {
+    clearTimeout(state._landHideT);
+    const root = document.getElementById("lmwLandControls");
+    if (root) {
+      root.classList.remove("is-open", "is-seeking", "is-paused-hold");
+      root.setAttribute("aria-hidden", "true");
+    }
+    const prev = state._landBoundVideo;
+    if (prev && state._landCtrl) {
+      try {
+        // listeners removed on next attach(null) path
+        state._landCtrl.attach(null);
+      } catch (_) {}
+    }
+    state._landBoundVideo = null;
+  }
+
   async function handleAction(act, id, btn) {
     const idx = state.items.findIndex((x) => x.id === id);
     if (act === "mute") {
@@ -2579,11 +3864,11 @@
 
   /** Hard-stop a feed video (no chrome flash). Shared player: pause only, never destroy. */
   function silenceFeedVideo(v, { unload = false } = {}) {
-    if (!v || v.tagName !== "VIDEO") return;
+    if (!v || (v.tagName !== "VIDEO" && v.tagName !== "AUDIO")) return;
     // Never tear down the singleton — that drops the audio unlock
-    if (isFeedPlayer(v)) {
+    if (isFeedMediaEl(v)) {
       // Guard: do not kill active shared player during orientation / immersive exit
-      if (isPlaybackGuarded()) return;
+      if (isPlaybackGuarded() || isOrientLockActive()) return;
       bumpVideoPlayGen(v);
       try {
         if (!v.paused) v.pause();
@@ -2619,11 +3904,11 @@
     hideSlideVideoChrome(v.closest(".snap-slide"));
   }
 
-  /** Single-stream: remove stray non-singleton videos; park player only when except=null. */
+  /** Single-stream: remove stray non-singleton videos/audio; park player only when except=null. */
   function pauseOtherFeedVideos(except) {
-    document.querySelectorAll("#feedScroller video").forEach((v) => {
+    document.querySelectorAll("#feedScroller video, #feedScroller audio").forEach((v) => {
       if (v === except) return;
-      if (isFeedPlayer(v)) {
+      if (isFeedMediaEl(v)) {
         if (!except) {
           try {
             if (!v.paused) v.pause();
@@ -2646,9 +3931,13 @@
    */
   function waitVideoReady(video, timeoutMs = 10000) {
     if (!video) return Promise.resolve(false);
+    const isAudio = video.tagName === "AUDIO";
     // Prefer a real frame (videoWidth>0). readyState alone can be true for audio-first demux.
+    // For <audio>, readyState is enough (no videoWidth).
     const isFrameReady = () =>
-      video.readyState >= 2 && (video.videoWidth > 0 || video.readyState >= 3);
+      isAudio
+        ? video.readyState >= 2
+        : video.readyState >= 2 && (video.videoWidth > 0 || video.readyState >= 3);
     if (isFrameReady()) return Promise.resolve(true);
     return new Promise((resolve) => {
       let done = false;
@@ -2663,7 +3952,8 @@
       const onReady = () => {
         if (isFrameReady()) fin(true);
         // metadata-only still useful as soft progress; don't finish early on mobile
-        else if (video.readyState >= 2 && video.videoWidth > 0) fin(true);
+        else if (!isAudio && video.readyState >= 2 && video.videoWidth > 0) fin(true);
+        else if (isAudio && video.readyState >= 1) fin(true);
       };
       const onErr = () => fin(false);
       const events = ["loadeddata", "canplay", "canplaythrough", "loadedmetadata", "playing"];
@@ -2676,7 +3966,7 @@
   }
 
   async function playVideoRobust(media, gen) {
-    if (!media || media.tagName !== "VIDEO") return false;
+    if (!media || (media.tagName !== "VIDEO" && media.tagName !== "AUDIO")) return false;
     const alive = () =>
       media.isConnected &&
       String(media.dataset.playGen || "0") === String(gen) &&
@@ -2793,33 +4083,141 @@
   async function activateFeedSlide(slideEl, opts = {}) {
     if (!slideEl || !slideEl.isConnected) return;
     const force = !!opts.force;
-    if (state._feedCompacting && !force) return;
-    if (!force && state._feedScrolling) return;
-    // During rotate/immersive recovery only allow force activates for the pinned id
-    if (isPlaybackGuarded() && !force) return;
-    if (
-      isPlaybackGuarded() &&
-      force &&
-      state.activeFeedId != null &&
-      String(slideEl.dataset.id) !== String(state.activeFeedId)
-    ) {
+    const fromUser = !!opts.fromUserScroll;
+    if (state._feedCompacting && !force && !fromUser) return;
+    if (!force && !fromUser && state._feedScrolling) return;
+
+    const wantId = String(slideEl.dataset.id || "");
+    const lockedId = getLockedFeedId();
+    const curId = state.activeFeedId != null ? String(state.activeFeedId) : null;
+
+    // ── Rule: only user swipe may change clip ──
+    if (wantId && curId && wantId !== curId) {
+      if (!fromUser) {
+        // Orient/resize/IO/retry must never switch
+        hardSnapToFeedId(lockedId || curId, {
+          stayLocked: isFeedIdentityLocked(),
+        });
+        return;
+      }
+      if (lockedId != null && wantId !== lockedId) {
+        hardSnapToFeedId(lockedId, { stayLocked: true });
+        return;
+      }
+    }
+    if (lockedId != null && wantId && wantId !== lockedId) {
+      hardSnapToFeedId(lockedId, { stayLocked: true });
       return;
     }
+    if ((isOrientLockActive() || state._viewportResizing) && !force && !fromUser) return;
     if (force) state._feedScrolling = false;
 
-    const id = String(slideEl.dataset.id || "");
+    const id = wantId;
     const index = Number(slideEl.dataset.index || 0);
+    // Commit only for user swipe, or first cold start (no committed yet)
+    if (id && (fromUser || !getCommittedFeedId())) {
+      commitFeedId(id, index);
+    }
     const stage = slideEl.querySelector(".media-stage");
     if (!stage) return;
 
+    const kind = (stage.getAttribute("data-kind") || "").toLowerCase();
+    const isAudioSlide = kind === "audio";
     const isVideoSlide =
-      stage.getAttribute("data-kind") === "video" ||
-      !!stage.querySelector("video") ||
-      (!stage.querySelector("img") && !!stage.getAttribute("data-src"));
+      !isAudioSlide &&
+      (kind === "video" ||
+        !!stage.querySelector("video") ||
+        (!stage.querySelector("img") && !!stage.getAttribute("data-src")));
+
+    // —— Audio slides (shared <audio> + progress chrome) ——
+    if (isAudioSlide) {
+      const src = stage.getAttribute("data-src") || "";
+      if (!src) return;
+
+      let media = mountFeedAudioPlayer(slideEl);
+      if (!media) return;
+
+      const isDifferentClip =
+        !mediaSrcLoaded(media, src) ||
+        (media.getAttribute("data-src") && media.getAttribute("data-src") !== src);
+
+      if (
+        media.dataset.userPaused !== "1" &&
+        mediaSrcLoaded(media, src) &&
+        media.getAttribute("src") &&
+        media.readyState >= 1 &&
+        !media.error
+      ) {
+        state.activeFeedId = id;
+        onSlideActive(index);
+        pauseOtherFeedVideos(media);
+        if (media.paused) {
+          const gen = bumpVideoPlayGen(media);
+          await playVideoRobust(media, gen);
+        } else if (state.wantSound && media.muted && state.audioUnlocked) {
+          setVideoMutedProg(media, false);
+          if (media.paused) softResumeFeedVideo(media);
+        }
+        media.classList.add("is-ready");
+        setSlideLoading(slideEl, false);
+        return;
+      }
+
+      const epoch = ++state.playEpoch;
+      state.activeFeedId = id;
+      state._feedActivating = true;
+      onSlideActive(index);
+      setSlideLoading(slideEl, true);
+      const releaseActivating = () => {
+        if (epoch === state.playEpoch) state._feedActivating = false;
+      };
+      pauseOtherFeedVideos(media);
+      media = mountFeedAudioPlayer(slideEl) || media;
+      if (isDifferentClip) media.dataset.userPaused = "0";
+      if (media.dataset.userPaused === "1") {
+        setSlideLoading(slideEl, false);
+        releaseActivating();
+        return;
+      }
+      const gen = bumpVideoPlayGen(media);
+      try {
+        media.classList.remove("is-ready");
+      } catch (_) {}
+      media.setAttribute("data-src", src);
+      media.preload = "auto";
+      try {
+        const needForce =
+          !!media.error ||
+          !media.getAttribute("src") ||
+          !mediaSrcLoaded(media, src) ||
+          isDifferentClip;
+        const ok = await loadMediaEl(media, src, { force: needForce });
+        if (!ok || epoch !== state.playEpoch || state.activeFeedId !== id) {
+          releaseActivating();
+          return;
+        }
+        let played = await playVideoRobust(media, gen);
+        if (!played && epoch === state.playEpoch && media.isConnected && !media.paused) {
+          played = true;
+        }
+        if (!played || epoch !== state.playEpoch || state.activeFeedId !== id) {
+          releaseActivating();
+          return;
+        }
+        if (state.wantSound && !media.muted) markAudioUnlocked();
+        media.classList.add("is-ready");
+        setSlideLoading(slideEl, false);
+        state._activateRetryCount = 0;
+      } finally {
+        releaseActivating();
+      }
+      return;
+    }
 
     // —— Image slides ——
     if (!isVideoSlide) {
       parkFeedPlayer();
+      parkFeedAudio();
       let media = stage.querySelector("img");
       if (!media) return;
       const srcHint = media.getAttribute("data-src") || "";
@@ -2879,7 +4277,17 @@
     if (!media) return;
 
     // Same clip already loaded & ready → soft resume (keep sound unlock)
+    // After L→P, first switch to a *different* clip must not take soft path on stale buffer
+    const isDifferentClip =
+      !mediaSrcLoaded(media, src) ||
+      (media.getAttribute("data-src") &&
+        media.getAttribute("data-src") !== src);
+    const forcePostOrient =
+      !!state._postOrientReload &&
+      (isDifferentClip || String(state.activeFeedId) !== String(id));
+
     if (
+      !forcePostOrient &&
       media.dataset.userPaused !== "1" &&
       mediaSrcLoaded(media, src) &&
       media.getAttribute("src") &&
@@ -2925,6 +4333,11 @@
     // Re-mount in case compact moved DOM
     media = mountFeedPlayer(slideEl) || media;
 
+    // Clear sticky userPaused from orient thrash when switching clips
+    if (forcePostOrient || isDifferentClip) {
+      media.dataset.userPaused = "0";
+    }
+
     if (media.dataset.userPaused === "1") {
       setSlideLoading(slideEl, false);
       releaseActivating();
@@ -2942,7 +4355,11 @@
 
     try {
       const needForce =
-        !!media.error || !media.getAttribute("src") || !mediaSrcLoaded(media, src);
+        !!media.error ||
+        !media.getAttribute("src") ||
+        !mediaSrcLoaded(media, src) ||
+        forcePostOrient ||
+        isDifferentClip;
       const ok = await loadMediaEl(media, src, { force: needForce });
       if (!ok || epoch !== state.playEpoch || state.activeFeedId !== id) {
         releaseActivating();
@@ -2982,6 +4399,11 @@
 
       if (state.wantSound && !media.muted) markAudioUnlocked();
 
+      // Successfully started a clip after orient → clear one-shot reload flag
+      if (forcePostOrient || isDifferentClip) {
+        state._postOrientReload = false;
+      }
+
       const reveal = () => revealFeedVideo(media, slideEl, { epoch, id, gen });
       reveal();
       if (media.readyState < 2 || !media.videoWidth) {
@@ -3012,11 +4434,26 @@
     const scroller = $("#feedScroller");
     if (!scroller || state.view !== "feed") return;
     if (state._feedScrolling) return;
-    // Orientation / immersive exit: never switch clips; re-pin active
-    if (isPlaybackGuarded() || state._viewportResizing || state._programmaticScroll) {
-      if (state.activeFeedId != null) pinActiveFeedSlide(state.activeFeedId);
+
+    // Locked / layout: pin only, never switch
+    if (isFeedIdentityLocked() || state._viewportResizing || state._programmaticScroll) {
+      const lockId = getLockedFeedId() || state.activeFeedId;
+      if (lockId != null) {
+        hardSnapToFeedId(lockId, { stayLocked: isFeedIdentityLocked() });
+      }
+      state._userScrollPending = false;
       return;
     }
+
+    // Not a user gesture settle (e.g. residual scroll after unlock) → pin current only
+    if (!state._userScrollPending) {
+      if (state.activeFeedId != null) {
+        hardSnapToFeedId(state.activeFeedId, { stayLocked: false });
+      }
+      return;
+    }
+    state._userScrollPending = false;
+
     const slides = scroller.querySelectorAll(".snap-slide");
     if (!slides.length) return;
     const root = scroller.getBoundingClientRect();
@@ -3033,33 +4470,19 @@
       }
     });
     if (!best) return;
-    // fully snapped: center nearly matches viewport center
-    if (bestDist > root.height * 0.22) return;
+
+    // Mid-page: snap to current active (user can fling again)
+    if (bestDist > root.height * 0.2) {
+      if (state.activeFeedId != null) hardSnapToFeedId(state.activeFeedId, { stayLocked: false });
+      return;
+    }
+
     const id = String(best.dataset.id || "");
-    const media = best.querySelector("video");
-    if (!media) {
-      activateFeedSlide(best);
-      return;
-    }
-    // Prefer soft path — full activate was reloading every time unmuted play paused
-    if (
-      mediaSrcLoaded(media, media.getAttribute("data-src") || "") &&
-      media.getAttribute("src") &&
-      media.dataset.userPaused !== "1" &&
-      media.readyState >= 1 &&
-      !media.error
-    ) {
-      if (String(state.activeFeedId) !== id) {
-        state.activeFeedId = id;
-        onSlideActive(Number(best.dataset.index || 0));
-        pauseOtherFeedVideos(media);
-      }
-      if (media.paused) softResumeFeedVideo(media);
-      media.classList.add("is-ready");
-      setSlideLoading(best, false);
-      return;
-    }
-    activateFeedSlide(best);
+    // User swipe settled → only place that may change clip
+    activateFeedSlide(best, {
+      fromUserScroll: true,
+      force: !!state._postOrientReload && String(state.activeFeedId) !== id,
+    });
   }
 
   function bindFeedScrollSync() {
@@ -3068,33 +4491,47 @@
     scroller.dataset.scrollSyncBound = "1";
     let settleTimer = null;
     const onSettle = () => {
-      if (state._programmaticScroll || isPlaybackGuarded()) {
-        // compact pin / rotate — do not treat as user swipe / do not re-activate
+      if (
+        state._programmaticScroll ||
+        isOrientLockActive() ||
+        state._viewportResizing ||
+        isFeedIdentityLocked()
+      ) {
         state._feedScrolling = false;
-        if (state.activeFeedId != null) pinActiveFeedSlide(state.activeFeedId);
+        state._userScrollPending = false;
+        const id = getLockedFeedId() || state.activeFeedId;
+        if (id != null) hardSnapToFeedId(id, { stayLocked: isFeedIdentityLocked() });
         return;
       }
       state._feedScrolling = false;
       requestAnimationFrame(() => {
-        if (state._programmaticScroll || state._feedCompacting || isPlaybackGuarded()) return;
+        if (
+          state._programmaticScroll ||
+          state._feedCompacting ||
+          isOrientLockActive() ||
+          state._viewportResizing
+        ) {
+          return;
+        }
         syncActiveFromScroll();
-        // GC only after current clip has had time to start
         scheduleFeedGc(isMobileFeedClient() ? 1200 : 220);
       });
     };
     scroller.addEventListener(
       "scroll",
       () => {
-        // Ignore scrollTop writes from compact / pin — they used to set
-        // _feedScrolling and abort the in-flight activate (black @ ~5th swipe).
         if (
           state._programmaticScroll ||
           state._feedCompacting ||
           state._viewportResizing ||
-          isPlaybackGuarded()
-        )
+          isOrientLockActive() ||
+          isFeedIdentityLocked()
+        ) {
           return;
+        }
+        // Real user finger scroll only
         state._feedScrolling = true;
+        state._userScrollPending = true;
         clearTimeout(settleTimer);
         settleTimer = setTimeout(onSettle, isMobileFeedClient() ? 180 : 100);
       },
@@ -3107,9 +4544,11 @@
           state._programmaticScroll ||
           state._feedCompacting ||
           state._viewportResizing ||
-          isPlaybackGuarded()
-        )
+          isOrientLockActive() ||
+          isFeedIdentityLocked()
+        ) {
           return;
+        }
         clearTimeout(settleTimer);
         onSettle();
       },
@@ -3165,8 +4604,8 @@
     const authed = withAuthQuery(url);
     const force = !!opts.force;
 
-    // VIDEO: never fetch-as-blob (breaks Range / OOM on mobile). Use native src + Range.
-    if (el.tagName === "VIDEO") {
+    // VIDEO / AUDIO: never fetch-as-blob (breaks Range / OOM on mobile). Use native src + Range.
+    if (el.tagName === "VIDEO" || el.tagName === "AUDIO") {
       try {
         if (!force && mediaSrcLoaded(el, url) && el.readyState >= 2) {
           return true;
@@ -3180,9 +4619,11 @@
         if (!force && mediaSrcLoaded(el, url) && el.getAttribute("src")) {
           return true;
         }
-        el.setAttribute("playsinline", "");
-        el.setAttribute("webkit-playsinline", "");
-        el.playsInline = true;
+        if (el.tagName === "VIDEO") {
+          el.setAttribute("playsinline", "");
+          el.setAttribute("webkit-playsinline", "");
+          el.playsInline = true;
+        }
         const light = !!opts.prefetch || !!opts.light;
         if (light) {
           el.preload = "metadata";
@@ -3348,6 +4789,12 @@
     const thumb = img.dataset.thumb || "";
     const file = img.dataset.file || "";
     const type = img.dataset.type || "";
+    if (type === "audio") {
+      img.classList.add("cell-thumb-audio");
+      img.removeAttribute("src");
+      img.alt = "audio";
+      return;
+    }
     // 1) 服务端静态 jpg 缩略图
     if (thumb) {
       const ok = await loadMediaEl(img, thumb);
@@ -3525,11 +4972,17 @@
     const lb = $("#lightbox");
     const body = $("#lbBody");
     body.innerHTML = "";
-    const el =
-      type === "image" || type === "gif"
-        ? document.createElement("img")
-        : document.createElement("video");
-    if (el.tagName === "VIDEO") {
+    let el;
+    if (type === "image" || type === "gif") {
+      el = document.createElement("img");
+    } else if (type === "audio") {
+      el = document.createElement("audio");
+      el.controls = true;
+      el.autoplay = true;
+      el.className = "lb-audio";
+      applySoundToVideo(el);
+    } else {
+      el = document.createElement("video");
       el.controls = true;
       el.autoplay = true;
       el.playsInline = true;
@@ -3545,7 +4998,7 @@
     }
     el.draggable = false;
     loadMediaEl(el, url).then(() => {
-      if (el.tagName === "VIDEO") {
+      if (el.tagName === "VIDEO" || el.tagName === "AUDIO") {
         applySoundToVideo(el);
         el.play().catch(() => {});
       }
@@ -3558,14 +5011,13 @@
   function closeLightbox() {
     const lb = $("#lightbox");
     const body = $("#lbBody");
-    const video = body.querySelector("video");
-    if (video) {
+    body.querySelectorAll("video, audio").forEach((media) => {
       try {
-        video.pause();
-        video.removeAttribute("src");
-        video.load();
+        media.pause();
+        media.removeAttribute("src");
+        media.load();
       } catch (_) {}
-    }
+    });
     body.innerHTML = "";
     lb.classList.add("hide");
     lb.setAttribute("aria-hidden", "true");
@@ -3604,6 +5056,8 @@
     }
     state.view = name;
     document.body.classList.toggle("search-open", name === "search");
+    // PWA standalone: feed locks viewport; other views need page scroll
+    document.body.classList.toggle("is-scroll-page", name !== "feed");
     document.querySelectorAll(".topnav .nav").forEach((b) => {
       b.classList.toggle("active", b.dataset.view === name);
     });
@@ -3625,12 +5079,35 @@
         console.error("onEnterSearchPage", e);
       }
     } else if (name === "feed") {
-      // re-activate centered slide after returning from search/admin
-      requestAnimationFrame(() => {
+      // Leaving feed pauses the shared player; pin-only scroll sync does not resume.
+      // Force re-activate the committed slide (respects userPaused).
+      const resumeFeedAfterView = () => {
         try {
-          syncActiveFromScroll();
-        } catch (_) {}
-      });
+          if (state.view !== "feed") return;
+          const scroller = document.getElementById("feedScroller");
+          if (!scroller) return;
+          const id = getCommittedFeedId() || state.activeFeedId;
+          let slide =
+            id != null
+              ? scroller.querySelector(`.snap-slide[data-id="${id}"]`)
+              : null;
+          if (!slide) {
+            slide = scroller.querySelector(
+              `.snap-slide[data-index="${state.feedIndex | 0}"]`
+            );
+          }
+          if (!slide) {
+            syncActiveFromScroll();
+            return;
+          }
+          pinFeedIdOnce(id || slide.dataset.id, { stayLocked: false });
+          activateFeedSlide(slide, { force: true });
+        } catch (e) {
+          console.error("resume feed after view", e);
+        }
+      };
+      // Double rAF: wait until #view-feed is painted after .hide removal
+      requestAnimationFrame(() => requestAnimationFrame(resumeFeedAfterView));
     }
   }
 
@@ -4247,24 +5724,105 @@
     });
   }
 
+  /**
+   * PWA / home-screen standalone: same app, no Safari URL+tab chrome.
+   * No service worker — personal LAN app; avoid stale media caches.
+   */
+  function isStandaloneDisplay() {
+    try {
+      if (window.matchMedia && window.matchMedia("(display-mode: standalone)").matches) {
+        return true;
+      }
+    } catch (_) {}
+    // iOS Safari legacy
+    if (typeof navigator !== "undefined" && navigator.standalone === true) return true;
+    return false;
+  }
+
+  function applyStandaloneClass() {
+    if (!isStandaloneDisplay()) return;
+    try {
+      document.documentElement.classList.add("lmw-standalone");
+      document.body.classList.add("lmw-standalone-body");
+      document.body.classList.toggle("is-scroll-page", state.view !== "feed");
+    } catch (_) {}
+  }
+
+  function maybeShowPwaInstallTip() {
+    const key = "lmw_pwa_tip_dismissed";
+    if (isStandaloneDisplay()) return;
+    try {
+      if (localStorage.getItem(key) === "1") return;
+    } catch (_) {}
+    // iPhone / iPad Safari only (where A2HS removes the two bars)
+    const ua = navigator.userAgent || "";
+    const isIOS =
+      /iPad|iPhone|iPod/.test(ua) ||
+      (navigator.platform === "MacIntel" && (navigator.maxTouchPoints || 0) > 1);
+    if (!isIOS) return;
+    if (document.getElementById("lmwPwaTip")) return;
+
+    const tip = document.createElement("div");
+    tip.id = "lmwPwaTip";
+    tip.className = "lmw-pwa-tip";
+    tip.setAttribute("role", "status");
+    tip.innerHTML =
+      `<div class="lmw-pwa-tip-text">` +
+      `<strong>无地址栏全屏：添加到主屏幕</strong>` +
+      `<span class="muted">Safari 底部分享 →「添加到主屏幕」，从图标打开即完整 App（Feed/网格/管理），无页签与地址栏。</span>` +
+      `</div>` +
+      `<button type="button" class="lmw-pwa-tip-x" aria-label="关闭">×</button>`;
+    const dismiss = () => {
+      try {
+        localStorage.setItem(key, "1");
+      } catch (_) {}
+      tip.remove();
+    };
+    tip.querySelector(".lmw-pwa-tip-x")?.addEventListener("click", dismiss);
+    document.body.appendChild(tip);
+  }
+
   bind();
+  applyStandaloneClass();
+  // Not ready until first loadFeed finishes — ignore cold-start resize freezes
+  state._feedScrollReady = false;
   try {
     bindViewportLayout();
-    // Cold start already in phone landscape (or odd window) — apply policy once
-    const vp0 = detectViewportProfile();
-    if (vp0.isPhoneLandscape || vp0.isHeadset) {
-      requestAnimationFrame(() => {
-        try {
-          onViewportLayoutChange();
-        } catch (_) {}
-      });
-    }
   } catch (e) {
     console.warn("bindViewportLayout", e);
   }
+  // Defer tip so first paint / feed load is not blocked
+  setTimeout(() => {
+    try {
+      maybeShowPwaInstallTip();
+    } catch (_) {}
+  }, 1800);
   loadFeed()
-    .then(() => startLibraryPoll())
+    .then(() => {
+      state._feedScrollReady = true;
+      forceEnableFeedScroll();
+      try {
+        const vp0 = detectViewportProfile();
+        markOrientSettled(vp0.orientation);
+        // Landscape cold open only after feed is ready
+        if (vp0.isPhoneLandscape || vp0.isHeadset) {
+          // Clear grace so first landscape shell can apply
+          state._orientGraceUntil = 0;
+          requestAnimationFrame(() => {
+            try {
+              onViewportLayoutChange();
+            } catch (_) {}
+          });
+        }
+      } catch (_) {}
+      startLibraryPoll();
+    })
     .catch((e) => {
+      state._feedScrollReady = true;
+      forceEnableFeedScroll();
+      try {
+        markOrientSettled(detectViewportProfile().orientation);
+      } catch (_) {}
       const empty = $("#feedEmpty");
       empty.classList.remove("hide");
       empty.innerHTML = `<div class="empty-card"><p>加载失败</p><p class="muted">${escapeHtml(e.message)}</p></div>`;

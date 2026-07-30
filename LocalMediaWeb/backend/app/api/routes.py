@@ -36,7 +36,13 @@ from app.core.db import get_db
 from app.models.entities import DownloadJob, JasnaJob, MediaItem
 from app.services.download import enqueue_jobs, register_uploaded_file, request_cancel
 from app.services.jasna import enqueue_jasna_for_media, request_cancel as jasna_request_cancel
-from app.services.feed_rank import rank_by_tag, rank_recommend_with_affinity, rank_similar
+from app.services.feed_rank import (
+    FeedRankParams,
+    diversify_sequence,
+    rank_by_tag,
+    rank_recommend_with_affinity,
+    rank_similar,
+)
 from app.services.media_process import merge_av_to_mp4, remux_to_playable, write_temp_bytes
 from app.services.scan import ensure_category, list_categories, purge_missing_media, rescan_medias
 from app.services.tags import (
@@ -378,10 +384,11 @@ def feed(
 ):
     """
     mode:
-      - recommend: personal score + tag affinity
+      - recommend: multi-channel (interest/fresh/explore/revisit) + fatigue + diversity
       - similar: similar_to media_id (tag overlap), or tag= focus tag
       - recent: created_at then id desc (true ingest order)
-      - random / liked
+      - random: full-library SQL RANDOM sample + light anti-clump
+      - liked
 
     exclude_ids: comma-separated media ids already in the client playlist
     (for on-demand next batches without repeating).
@@ -393,6 +400,7 @@ def feed(
     # over-fetch then filter so exclude does not shrink the page too much
     fetch_n = min(500, max(limit * 4, limit + len(exclude) + 20))
     focus_tag = canonical_tag(tag) if tag else ""
+    settings = get_settings()
 
     stmt = select(MediaItem)
     if not include_restricted:
@@ -412,12 +420,28 @@ def feed(
             ).all()
         )
     elif mode == "random":
+        # True full-library random (not "latest N then shuffle").
+        pool_mult = max(1, int(getattr(settings, "feed_random_pool_mult", 3) or 3))
+        sample_n = min(800, max(limit * pool_mult, limit + len(exclude) + 10))
+        q = stmt
+        if exclude:
+            q = q.where(~MediaItem.id.in_(list(exclude)))
+        # SQLite: RANDOM(); other dialects: func.random()
         rows = list(
-            db.scalars(
-                stmt.order_by(desc(MediaItem.id)).limit(min(800, fetch_n))
-            ).all()
+            db.scalars(q.order_by(func.random()).limit(sample_n)).all()
         )
+        if not rows and exclude:
+            # fallback if exclude wiped the pool (tiny library)
+            rows = list(db.scalars(stmt.order_by(func.random()).limit(sample_n)).all())
         random.shuffle(rows)
+        rows = diversify_sequence(rows, limit=min(limit, len(rows)))
+        # already excluded in SQL when possible; skip post-filter for this branch
+        return {
+            "mode": mode,
+            "similar_to": similar_to,
+            "tag": focus_tag or None,
+            "items": [_media_out(m) for m in rows[:limit]],
+        }
     elif mode == "similar" or similar_to:
         pool = list(
             db.scalars(stmt.order_by(desc(MediaItem.id)).limit(800)).all()
@@ -443,8 +467,29 @@ def feed(
                 rows = ranked
         mode = "similar"
     else:
-        pool = list(db.scalars(stmt.order_by(desc(MediaItem.id)).limit(500)).all())
-        rows = rank_recommend_with_affinity(pool, limit=min(200, fetch_n))
+        # Mixed candidate pool: recent + random long-tail (mainstream multi-channel input)
+        n_recent = max(
+            50,
+            int(getattr(settings, "feed_recommend_candidate_recent", 250) or 250),
+        )
+        n_rand = max(
+            50,
+            int(getattr(settings, "feed_recommend_candidate_random", 250) or 250),
+        )
+        recent_rows = list(
+            db.scalars(stmt.order_by(desc(MediaItem.id)).limit(n_recent)).all()
+        )
+        rand_rows = list(
+            db.scalars(stmt.order_by(func.random()).limit(n_rand)).all()
+        )
+        by_id: dict[int, MediaItem] = {}
+        for m in recent_rows + rand_rows:
+            by_id[int(m.id)] = m
+        pool = list(by_id.values())
+        params = FeedRankParams.from_settings(settings)
+        rows = rank_recommend_with_affinity(
+            pool, limit=min(200, fetch_n), params=params
+        )
     if exclude:
         rows = [m for m in rows if m.id not in exclude]
     rows = rows[:limit]
@@ -668,7 +713,7 @@ async def upload(
     mtype = media_type or detect_media_type(raw_name, file.content_type, None)
     if mtype == "m3u8":
         mtype = "video"
-    if mtype not in ("image", "gif", "video"):
+    if mtype not in ("image", "gif", "video", "audio"):
         mtype = "video"
     fname = safe_filename(title or Path(raw_name).stem, source_url or raw_name, ext)
     dest = settings.medias_path() / fname
