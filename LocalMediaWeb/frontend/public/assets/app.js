@@ -1397,7 +1397,7 @@
 
   /**
    * ONE persistent <audio> for feed audio slides (parallel to video singleton).
-   * Keeps mute unlock across swipes the same way the video player does.
+   * mp3/m4a must use <audio> — many iOS builds refuse audio/* in <video>.
    */
   function getFeedAudioPlayer(create = true) {
     if (state._feedAudioPlayer && state._feedAudioPlayer.tagName === "AUDIO") {
@@ -1408,13 +1408,102 @@
       a = document.createElement("audio");
       a.id = "lmwFeedAudio";
       a.className = "feed-audio-player";
+      a.setAttribute("playsinline", "");
+      a.setAttribute("webkit-playsinline", "");
       a.loop = true;
       a.preload = "auto";
+      // Never start muted-by-default on audio: mute is useless UX and some
+      // WebKit builds treat muted audio autoplay oddly. Preference still applied.
       a.muted = !state.wantSound;
       if (a.muted) a.setAttribute("muted", "");
     }
     if (a) state._feedAudioPlayer = a;
     return a || null;
+  }
+
+  /** Live media element for a stage (never use a stale closure). */
+  function getStageMedia(stage) {
+    if (!stage) return null;
+    const kind = (stage.getAttribute("data-kind") || "").toLowerCase();
+    if (kind === "audio") {
+      return (
+        stage.querySelector("audio#lmwFeedAudio") ||
+        stage.querySelector("audio") ||
+        getFeedAudioPlayer(false)
+      );
+    }
+    return (
+      stage.querySelector("video#lmwFeedPlayer") ||
+      stage.querySelector("video") ||
+      getFeedPlayer(false)
+    );
+  }
+
+  function mountStagePlayer(slideEl) {
+    if (!slideEl) return null;
+    const stage = slideEl.querySelector(".media-stage");
+    if (!stage) return null;
+    if ((stage.getAttribute("data-kind") || "") === "audio") {
+      return mountFeedAudioPlayer(slideEl);
+    }
+    return mountFeedPlayer(slideEl);
+  }
+
+  /**
+   * User-gesture play. Critical for iOS: call play() in the same turn as the
+   * tap whenever possible — any long await before play() drops the gesture.
+   */
+  function playMediaFromUserGesture(media, src) {
+    if (!media || !src) return Promise.resolve(false);
+    media.dataset.userPaused = "0";
+    applySoundToVideo(media);
+    const authed = withAuthQuery(src);
+    const needReload =
+      !!media.error ||
+      !media.getAttribute("src") ||
+      !mediaSrcLoaded(media, src) ||
+      media.readyState < 1;
+    try {
+      if (needReload) {
+        if (media.src && String(media.src).startsWith("blob:")) {
+          try {
+            URL.revokeObjectURL(media.src);
+          } catch (_) {}
+        }
+        media.preload = "auto";
+        media.src = authed;
+        media.dataset.loadedSrc = src;
+        if (typeof media.load === "function") media.load();
+      }
+    } catch (_) {
+      return Promise.resolve(false);
+    }
+    // Prefer audible when user explicitly tapped play
+    if (state.wantSound || state.audioUnlocked) {
+      setVideoMutedProg(media, false);
+    }
+    const tryPlay = () => {
+      try {
+        const p = media.play();
+        if (p && typeof p.then === "function") {
+          return p
+            .then(() => {
+              if (!media.paused && !media.muted) markAudioUnlocked();
+              return !media.paused;
+            })
+            .catch(() => false);
+        }
+        return Promise.resolve(!media.paused);
+      } catch (_) {
+        return Promise.resolve(false);
+      }
+    };
+    return tryPlay().then((ok) => {
+      if (ok) return true;
+      // Fallback: muted play (policy), still counts as started
+      setVideoMutedProg(media, true);
+      return tryPlay();
+    });
   }
 
   function feedPlayerParkEl() {
@@ -1458,22 +1547,18 @@
     }
   }
 
-  /** Move singleton player into the active slide stage; rebind progress. */
+  /** Move singleton <video> into the active slide stage; rebind progress. */
   function mountFeedPlayer(slideEl) {
     if (!slideEl) return null;
     const stage = slideEl.querySelector(".media-stage");
     if (!stage) return null;
-    // Feed audio uses the same <video> decoder (iOS autoplay is reliable for video).
-    // Park any leftover <audio> so it cannot fight the shared player.
+    // Never put the video decoder on an audio slide (iOS / MIME / black frame issues)
+    if ((stage.getAttribute("data-kind") || "") === "audio") {
+      return mountFeedAudioPlayer(slideEl);
+    }
     parkFeedAudio();
-    stage.querySelectorAll("audio").forEach((el) => {
-      try {
-        el.remove();
-      } catch (_) {}
-    });
     const v = getFeedPlayer(true);
     if (!v) return null;
-    // Remove any leftover per-slide <video> shells (old markup / recovery)
     stage.querySelectorAll("video").forEach((el) => {
       if (el !== v) {
         try {
@@ -1482,14 +1567,10 @@
       }
     });
     if (v.parentNode !== stage) {
-      // Keep .audio-stage-art above the player (inserted first / lower in stack)
-      const art = stage.querySelector(".audio-stage-art");
       const loading = stage.querySelector(".media-loading");
-      if (art) art.after(v);
-      else if (loading) loading.after(v);
+      if (loading) loading.after(v);
       else stage.insertBefore(v, stage.firstChild);
     }
-    // data-src on stage is the clip URL for this slide
     const clip = stage.getAttribute("data-src") || "";
     if (clip) v.setAttribute("data-src", clip);
     try {
@@ -1505,9 +1586,41 @@
     return v;
   }
 
-  /** @deprecated feed audio now uses mountFeedPlayer; kept for park safety */
+  /** Move singleton <audio> into the active audio slide. */
   function mountFeedAudioPlayer(slideEl) {
-    return mountFeedPlayer(slideEl);
+    if (!slideEl) return null;
+    const stage = slideEl.querySelector(".media-stage");
+    if (!stage) return null;
+    parkFeedPlayer();
+    // Remove any black video left over from older builds
+    stage.querySelectorAll("video").forEach((el) => {
+      try {
+        if (isFeedPlayer(el)) parkFeedPlayer();
+        else el.remove();
+      } catch (_) {}
+    });
+    const a = getFeedAudioPlayer(true);
+    if (!a) return null;
+    stage.querySelectorAll("audio").forEach((el) => {
+      if (el !== a) {
+        try {
+          el.remove();
+        } catch (_) {}
+      }
+    });
+    if (a.parentNode !== stage) {
+      const loading = stage.querySelector(".media-loading");
+      if (loading) loading.after(a);
+      else stage.insertBefore(a, stage.firstChild);
+    }
+    const clip = stage.getAttribute("data-src") || "";
+    if (clip) a.setAttribute("data-src", clip);
+    try {
+      delete stage.dataset.progressBound;
+    } catch (_) {}
+    bindFeedProgress(stage);
+    applySoundToVideo(a);
+    return a;
   }
 
   function isFeedPlayer(el) {
@@ -2881,14 +2994,16 @@
    */
   function bindFeedProgress(stage) {
     if (!stage || stage.dataset.progressBound === "1") return;
-    // Shared video or audio singleton (rebound after mount)
-    const video =
-      stage.querySelector("video") ||
-      stage.querySelector("audio") ||
-      (stage.getAttribute("data-kind") === "audio" ? getFeedAudioPlayer(false) : null) ||
-      (stage.getAttribute("data-kind") === "video" ? getFeedPlayer(false) : null);
     const bar = stage.querySelector(".feed-progress");
-    if (!video || !bar) return;
+    if (!bar) return;
+    const isAudioStage = (stage.getAttribute("data-kind") || "") === "audio";
+    // Always bind chrome for audio/video stages even before media is mounted.
+    // Resolve the live element on each interaction (closures go stale after remount).
+    const mediaOf = () => getStageMedia(stage);
+    // Ensure a player shell exists so timeupdate can be wired after mount
+    if (isAudioStage) getFeedAudioPlayer(true);
+    else if ((stage.getAttribute("data-kind") || "") === "video") getFeedPlayer(true);
+
     stage.dataset.progressBound = "1";
 
     const fill = bar.querySelector(".feed-progress-fill");
@@ -2918,6 +3033,8 @@
     let lastSeekIssuedAt = 0;
     /** Was playing when scrub started → resume after final seek. */
     let resumeAfterScrub = false;
+    /** Last media we attached time listeners to */
+    let boundMedia = null;
     const HIDE_MS = 2800;
     /**
      * Preview seek interval while dragging.
@@ -2928,18 +3045,23 @@
     const SEEK_EPS = 0.04;
 
     const syncToggleIcon = () => {
-      const paused = video.paused;
+      const video = mediaOf();
+      const paused = !video || video.paused;
       toggleBtn.innerHTML = paused ? ICO.play : ICO.pause;
       toggleBtn.setAttribute("aria-label", paused ? "播放" : "暂停");
       toggleBtn.classList.toggle("is-paused", paused);
     };
 
-    const isUserPaused = () => video.dataset.userPaused === "1";
+    const isUserPaused = () => {
+      const video = mediaOf();
+      return !!(video && video.dataset.userPaused === "1");
+    };
 
     const hideChrome = () => {
       bar.classList.remove("is-visible");
       // only keep center control after *user* pause (not scroll/autoplay pause)
-      if (video.paused && isUserPaused()) {
+      const video = mediaOf();
+      if (video && video.paused && isUserPaused()) {
         toggleBtn.classList.add("is-visible");
       } else {
         toggleBtn.classList.remove("is-visible");
@@ -2967,7 +3089,8 @@
     };
 
     const paintFromTime = (t) => {
-      const d = video.duration;
+      const video = mediaOf();
+      const d = video && isFinite(video.duration) ? video.duration : 0;
       const tt = typeof t === "number" && isFinite(t) ? t : 0;
       const ratio = d && isFinite(d) && d > 0 ? Math.min(1, Math.max(0, tt / d)) : 0;
       if (fill) fill.style.width = `${ratio * 100}%`;
@@ -2983,7 +3106,8 @@
         paintFromTime(scrubTarget);
         return;
       }
-      paintFromTime(video.currentTime || 0);
+      const video = mediaOf();
+      paintFromTime((video && video.currentTime) || 0);
     };
 
     /**
@@ -2993,6 +3117,8 @@
      */
     const flushSeek = (force) => {
       if (pendingSeekT == null) return;
+      const video = mediaOf();
+      if (!video) return;
       const d = video.duration;
       if (!d || !isFinite(d) || d <= 0) return;
       const t = Math.min(Math.max(0, pendingSeekT), Math.max(0, d - 0.05));
@@ -3046,6 +3172,11 @@
           resolve();
           return;
         }
+        const video = mediaOf();
+        if (!video) {
+          resolve();
+          return;
+        }
         let settled = false;
         const finish = () => {
           if (settled) return;
@@ -3070,33 +3201,31 @@
     const resumeAfterSeekIfNeeded = async () => {
       if (!resumeAfterScrub) return;
       resumeAfterScrub = false;
-      if (video.dataset.userPaused === "1") return;
+      const video = mediaOf();
+      if (!video || video.dataset.userPaused === "1") return;
       if (!video.isConnected) return;
       // Drain coalesced seeks so play starts on the final scrub position.
       await waitSeekQueueIdle(700);
-      if (video.dataset.userPaused === "1" || !video.isConnected) return;
-      pauseOtherFeedVideos(video);
-      const gen = bumpVideoPlayGen(video);
-      const ok = await playVideoRobust(video, gen);
+      const v2 = mediaOf();
+      if (!v2 || v2.dataset.userPaused === "1" || !v2.isConnected) return;
+      pauseOtherFeedVideos(v2);
+      const gen = bumpVideoPlayGen(v2);
+      const ok = await playVideoRobust(v2, gen);
       // Mild recovery: playing but still no frame after heavy seeks
-      if (ok && video.videoWidth === 0) {
+      if (ok && v2.tagName === "VIDEO" && v2.videoWidth === 0) {
         await new Promise((r) => setTimeout(r, 120));
-        if (video.isConnected && video.dataset.userPaused !== "1" && video.videoWidth === 0) {
+        if (v2.isConnected && v2.dataset.userPaused !== "1" && v2.videoWidth === 0) {
           try {
-            const t = video.currentTime || 0;
-            video.currentTime = Math.max(0, t);
+            const t = v2.currentTime || 0;
+            v2.currentTime = Math.max(0, t);
           } catch (_) {}
-          await playVideoRobust(video, bumpVideoPlayGen(video));
+          await playVideoRobust(v2, bumpVideoPlayGen(v2));
         }
       }
       syncToggleIcon();
     };
 
-    video.addEventListener("timeupdate", paint);
-    video.addEventListener("loadedmetadata", paint);
-    video.addEventListener("durationchange", paint);
-    video.addEventListener("seeked", onSeeked);
-    video.addEventListener("play", () => {
+    const onPlay = () => {
       syncToggleIcon();
       // autoplay / resume: never leave center button open unless user opened the bar
       if (bar.classList.contains("is-visible")) {
@@ -3104,8 +3233,8 @@
       } else {
         toggleBtn.classList.remove("is-visible");
       }
-    });
-    video.addEventListener("pause", () => {
+    };
+    const onPause = () => {
       syncToggleIcon();
       // programmatic pause (slide leave / load / scrub) must NOT flash the control
       if (!isChromeHidden() && isUserPaused() && !seeking) {
@@ -3113,12 +3242,49 @@
       } else if (!seeking) {
         toggleBtn.classList.remove("is-visible");
       }
-    });
+    };
+
+    const wireMediaEvents = (video) => {
+      if (!video || video === boundMedia) return;
+      if (boundMedia) {
+        try {
+          boundMedia.removeEventListener("timeupdate", paint);
+          boundMedia.removeEventListener("loadedmetadata", paint);
+          boundMedia.removeEventListener("durationchange", paint);
+          boundMedia.removeEventListener("seeked", onSeeked);
+          boundMedia.removeEventListener("play", onPlay);
+          boundMedia.removeEventListener("pause", onPause);
+        } catch (_) {}
+      }
+      boundMedia = video;
+      video.addEventListener("timeupdate", paint);
+      video.addEventListener("loadedmetadata", paint);
+      video.addEventListener("durationchange", paint);
+      video.addEventListener("seeked", onSeeked);
+      video.addEventListener("play", onPlay);
+      video.addEventListener("pause", onPause);
+    };
+    // Wire now if mounted; remount re-calls bindFeedProgress after clearing progressBound
+    wireMediaEvents(mediaOf());
 
     // Only clicks that hit the video's drawn box (not letterbox / empty stage)
     // show progress + center control; do NOT toggle play on stage tap.
+    // Audio stages: whole stage is the hit target (no visual video box).
     // dblclick immersive handled separately; delay click so double-tap still works
     const pointHitsVideo = (clientX, clientY) => {
+      if (isAudioStage) {
+        const r = stage.getBoundingClientRect();
+        return (
+          r.width >= 2 &&
+          r.height >= 2 &&
+          clientX >= r.left &&
+          clientX <= r.right &&
+          clientY >= r.top &&
+          clientY <= r.bottom
+        );
+      }
+      const video = mediaOf();
+      if (!video) return false;
       const r = video.getBoundingClientRect();
       if (r.width < 2 || r.height < 2) return false;
       return (
@@ -3169,33 +3335,28 @@
       e.preventDefault();
       e.stopPropagation();
       if (Date.now() < (stage._uiCooldownUntil || 0)) return;
+      const slideEl = stage.closest(".snap-slide");
+      const src = stage.getAttribute("data-src") || "";
+      // Mount correct player (audio vs video) under this stage
+      let video = null;
+      try {
+        video = slideEl ? mountStagePlayer(slideEl) : mediaOf();
+      } catch (_) {
+        video = mediaOf();
+      }
+      if (!video) return;
+      wireMediaEvents(video);
+      armPlaybackGuard(1500);
       if (video.paused) {
-        video.dataset.userPaused = "0";
-        // User gesture: hard resume (survives post-rotate / post-immersive stuck state)
-        armPlaybackGuard(1500);
+        // iOS: play() must stay in the user-gesture stack — no long await first
         pauseOtherFeedVideos(video);
-        const slideEl = video.closest(".snap-slide");
-        if (slideEl) {
-          try {
-            mountFeedPlayer(slideEl);
-          } catch (_) {}
-        }
-        const gen = bumpVideoPlayGen(video);
-        playVideoRobust(video, gen).then((ok) => {
-          if (!ok || video.paused) {
-            // Gesture context still active — one more force activate
-            if (slideEl) {
-              try {
-                activateFeedSlide(slideEl, { force: true });
-              } catch (_) {}
-            } else {
-              softResumeFeedVideo(video);
-            }
-          } else {
+        playMediaFromUserGesture(video, src).then((ok) => {
+          if (ok) {
             video.classList.add("is-ready");
             if (slideEl) setSlideLoading(slideEl, false);
           }
           syncToggleIcon();
+          paint();
         });
       } else {
         video.dataset.userPaused = "1";
@@ -3212,8 +3373,9 @@
     });
 
     const ratioFromEvent = (clientX) => {
+      const video = mediaOf();
       const rect = track.getBoundingClientRect();
-      const d = video.duration;
+      const d = video && video.duration;
       if (!rect.width || !d || !isFinite(d)) return null;
       const r = Math.min(1, Math.max(0, (clientX - rect.left) / rect.width));
       return { r, t: r * d, d };
@@ -3231,9 +3393,10 @@
     const onPointerDown = (e) => {
       if (!e.isPrimary && e.pointerType === "touch") return;
       seeking = true;
+      const video = mediaOf();
       // Pause while scrubbing so the decoder is not decoding + seeking at once.
-      resumeAfterScrub = !video.paused && video.dataset.userPaused !== "1";
-      if (!video.paused) {
+      resumeAfterScrub = !!(video && !video.paused && video.dataset.userPaused !== "1");
+      if (video && !video.paused) {
         try {
           video.pause();
         } catch (_) {}
@@ -4155,14 +4318,95 @@
     if (!stage) return;
 
     const kind = (stage.getAttribute("data-kind") || "").toLowerCase();
-    // Audio feeds use the same shared <video> path as video (iOS autoplay + Range).
-    // Visual: CSS hides the black video; SVG note art sits on top.
     const isAudioSlide = kind === "audio";
     const isVideoSlide =
-      isAudioSlide ||
-      kind === "video" ||
-      !!stage.querySelector("video") ||
-      (!stage.querySelector("img") && !!stage.getAttribute("data-src"));
+      !isAudioSlide &&
+      (kind === "video" ||
+        !!stage.querySelector("video") ||
+        (!stage.querySelector("img") && !!stage.getAttribute("data-src")));
+
+    // —— Audio slides: dedicated <audio> (not <video>+audio/* — breaks on iOS) ——
+    if (isAudioSlide) {
+      const src = stage.getAttribute("data-src") || "";
+      const revealAudioUi = (played) => {
+        setSlideLoading(slideEl, false);
+        const media = getStageMedia(stage);
+        if (media) media.classList.add("is-ready");
+        if (!played) {
+          if (media) media.dataset.userPaused = "1";
+          const btn = stage.querySelector(".media-play-toggle");
+          if (btn) {
+            btn.classList.add("is-visible", "is-paused");
+            btn.innerHTML = ICO.play;
+            btn.setAttribute("aria-label", "播放");
+          }
+          const bar = stage.querySelector(".feed-progress");
+          if (bar) bar.classList.add("is-visible");
+        } else if (media) {
+          media.dataset.userPaused = "0";
+        }
+        state._activateRetryCount = 0;
+      };
+
+      if (!src) {
+        revealAudioUi(false);
+        return;
+      }
+
+      let media = mountFeedAudioPlayer(slideEl);
+      if (!media) {
+        revealAudioUi(false);
+        return;
+      }
+
+      state.activeFeedId = id;
+      onSlideActive(index);
+      pauseOtherFeedVideos(media);
+
+      // Soft path: already have buffer
+      if (
+        media.dataset.userPaused !== "1" &&
+        mediaSrcLoaded(media, src) &&
+        media.getAttribute("src") &&
+        media.readyState >= 1 &&
+        !media.error
+      ) {
+        if (media.paused) {
+          const gen = bumpVideoPlayGen(media);
+          const played = await playVideoRobust(media, gen);
+          revealAudioUi(played || !media.paused);
+        } else {
+          revealAudioUi(true);
+        }
+        return;
+      }
+
+      const epoch = ++state.playEpoch;
+      state._feedActivating = true;
+      setSlideLoading(slideEl, true);
+      try {
+        media.dataset.userPaused = "0";
+        media.setAttribute("data-src", src);
+        // Prefetch only — do not require autoplay success (iOS needs a tap)
+        const ok = await loadMediaEl(media, src, {
+          force: !!media.error || !mediaSrcLoaded(media, src),
+        });
+        if (epoch !== state.playEpoch || state.activeFeedId !== id) return;
+        if (!ok || media.error) {
+          revealAudioUi(false);
+          return;
+        }
+        // Try autoplay (works on desktop; often blocked on iOS — then show ▶)
+        const gen = bumpVideoPlayGen(media);
+        let played = await playVideoRobust(media, gen);
+        if (!played && media.isConnected && !media.paused) played = true;
+        if (played && state.wantSound && !media.muted) markAudioUnlocked();
+        revealAudioUi(!!played);
+      } finally {
+        if (epoch === state.playEpoch) state._feedActivating = false;
+      }
+      return;
+    }
 
     // —— Image slides ——
     if (!isVideoSlide) {
@@ -4216,7 +4460,7 @@
       return;
     }
 
-    // —— Video / audio: mount singleton player into this slide ——
+    // —— Video: mount singleton player into this slide ——
     const src =
       stage.getAttribute("data-src") ||
       slideEl.querySelector("video")?.getAttribute("data-src") ||
@@ -4230,11 +4474,6 @@
     if (!media) {
       setSlideLoading(slideEl, false);
       return;
-    }
-    if (isAudioSlide) {
-      try {
-        media.dataset.audioOnly = "1";
-      } catch (_) {}
     }
 
     // Same clip already loaded & ready → soft resume (keep sound unlock)
