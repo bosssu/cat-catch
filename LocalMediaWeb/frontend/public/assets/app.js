@@ -3763,7 +3763,7 @@
     const input = document.getElementById("reviewInput");
     const sub = document.getElementById("reviewModalSub");
     if (!modal || !input) return;
-    const title = item ? (item.title || item.filename || `#${id}`) : `#${id}`;
+    const title = item ? (item.title || `#${id}`) : `#${id}`;
     if (sub) sub.textContent = title;
     input.value = item && item.review != null ? String(item.review) : "";
     modal.classList.remove("hide");
@@ -3817,7 +3817,8 @@
       syncReviewButton(id, saved);
       if (clear) {
         // stay open after clear so user can retype; still persist empty
-      } else {
+      } else if (_reviewMediaId === id) {
+        // only close if still editing this id (avoid race if user opened another item)
         closeReviewModal();
       }
     } catch (e) {
@@ -5671,6 +5672,12 @@
     });
     window.addEventListener("keydown", (e) => {
       if (e.key === "Escape") {
+        const reviewModal = document.getElementById("reviewModal");
+        if (reviewModal && !reviewModal.classList.contains("hide")) {
+          e.preventDefault();
+          closeReviewModal();
+          return;
+        }
         if (!$("#lightbox").classList.contains("hide")) {
           closeLightbox();
           return;
@@ -5688,6 +5695,14 @@
           return;
         }
       }
+      // Don't fire feed shortcuts while typing or while review modal is open
+      const reviewModalOpen = (() => {
+        const m = document.getElementById("reviewModal");
+        return m && !m.classList.contains("hide");
+      })();
+      if (reviewModalOpen) return;
+      const tag = (document.activeElement && document.activeElement.tagName) || "";
+      if (tag === "INPUT" || tag === "TEXTAREA" || tag === "SELECT") return;
       if (state.view !== "feed") return;
       const sc = $("#feedScroller");
       if (e.key === "ArrowDown") sc.scrollBy({ top: window.innerHeight, behavior: "smooth" });
