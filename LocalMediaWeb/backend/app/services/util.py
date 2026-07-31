@@ -133,9 +133,6 @@ def ensure_unique_path(dest: Path) -> Path:
     raise OSError(f"Could not find unique path for {dest}")
 
 
-AUDIO_EXTS = (".mp3", ".m4a", ".aac", ".ogg", ".opus", ".wav", ".flac")
-
-
 def guess_ext(url: str, content_type: str | None, media_type: str) -> str:
     path = urlparse(url).path.lower()
     for e in (
@@ -153,7 +150,6 @@ def guess_ext(url: str, content_type: str | None, media_type: str) -> str:
         ".webp",
         ".avif",
         ".bmp",
-        *AUDIO_EXTS,
     ):
         if path.endswith(e):
             return e.lstrip(".")
@@ -169,17 +165,6 @@ def guess_ext(url: str, content_type: str | None, media_type: str) -> str:
         "video/quicktime": "mov",
         "application/vnd.apple.mpegurl": "m3u8",
         "application/x-mpegurl": "m3u8",
-        "audio/mpeg": "mp3",
-        "audio/mp3": "mp3",
-        "audio/mp4": "m4a",
-        "audio/x-m4a": "m4a",
-        "audio/aac": "aac",
-        "audio/ogg": "ogg",
-        "audio/opus": "opus",
-        "audio/wav": "wav",
-        "audio/x-wav": "wav",
-        "audio/flac": "flac",
-        "audio/x-flac": "flac",
     }
     if ct in mapping:
         return mapping[ct]
@@ -191,9 +176,22 @@ def guess_ext(url: str, content_type: str | None, media_type: str) -> str:
         return "mp4"
     if media_type == "video":
         return "mp4"
-    if media_type == "audio":
-        return "mp3"
     return "bin"
+
+
+_AUDIO_EXTS = (
+    ".mp3",
+    ".m4a",
+    ".aac",
+    ".flac",
+    ".wav",
+    ".ogg",
+    ".opus",
+    ".wma",
+    ".aiff",
+    ".aif",
+    ".oga",
+)
 
 
 def detect_media_type(url: str, content_type: str | None, hinted: str | None) -> str:
@@ -205,9 +203,7 @@ def detect_media_type(url: str, content_type: str | None, hinted: str | None) ->
         return "dash"
     if path.endswith(".m3u8") or "mpegurl" in ct:
         return "m3u8"
-    if any(path.endswith(e) for e in AUDIO_EXTS) or ct.startswith("audio/"):
-        return "audio"
-    if hinted and hinted in ("image", "gif", "video", "m3u8", "dash", "audio"):
+    if hinted and hinted in ("image", "gif", "video", "audio", "m3u8", "dash"):
         if hinted != "video":
             return hinted
     if "image/gif" in ct or path.endswith(".gif"):
@@ -216,6 +212,8 @@ def detect_media_type(url: str, content_type: str | None, hinted: str | None) ->
         path.endswith(e) for e in (".png", ".jpg", ".jpeg", ".webp", ".avif", ".bmp")
     ):
         return "image"
+    if ct.startswith("audio/") or any(path.endswith(e) for e in _AUDIO_EXTS):
+        return "audio"
     return "video"
 
 

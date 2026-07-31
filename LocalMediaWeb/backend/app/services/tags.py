@@ -52,13 +52,6 @@ EXT_TAGS = {
     "jpeg": "jpg",
     "webp": "webp",
     "avif": "avif",
-    "mp3": "mp3",
-    "m4a": "m4a",
-    "aac": "aac",
-    "ogg": "ogg",
-    "opus": "opus",
-    "wav": "wav",
-    "flac": "flac",
 }
 
 STOP_WORDS = {
@@ -541,7 +534,10 @@ def suggest_tags(
 
     mt = (media_type or "").lower().strip()
     if mt in ("video", "image", "gif", "m3u8", "dash", "audio"):
-        weak.append(mt if mt != "dash" else "dash")
+        if mt == "audio":
+            weak.append("video")
+        else:
+            weak.append(mt if mt != "dash" else "dash")
 
     et = _ext_tag(url) or _ext_tag(source_page)
     if et:

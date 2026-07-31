@@ -13,6 +13,8 @@ from app.api.deps import require_token
 from datetime import datetime, timezone
 
 from app.api.schemas import (
+    AvMatchRequest,
+    AvMergeRequest,
     CategoryCreate,
     IngestRequest,
     InteractEvent,
@@ -22,6 +24,8 @@ from app.api.schemas import (
     MediaJasnaBatch,
     MediaOut,
     MediaPatch,
+    MediaReclassifyRequest,
+    ProbeUrlRequest,
     TagSuggestRequest,
     TagsBatchUpdate,
     TagsUpdate,
@@ -43,7 +47,14 @@ from app.services.feed_rank import (
     rank_recommend_with_affinity,
     rank_similar,
 )
-from app.services.media_process import merge_av_to_mp4, remux_to_playable, write_temp_bytes
+from app.services.media_process import (
+    classify_media_file,
+    match_av_by_duration,
+    merge_av_to_mp4,
+    probe_single_file_role,
+    remux_to_playable,
+    write_temp_bytes,
+)
 from app.services.scan import ensure_category, list_categories, purge_missing_media, rescan_medias
 from app.services.tags import (
     RESTRICTED_TAG,
@@ -508,21 +519,10 @@ def get_media(media_id: int, db=Depends(get_db)):
     return _media_out(m)
 
 
-_AUDIO_MIME_BY_EXT = {
-    ".mp3": "audio/mpeg",
-    ".m4a": "audio/mp4",
-    ".aac": "audio/aac",
-    ".ogg": "audio/ogg",
-    ".opus": "audio/opus",
-    ".wav": "audio/wav",
-    ".flac": "audio/flac",
-}
-
-
 @router.get("/media/{media_id}/file", dependencies=[Depends(require_token)])
 def media_file(media_id: int, db=Depends(get_db)):
     """
-    Stream media with Range support (native <video> / <audio> on mobile).
+    Stream media with Range support (native <video> on mobile).
     Auth: header or ?token= (see require_token).
     """
     m = db.get(MediaItem, media_id)
@@ -532,16 +532,18 @@ def media_file(media_id: int, db=Depends(get_db)):
     if not path.is_file():
         raise HTTPException(404, "File missing on disk")
     media = m.mime or mimetypes.guess_type(path.name)[0] or "application/octet-stream"
+    # webm leftovers: still serve, but prefer correct type for mp4 after remux
+    mtype = (m.media_type or "").lower()
     suf = path.suffix.lower()
-    # Prefer correct types so browsers decode (Windows mimetypes often miss m4a/flac)
-    if suf == ".mp4":
+    if mtype == "audio":
+        if not media or media == "application/octet-stream":
+            media = mimetypes.guess_type(path.name)[0] or "audio/mpeg"
+        if media.startswith("video/") and suf in (".mp3", ".m4a", ".aac", ".flac", ".wav", ".ogg", ".opus"):
+            media = mimetypes.guess_type(path.name)[0] or "audio/mpeg"
+    elif suf == ".mp4":
         media = "video/mp4"
     elif suf == ".webm":
         media = "video/webm"
-    elif suf in _AUDIO_MIME_BY_EXT:
-        media = _AUDIO_MIME_BY_EXT[suf]
-    elif (m.media_type or "").lower() == "audio" and not (media or "").startswith("audio/"):
-        media = "audio/mpeg"
     try:
         st = path.stat()
         etag = f'"{st.st_mtime_ns}-{st.st_size}"'
@@ -554,7 +556,6 @@ def media_file(media_id: int, db=Depends(get_db)):
         content_disposition_type="inline",
         headers={
             "Cache-Control": "private, max-age=0, must-revalidate",
-            "Accept-Ranges": "bytes",
             "ETag": etag,
         },
     )
@@ -562,45 +563,32 @@ def media_file(media_id: int, db=Depends(get_db)):
 
 @router.get("/media/{media_id}/thumb", dependencies=[Depends(require_token)])
 def media_thumb(media_id: int, db=Depends(get_db)):
-    from app.services.thumb import audio_placeholder_path, ensure_audio_placeholder
-
     m = db.get(MediaItem, media_id)
     if not m:
         raise HTTPException(404, "Not found")
     tpath = thumb_path_for(media_id)
-    mtype = (m.media_type or "").lower()
     if not tpath.is_file():
         src = get_settings().medias_path() / m.rel_path
-        if src.is_file() or mtype == "audio":
-            rel = generate_thumb(src if src.is_file() else tpath, media_id, m.media_type or "audio")
+        if src.is_file():
+            rel = generate_thumb(src, media_id, m.media_type)
             if rel:
                 m.thumb_rel = rel
                 db.commit()
-    # Per-id jpg, or shared audio placeholder path stored in thumb_rel
-    serve: Path | None = tpath if tpath.is_file() else None
-    if not serve and m.thumb_rel:
-        cand = get_settings().data_path() / m.thumb_rel
-        if cand.is_file():
-            serve = cand
-    if not serve and mtype == "audio":
+    if tpath.is_file():
         try:
-            serve = ensure_audio_placeholder()
-        except Exception:
-            serve = audio_placeholder_path() if audio_placeholder_path().is_file() else None
-    if serve and serve.is_file():
-        try:
-            st = serve.stat()
+            st = tpath.stat()
             etag = f'"{st.st_mtime_ns}-{st.st_size}"'
         except OSError:
             etag = f'"thumb-{media_id}"'
         return FileResponse(
-            serve,
+            tpath,
             media_type="image/jpeg",
             headers={
                 "Cache-Control": "private, max-age=0, must-revalidate",
                 "ETag": etag,
             },
         )
+    # 1x1 pixel jpeg fallback is better as SVG placeholder via empty 404 with cache
     raise HTTPException(404, "No thumb")
 
 
@@ -740,11 +728,13 @@ async def upload(
     settings = get_settings()
     raw_name = file.filename or "upload.bin"
     ext = Path(raw_name).suffix.lstrip(".") or "bin"
-    mtype = media_type or detect_media_type(raw_name, file.content_type, None)
-    if mtype == "m3u8":
-        mtype = "video"
-    if mtype not in ("image", "gif", "video", "audio"):
-        mtype = "video"
+    # Client hint only — real type decided after write via ffprobe/magic
+    mtype_hint = media_type or detect_media_type(raw_name, file.content_type, None)
+    if mtype_hint == "m3u8":
+        mtype_hint = "video"
+    if mtype_hint not in ("image", "gif", "video", "audio"):
+        ct0 = (file.content_type or "").lower()
+        mtype_hint = "audio" if ct0.startswith("audio/") else "video"
     fname = safe_filename(title or Path(raw_name).stem, source_url or raw_name, ext)
     dest = settings.medias_path() / fname
     dest.parent.mkdir(parents=True, exist_ok=True)
@@ -772,15 +762,32 @@ async def upload(
         raise HTTPException(400, "Empty file")
     mime = file.content_type or ""
     note = ""
-    if remux not in ("0", "false", "False") and mtype == "video":
+    # Content classification BEFORE remux (audio-in-.mp4 must not be remuxed as video)
+    cls = classify_media_file(dest, hinted=mtype_hint, content_type=mime)
+    mtype = cls.get("media_type") or mtype_hint
+    if cls.get("mime"):
+        mime = cls["mime"]
+    if cls.get("method"):
+        note = f"class:{cls['method']}"
+        if cls.get("role"):
+            note += f":{cls['role']}"
+    if remux not in ("0", "false", "False") and mtype == "video" and cls.get("has_video"):
         try:
             dest2 = remux_to_playable(dest, prefer_ext=ext)
             if dest2 != dest:
                 dest = dest2
-                note = "remuxed"
+                note = (note + ";remuxed") if note else "remuxed"
             mime = mimetypes.guess_type(dest.name)[0] or mime or "video/mp4"
+            # re-check after remux (should still be video)
+            cls2 = classify_media_file(dest, hinted=mtype, content_type=mime)
+            if cls2.get("media_type") in ("audio", "video", "image", "gif"):
+                mtype = cls2["media_type"]
+            if cls2.get("mime"):
+                mime = cls2["mime"]
         except Exception as e:
-            note = f"remux_skip:{e}"
+            note = (note + f";remux_skip:{e}") if note else f"remux_skip:{e}"
+    if mtype == "audio" and (not mime or mime.startswith("video/")):
+        mime = cls.get("mime") or "audio/mp4"
     tag_list = apply_restricted_flag(tags, _flag_true(restricted))
     item = register_uploaded_file(
         category="default",
@@ -799,7 +806,361 @@ async def upload(
         "media_id": item.id,
         "item": _media_out(item),
         "note": note,
+        "classify": {
+            "media_type": mtype,
+            "role": cls.get("role"),
+            "method": cls.get("method"),
+            "duration_sec": cls.get("duration_sec"),
+        },
         "jasna_job_id": jasna_job_id,
+    }
+
+
+@router.post("/media/reclassify", dependencies=[Depends(require_token)])
+def media_reclassify(body: MediaReclassifyRequest, db=Depends(get_db)):
+    """
+    Re-probe on-disk media with ffprobe/magic and correct media_type.
+    Extension/suffix is ignored — pure-audio .mp4 becomes audio.
+    """
+    settings = get_settings()
+    medias = settings.medias_path()
+    if body.ids:
+        q = select(MediaItem).where(MediaItem.id.in_([int(x) for x in body.ids if int(x) > 0]))
+    elif body.include_images:
+        q = select(MediaItem)
+    else:
+        q = select(MediaItem).where(MediaItem.media_type.in_(("video", "audio", "m3u8")))
+    rows = list(db.scalars(q).all())
+    changed: list[dict] = []
+    unchanged = 0
+    failed: list[dict] = []
+    for m in rows:
+        path = medias / m.rel_path
+        if not path.is_file():
+            failed.append({"id": m.id, "error": "missing_file"})
+            continue
+        try:
+            cls = classify_media_file(path, hinted=m.media_type, content_type=m.mime)
+            new_type = cls.get("media_type") or m.media_type
+            if new_type == "m3u8":
+                new_type = "video"
+            old = (m.media_type or "").lower()
+            if new_type != old or (cls.get("mime") and cls["mime"] != (m.mime or "")):
+                m.media_type = new_type
+                if cls.get("mime"):
+                    m.mime = cls["mime"]
+                changed.append(
+                    {
+                        "id": m.id,
+                        "from": old,
+                        "to": new_type,
+                        "role": cls.get("role"),
+                        "method": cls.get("method"),
+                        "duration_sec": cls.get("duration_sec"),
+                    }
+                )
+            else:
+                unchanged += 1
+        except Exception as e:
+            failed.append({"id": m.id, "error": str(e)[:200]})
+    if changed:
+        db.commit()
+    return {
+        "scanned": len(rows),
+        "changed": len(changed),
+        "unchanged": unchanged,
+        "failed": len(failed),
+        "items": changed[:200],
+        "errors": failed[:50],
+    }
+
+
+@router.post("/media/probe-url", dependencies=[Depends(require_token)])
+async def media_probe_url(body: ProbeUrlRequest):
+    """
+    Download remote URL into a temp file, classify with ffprobe/magic, delete temp.
+    Used by extension when list items may use a video extension for pure audio.
+    """
+    import tempfile
+
+    import httpx
+
+    url = (body.url or "").strip()
+    if not url or not url.startswith(("http://", "https://")):
+        raise HTTPException(400, "valid http(s) url required")
+    settings = get_settings()
+    max_b = int(body.max_bytes or 0) or int(settings.max_file_bytes or 0) or (512 * 1024 * 1024)
+    # Cap probe downloads at 256MB to avoid filling disk for casual classify
+    max_b = min(max_b, 256 * 1024 * 1024)
+    headers = {str(k): str(v) for k, v in (body.headers or {}).items() if v is not None}
+    suffix = Path(url.split("?")[0]).suffix or ".bin"
+    if len(suffix) > 12:
+        suffix = ".bin"
+    tmp_path: Path | None = None
+    try:
+        fd, name = tempfile.mkstemp(prefix="lmw_probe_", suffix=suffix)
+        import os
+
+        try:
+            os.close(fd)
+        except OSError:
+            pass
+        tmp_path = Path(name)
+        written = 0
+        async with httpx.AsyncClient(
+            follow_redirects=True,
+            timeout=httpx.Timeout(60.0, connect=20.0),
+            trust_env=True,
+        ) as client:
+            async with client.stream("GET", url, headers=headers) as resp:
+                if resp.status_code >= 400:
+                    raise HTTPException(400, f"download HTTP {resp.status_code}")
+                ct = (resp.headers.get("content-type") or "").split(";")[0].strip()
+                with tmp_path.open("wb") as out:
+                    async for chunk in resp.aiter_bytes(1024 * 256):
+                        if not chunk:
+                            continue
+                        written += len(chunk)
+                        if written > max_b:
+                            raise HTTPException(400, "probe file too large")
+                        out.write(chunk)
+        if written < 16:
+            raise HTTPException(400, "empty download")
+        cls = classify_media_file(tmp_path, content_type=ct)
+        return {
+            "url": url,
+            "bytes": written,
+            "media_type": cls.get("media_type"),
+            "role": cls.get("role"),
+            "has_video": cls.get("has_video"),
+            "has_audio": cls.get("has_audio"),
+            "duration_sec": cls.get("duration_sec"),
+            "mime": cls.get("mime"),
+            "method": cls.get("method"),
+            "summary": cls.get("summary"),
+            "error": cls.get("error") or "",
+        }
+    finally:
+        if tmp_path and tmp_path.exists():
+            try:
+                tmp_path.unlink()
+            except OSError:
+                pass
+
+
+@router.post("/media/av-match", dependencies=[Depends(require_token)])
+def media_av_match(body: AvMatchRequest, db=Depends(get_db)):
+    """
+    Scan library for complete single-file video_only + audio_only items whose
+    durations highly match. Used by extension manage page to pair silent video + audio.
+    Classification uses ffprobe role (not extension / DB label alone).
+    """
+    if not ffmpeg_available():
+        raise HTTPException(400, "ffmpeg/ffprobe 不可用，无法检测时长")
+    settings = get_settings()
+    medias = settings.medias_path()
+    q = select(MediaItem).where(MediaItem.media_type.in_(("video", "audio")))
+    if body.ids:
+        q = q.where(MediaItem.id.in_([int(x) for x in body.ids if int(x) > 0]))
+    rows = list(db.scalars(q).all())
+    videos: list[dict] = []
+    audios: list[dict] = []
+    skipped: list[dict] = []
+    type_fixes = 0
+    for m in rows:
+        if getattr(m, "partial", False):
+            skipped.append({"id": m.id, "reason": "partial"})
+            continue
+        path = medias / m.rel_path
+        if not path.is_file() or path.stat().st_size < 64:
+            skipped.append({"id": m.id, "reason": "missing_file"})
+            continue
+        # m3u8 leftovers stored as video still may be playlists — skip tiny/non-media
+        suf = path.suffix.lower()
+        if suf in (".m3u8", ".mpd"):
+            skipped.append({"id": m.id, "reason": "stream_playlist"})
+            continue
+        cls = classify_media_file(path, hinted=m.media_type, content_type=m.mime)
+        role = cls.get("role") or "unknown"
+        real_type = cls.get("media_type") or (m.media_type or "video")
+        # Auto-fix DB label when content disagrees (audio disguised as video)
+        if real_type in ("audio", "video") and real_type != (m.media_type or "").lower():
+            m.media_type = real_type
+            if cls.get("mime"):
+                m.mime = cls["mime"]
+            type_fixes += 1
+        dur = cls.get("duration_sec")
+        if dur is None or float(dur) <= 0.05:
+            # fall back to role probe duration
+            probe = probe_single_file_role(path)
+            role = probe.get("role") or role
+            dur = probe.get("duration_sec")
+        if dur is None or float(dur) <= 0.05:
+            skipped.append(
+                {
+                    "id": m.id,
+                    "reason": "no_duration",
+                    "role": role,
+                    "error": cls.get("error") or "",
+                }
+            )
+            continue
+        entry = {
+            "id": m.id,
+            "title": m.title or "",
+            "duration_sec": float(dur),
+            "role": role,
+            "media_type": real_type,
+            "file_size": int(m.file_size or 0),
+        }
+        # Bucket by content role, not by stored label
+        if role == "audio_only" or (real_type == "audio" and role != "av" and role != "video_only"):
+            if role == "av":
+                skipped.append({"id": m.id, "reason": "av_not_audio_only"})
+                continue
+            if role == "video_only":
+                skipped.append({"id": m.id, "reason": "video_only_as_audio"})
+                continue
+            audios.append(entry)
+        elif role == "video_only":
+            videos.append(entry)
+        elif role == "av" and body.include_av_videos:
+            videos.append(entry)
+        else:
+            skipped.append(
+                {
+                    "id": m.id,
+                    "reason": f"not_merge_candidate:{role}",
+                    "summary": cls.get("summary") or "",
+                }
+            )
+    if type_fixes:
+        try:
+            db.commit()
+        except Exception:
+            db.rollback()
+
+    pairs = match_av_by_duration(
+        videos,
+        audios,
+        abs_tol=float(body.abs_tol_sec or 0.45),
+        rel_tol=float(body.rel_tol or 0.02),
+        min_score=float(body.min_score or 0.97),
+    )
+    return {
+        "pairs": pairs,
+        "scanned": {
+            "total": len(rows),
+            "videos": len(videos),
+            "audios": len(audios),
+            "skipped": len(skipped),
+            "type_fixes": type_fixes,
+        },
+        "videos": videos,
+        "audios": audios,
+        "skipped": skipped[:200],
+        "ffmpeg": True,
+    }
+
+
+@router.post("/media/merge-av", dependencies=[Depends(require_token)])
+def media_merge_av_library(body: AvMergeRequest, db=Depends(get_db)):
+    """
+    Fast-merge library video + audio files into a new video media item.
+    Sources stay unless delete_sources=true.
+    """
+    if not body.pairs:
+        raise HTTPException(400, "pairs required")
+    if not ffmpeg_available():
+        raise HTTPException(400, "ffmpeg 不可用，无法合并")
+    settings = get_settings()
+    medias = settings.medias_path()
+    medias.mkdir(parents=True, exist_ok=True)
+    tag_list = normalize_tags(body.tags or [])
+    results: list[dict] = []
+    errors: list[dict] = []
+    for pair in body.pairs:
+        vid = int(pair.video_id)
+        aid = int(pair.audio_id)
+        if vid <= 0 or aid <= 0 or vid == aid:
+            errors.append({"video_id": vid, "audio_id": aid, "error": "invalid ids"})
+            continue
+        mv = db.get(MediaItem, vid)
+        ma = db.get(MediaItem, aid)
+        if not mv or not ma:
+            errors.append({"video_id": vid, "audio_id": aid, "error": "not found"})
+            continue
+        vpath = medias / mv.rel_path
+        apath = medias / ma.rel_path
+        if not vpath.is_file() or not apath.is_file():
+            errors.append({"video_id": vid, "audio_id": aid, "error": "file missing"})
+            continue
+        title_tpl = (body.title or "").strip()
+        if title_tpl:
+            title = (
+                title_tpl.replace("{video}", mv.title or "")
+                .replace("{audio}", ma.title or "")
+                .strip()
+            )
+        else:
+            title = (mv.title or "merged").strip()
+            if ma.title and ma.title not in title:
+                title = f"{title}+{ma.title}"
+        title = (title or "merged")[:512]
+        fname = safe_filename(title, f"merge|{vid}|{aid}", "mp4")
+        dest = medias / fname
+        try:
+            if dest.exists():
+                dest.unlink()
+            merge_av_to_mp4(vpath, apath, dest)
+            item = register_uploaded_file(
+                category="default",
+                dest=dest,
+                title=title,
+                source_url=f"merge://{vid}+{aid}",
+                media_type="video",
+                mime="video/mp4",
+                dedupe=False,
+                tags=tag_list
+                or normalize_tags(
+                    tags_from_json(getattr(mv, "tags_json", None))
+                    + tags_from_json(getattr(ma, "tags_json", None))
+                ),
+            )
+            if body.delete_sources:
+                for m in (mv, ma):
+                    try:
+                        _delete_media_row(db, m)
+                    except Exception:
+                        pass
+                db.commit()
+            results.append(
+                {
+                    "media_id": item.id,
+                    "item": _media_out(item),
+                    "video_id": vid,
+                    "audio_id": aid,
+                    "note": "merged",
+                }
+            )
+        except Exception as e:
+            if dest.exists():
+                try:
+                    dest.unlink()
+                except OSError:
+                    pass
+            errors.append(
+                {
+                    "video_id": vid,
+                    "audio_id": aid,
+                    "error": str(e)[:400],
+                }
+            )
+    return {
+        "merged": len(results),
+        "failed": len(errors),
+        "items": results,
+        "errors": errors,
     }
 
 

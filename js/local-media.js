@@ -10,6 +10,22 @@
      */
     let wantSound = false;
 
+    /** Matched A/V pairs for merge (page items and/or server library ids) */
+    const PAIR_COLORS = [
+        "#60a5fa",
+        "#f472b6",
+        "#34d399",
+        "#fbbf24",
+        "#a78bfa",
+        "#fb7185",
+        "#22d3ee",
+        "#c084fc",
+    ];
+    /** @type {{source:'page'|'library', video_key?:string, audio_key?:string, video_id?:number, audio_id?:number, pair_index:number, score?:number, delta_sec?:number}[]} */
+    let avPairs = [];
+    /** key or id -> { pair_index, role } */
+    const avPairByKey = new Map();
+
     function setStatus(msg) {
         $("#status").text(msg || "");
     }
@@ -344,14 +360,13 @@
         if ($pv.hasClass("hide")) return;
         destroyHls(previewHls);
         previewHls = null;
-        const video = $pv.find("video").get(0);
-        if (video) {
+        $pv.find("video, audio").each(function () {
             try {
-                video.pause();
-                video.removeAttribute("src");
-                video.load();
+                this.pause();
+                this.removeAttribute("src");
+                this.load();
             } catch (_) {}
-        }
+        });
         $("#lmPreviewStage").empty();
         $("#lmPreviewMeta").empty();
         $pv.addClass("hide").attr("aria-hidden", "true");
@@ -480,6 +495,18 @@
                 })
             );
             showMeta();
+        } else if (type === "audio") {
+            const $a = $("<audio/>").attr({ controls: true, preload: "auto" });
+            $a.css({ width: "min(92vw, 480px)", margin: "24px auto", display: "block" });
+            const el = $a[0];
+            el.muted = !wantSound;
+            wireVideoSound(el);
+            $stage.append($a);
+            applyPlayHeaders(it, () => {
+                el.src = it.url;
+                el.play().catch(() => {});
+            });
+            showMeta();
         } else if (type === "video" || isStreamUrl(it.url, type)) {
             showMeta();
             mountVideo(isStreamUrl(it.url, type));
@@ -500,9 +527,445 @@
         const n = listLen != null ? listLen : $("#grid .lm-card").length;
         const total = items.length;
         const filterHint = n !== total && total ? `（筛后 ${n}/${total}）` : "";
+        const pairHint = avPairs.length ? ` · 可合并 ${avPairs.length} 对` : "";
         setStatus(
-            `共 ${n} 项${filterHint}，已选 ${selected.size} · 服务器 ${LMW.baseUrl()} · 单击选择 / 双击预览`
+            `共 ${n} 项${filterHint}，已选 ${selected.size}${pairHint} · 服务器 ${LMW.baseUrl()} · 单击选择 / 双击预览`
         );
+        updateMergeBtn();
+    }
+
+    function updateMergeBtn() {
+        const btn = document.getElementById("btnMergeAvSelected");
+        if (!btn) return;
+        const n = collectMergePairs().length;
+        btn.disabled = n === 0;
+        btn.textContent = n > 0 ? `合并选中音视频 (${n})` : "合并选中音视频";
+    }
+
+    function clearAvPairs() {
+        avPairs = [];
+        avPairByKey.clear();
+        applyPairMarks();
+        updateMergeBtn();
+    }
+
+    function setAvPairs(pairs) {
+        avPairs = pairs || [];
+        avPairByKey.clear();
+        for (const p of avPairs) {
+            const idx = Number(p.pair_index) || 0;
+            if (p.source === "page") {
+                if (p.video_key) avPairByKey.set(p.video_key, { pair_index: idx, role: "video", pair: p });
+                if (p.audio_key) avPairByKey.set(p.audio_key, { pair_index: idx, role: "audio", pair: p });
+                if (p.video_key) selected.add(p.video_key);
+                if (p.audio_key) selected.add(p.audio_key);
+            } else {
+                // library ids stored as "lib:123"
+                if (p.video_id) avPairByKey.set("lib:" + p.video_id, { pair_index: idx, role: "video", pair: p });
+                if (p.audio_id) avPairByKey.set("lib:" + p.audio_id, { pair_index: idx, role: "audio", pair: p });
+            }
+        }
+        applyPairMarks();
+        // refresh selected styles
+        $("#grid .lm-card").each(function () {
+            applyCardSelected($(this), $(this).attr("data-key"));
+        });
+        updateMergeBtn();
+    }
+
+    function applyPairMarks() {
+        $("#grid .lm-card").each(function () {
+            const $card = $(this);
+            const key = $card.attr("data-key");
+            const info = avPairByKey.get(key);
+            $card.removeClass("lm-av-pair lm-av-pair-role-video lm-av-pair-role-audio");
+            $card.css("--lm-pair-c", "");
+            $card.find(".lm-pair-badge").remove();
+            if (!info) return;
+            const color = PAIR_COLORS[info.pair_index % PAIR_COLORS.length];
+            $card.addClass("lm-av-pair lm-av-pair-role-" + info.role);
+            $card.css("--lm-pair-c", color);
+            const prefix = info.role === "video" ? "V·" : "A·";
+            $card.append(
+                $("<span class='lm-pair-badge'/>")
+                    .text(prefix + "对" + (info.pair_index + 1))
+                    .attr("title", "时长匹配对 #" + (info.pair_index + 1))
+            );
+        });
+    }
+
+    function collectMergePairs() {
+        const out = [];
+        const seen = new Set();
+        for (const p of avPairs) {
+            if (p.source === "page") {
+                const both =
+                    selected.size === 0 ||
+                    (selected.has(p.video_key) && selected.has(p.audio_key));
+                if (!both) continue;
+                const k = "p:" + p.video_key + "|" + p.audio_key;
+                if (seen.has(k)) continue;
+                seen.add(k);
+                out.push(p);
+            } else {
+                const k = "l:" + p.video_id + "|" + p.audio_id;
+                if (seen.has(k)) continue;
+                seen.add(k);
+                out.push(p);
+            }
+        }
+        return out;
+    }
+
+    function durationMatchScore(d1, d2, absTol = 0.45, relTol = 0.02) {
+        if (!(d1 > 0.05) || !(d2 > 0.05)) return null;
+        const delta = Math.abs(d1 - d2);
+        const base = Math.max(d1, d2);
+        if (delta > absTol && delta / base > relTol) return null;
+        return 1 - Math.min(1, delta / base);
+    }
+
+    /**
+     * Content-based type + duration for progressive files.
+     * Prefers server download→ffprobe (handles audio disguised as .mp4).
+     * Falls back to HTMLMediaElement (videoWidth===0 ⇒ audio).
+     */
+    async function classifyItemContent(it) {
+        if (!it || !it.url) return null;
+        const t0 = mediaTypeOf(it);
+        if (t0 === "m3u8" || t0 === "dash" || t0 === "image" || t0 === "gif") {
+            return { media_type: t0, duration_sec: null, method: "skip" };
+        }
+        // Server: download to temp + ffprobe (authoritative)
+        try {
+            const headers = {};
+            const src = it._headers || {};
+            for (const [k, v] of Object.entries(src)) {
+                if (v == null || v === "") continue;
+                if (/^(referer|cookie|user-agent|origin|authorization)$/i.test(k)) {
+                    headers[k] = String(v);
+                }
+            }
+            const r = await LMW.probeUrl({ url: it.url, headers });
+            if (r && r.media_type) {
+                it.media_type = r.media_type;
+                it._contentRole = r.role || "";
+                it._durationSec =
+                    r.duration_sec != null && Number(r.duration_sec) > 0
+                        ? Number(r.duration_sec)
+                        : it._durationSec;
+                it._classifyMethod = r.method || "server";
+                return {
+                    media_type: r.media_type,
+                    duration_sec: it._durationSec,
+                    role: r.role,
+                    method: r.method,
+                };
+            }
+        } catch (e) {
+            console.warn("probe-url failed, fallback element", it.url, e);
+        }
+        // Client fallback: <video> with no picture plane ≈ audio-only container
+        return probeItemWithElement(it);
+    }
+
+    function probeItemWithElement(it, timeoutMs = 12000) {
+        return new Promise((resolve) => {
+            // Always use <video> so we can read videoWidth (audio-only mp4 still loads)
+            const el = document.createElement("video");
+            el.preload = "metadata";
+            el.muted = true;
+            el.playsInline = true;
+            let done = false;
+            const finish = (info) => {
+                if (done) return;
+                done = true;
+                try {
+                    el.removeAttribute("src");
+                    el.load();
+                } catch (_) {}
+                resolve(info);
+            };
+            const timer = setTimeout(() => finish(null), timeoutMs);
+            el.addEventListener("loadedmetadata", () => {
+                clearTimeout(timer);
+                const d = el.duration;
+                const hasVideo = (el.videoWidth || 0) > 0 && (el.videoHeight || 0) > 0;
+                const duration_sec = Number.isFinite(d) && d > 0 ? d : null;
+                const media_type = hasVideo ? "video" : duration_sec ? "audio" : mediaTypeOf(it);
+                it.media_type = media_type;
+                it._durationSec = duration_sec;
+                it._contentRole = hasVideo ? "has_video" : "audio_only_guess";
+                it._classifyMethod = "element";
+                finish({ media_type, duration_sec, role: it._contentRole, method: "element" });
+            });
+            el.addEventListener("error", () => {
+                clearTimeout(timer);
+                finish(null);
+            });
+            applyPlayHeaders(it, () => {
+                try {
+                    el.src = it.url;
+                } catch (_) {
+                    clearTimeout(timer);
+                    finish(null);
+                }
+            });
+        });
+    }
+
+    async function detectPageAvPairs(pool) {
+        // Reclassify progressive items by content (not extension)
+        const progressive = pool.filter((it) => {
+            const t = mediaTypeOf(it);
+            return t === "video" || t === "audio" || t === "m3u8" || t === "dash"
+                ? t === "video" || t === "audio"
+                : !isStreamUrl(it.url, t) && t !== "image" && t !== "gif";
+        });
+        setStatus(`内容识别中… ${progressive.length} 个 progressive 文件（服务端临时下载 + ffprobe）`);
+        let classified = 0;
+        // Limit concurrency to avoid hammering server/CDN
+        const queue = progressive.slice();
+        const workers = Array.from({ length: Math.min(3, queue.length || 1) }, async () => {
+            while (queue.length) {
+                const it = queue.shift();
+                if (!it) break;
+                if (it._classifyMethod === "server" || it._classifyMethod === "element") {
+                    classified++;
+                    continue;
+                }
+                await classifyItemContent(it);
+                classified++;
+                if (classified % 3 === 0) {
+                    setStatus(`内容识别中… ${classified}/${progressive.length}`);
+                }
+            }
+        });
+        await Promise.all(workers);
+
+        const videos = [];
+        const audios = [];
+        for (const it of pool) {
+            const t = mediaTypeOf(it);
+            // 仅完整单文件 progressive，不含 m3u8/dash
+            if (t === "video") videos.push(it);
+            else if (t === "audio") audios.push(it);
+        }
+        if (!videos.length || !audios.length) {
+            return {
+                pairs: [],
+                videos: videos.length,
+                audios: audios.length,
+                probed: classified,
+            };
+        }
+        setStatus(`比对时长… 视频 ${videos.length} · 音频 ${audios.length}`);
+        for (const it of [...videos, ...audios]) {
+            if (it._durationSec == null || !(it._durationSec > 0)) {
+                const r = await classifyItemContent(it);
+                if (r && r.duration_sec) it._durationSec = r.duration_sec;
+            }
+        }
+        // Re-bucket after reclassify may have flipped types
+        videos.length = 0;
+        audios.length = 0;
+        for (const it of pool) {
+            const t = mediaTypeOf(it);
+            if (t === "video") videos.push(it);
+            else if (t === "audio") audios.push(it);
+        }
+        const vOk = videos.filter((v) => v._durationSec > 0.05);
+        const aOk = audios.filter((a) => a._durationSec > 0.05);
+        const candidates = [];
+        for (const v of vOk) {
+            for (const a of aOk) {
+                const sc = durationMatchScore(v._durationSec, a._durationSec);
+                if (sc == null || sc < 0.97) continue;
+                candidates.push({
+                    score: sc,
+                    delta: v._durationSec - a._durationSec,
+                    v,
+                    a,
+                });
+            }
+        }
+        candidates.sort((x, y) => y.score - x.score || Math.abs(x.delta) - Math.abs(y.delta));
+        const usedV = new Set();
+        const usedA = new Set();
+        const pairs = [];
+        for (const c of candidates) {
+            if (usedV.has(c.v._key) || usedA.has(c.a._key)) continue;
+            usedV.add(c.v._key);
+            usedA.add(c.a._key);
+            pairs.push({
+                source: "page",
+                video_key: c.v._key,
+                audio_key: c.a._key,
+                video_item: c.v,
+                audio_item: c.a,
+                pair_index: pairs.length,
+                score: +c.score.toFixed(5),
+                delta_sec: c.delta,
+                video_duration: c.v._durationSec,
+                audio_duration: c.a._durationSec,
+            });
+        }
+        return { pairs, videos: videos.length, audios: audios.length, probed: classified, vOk: vOk.length, aOk: aOk.length };
+    }
+
+    async function detectAvMergePairs() {
+        const btn = document.getElementById("btnDetectAvMerge");
+        if (btn) btn.disabled = true;
+        try {
+            // 仅在已勾选项中检测可合并的音/视频对
+            const pool = getSelectedItems();
+            if (!pool.length) {
+                setStatus("请先勾选要检测的媒体项");
+                clearAvPairs();
+                return;
+            }
+            if (pool.length < 2) {
+                setStatus("请至少勾选 2 项（需同时有视频与音频，或伪装成视频的纯音频）");
+                clearAvPairs();
+                return;
+            }
+
+            // Even video-only selection may contain disguised audio — reclassify first
+            const r = await detectPageAvPairs(pool);
+            render(); // refresh badges after content type flips
+            if (r.pairs.length) {
+                setAvPairs(r.pairs);
+                setStatus(
+                    `选中项中找到 ${r.pairs.length} 对可合并（已着色勾选）` +
+                        ` · 内容识别后 视频 ${r.videos} · 音频 ${r.audios}` +
+                        (r.vOk != null ? ` · 有效时长 V${r.vOk}/A${r.aOk}` : "")
+                );
+                return;
+            }
+            setStatus(
+                `选中项中未找到高度匹配对（视频 ${r.videos} · 音频 ${r.audios}` +
+                    (r.vOk != null ? ` · 可读时长 V${r.vOk}/A${r.aOk}` : "") +
+                    `）。请确认已同时勾选 progressive 视频与音频。`
+            );
+            clearAvPairs();
+        } catch (e) {
+            setStatus("检测失败：" + ((e && e.message) || e));
+            clearAvPairs();
+        } finally {
+            if (btn) btn.disabled = false;
+            updateMergeBtn();
+        }
+    }
+
+    async function fetchItemBlob(it) {
+        const headers = {};
+        const src = (it && it._headers) || {};
+        for (const [k, v] of Object.entries(src)) {
+            if (v == null || v === "") continue;
+            if (/^(referer|cookie|user-agent|origin|authorization)$/i.test(k)) {
+                headers[k] = String(v);
+            }
+        }
+        return new Promise((resolve, reject) => {
+            const doFetch = async () => {
+                try {
+                    const res = await fetch(it.url, {
+                        credentials: "include",
+                        headers,
+                        redirect: "follow",
+                    });
+                    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+                    const blob = await res.blob();
+                    if (!blob || blob.size < 32) throw new Error("empty blob");
+                    resolve(blob);
+                } catch (e) {
+                    reject(e);
+                }
+            };
+            applyPlayHeaders(it, () => {
+                doFetch();
+            });
+        });
+    }
+
+    async function mergeSelectedAv() {
+        const pairs = collectMergePairs();
+        if (!pairs.length) {
+            setStatus("请先「检测选中中的可合并项」");
+            return;
+        }
+        const pageN = pairs.filter((p) => p.source === "page").length;
+        const libN = pairs.filter((p) => p.source === "library").length;
+        if (
+            !confirm(
+                `合并 ${pairs.length} 对音视频并写入媒体库？\n` +
+                    (pageN
+                        ? `· 当前列表 ${pageN} 对：下载后合并，仅保留合并成品（临时文件自动清理）\n`
+                        : "") +
+                    (libN
+                        ? `· 服务器库 ${libN} 对：库内合并后删除原来的分离音/视频\n`
+                        : "")
+            )
+        ) {
+            return;
+        }
+        const btn = document.getElementById("btnMergeAvSelected");
+        const detectBtn = document.getElementById("btnDetectAvMerge");
+        if (btn) btn.disabled = true;
+        if (detectBtn) detectBtn.disabled = true;
+        let ok = 0;
+        let fail = 0;
+        const restricted = !!(document.getElementById("lmRestricted") && document.getElementById("lmRestricted").checked);
+        const useJasna = !!(document.getElementById("lmUseJasna") && document.getElementById("lmUseJasna").checked);
+        try {
+            // library pairs batch
+            const libPairs = pairs.filter((p) => p.source === "library");
+            if (libPairs.length) {
+                setStatus(`库内合并 0/${libPairs.length}…`);
+                const r = await LMW.mergeAvLibrary({
+                    pairs: libPairs.map((p) => ({ video_id: p.video_id, audio_id: p.audio_id })),
+                    // 合并成功后删除库内原来的分离音/视频，只留成品
+                    delete_sources: true,
+                });
+                ok += r.merged || 0;
+                fail += r.failed || 0;
+            }
+            // page pairs one by one
+            const pagePairs = pairs.filter((p) => p.source === "page");
+            for (let i = 0; i < pagePairs.length; i++) {
+                const p = pagePairs[i];
+                setStatus(`下载合并 ${i + 1}/${pagePairs.length}…`);
+                try {
+                    const vItem = p.video_item || items.find((x) => x._key === p.video_key);
+                    const aItem = p.audio_item || items.find((x) => x._key === p.audio_key);
+                    if (!vItem || !aItem) throw new Error("item missing");
+                    const [vBlob, aBlob] = await Promise.all([fetchItemBlob(vItem), fetchItemBlob(aItem)]);
+                    const title =
+                        (vItem.title || vItem.name || "merged").replace(/\.[^.]+$/, "") +
+                        "+" +
+                        (aItem.title || aItem.name || "audio").replace(/\.[^.]+$/, "");
+                    await LMW.uploadAvBlobs(vBlob, aBlob, {
+                        title,
+                        source_url: vItem.url || "",
+                        filename: title,
+                        restricted,
+                        use_jasna: useJasna,
+                    });
+                    ok++;
+                } catch (e) {
+                    fail++;
+                    console.warn("merge page pair", e);
+                }
+            }
+            setStatus(`合并完成：成功 ${ok}` + (fail ? ` · 失败 ${fail}` : "") + " · 已写入媒体库");
+            clearAvPairs();
+        } catch (e) {
+            setStatus("合并失败：" + ((e && e.message) || e));
+        } finally {
+            if (btn) btn.disabled = false;
+            if (detectBtn) detectBtn.disabled = false;
+            updateMergeBtn();
+        }
     }
 
     /** 只改选中样式，不要整表重绘（否则会打断 dblclick） */
@@ -512,6 +975,7 @@
         $card.find("input.ck").prop("checked", on);
         const it = items.find((x) => x._key === key);
         updateRangeBadge($card, it);
+        updateMergeBtn();
     }
 
     function parseTimeToSeconds(time) {
@@ -1108,9 +1572,22 @@
             $card.prepend($img);
             return;
         }
-        const $v = $("<video class='lm-card-motion' muted loop playsinline preload='auto'/>");
+        // 悬停预览带声音；若浏览器拦截有声 autoplay，回退静音再尝试
+        const $v = $("<video class='lm-card-motion' loop playsinline preload='auto'/>");
         $card.prepend($v);
         const v = $v[0];
+        v.muted = false;
+        v.volume = 1;
+        const playHoverWithSound = () => {
+            v.muted = false;
+            return v.play().catch(() => {
+                v.muted = true;
+                return v.play().then(() => {
+                    // 部分浏览器要求先以 muted 启动，再在同一用户手势链外尝试取消静音
+                    v.muted = false;
+                }).catch(() => {});
+            });
+        };
         applyPlayHeaders(it, () => {
             // 卡片可能已离开
             if (!hoverPlayCard || hoverPlayCard[0] !== $card[0]) return;
@@ -1121,7 +1598,7 @@
                     hoverHls.loadSource(it.url);
                     hoverHls.attachMedia(v);
                     hoverHls.on(Hls.Events.MANIFEST_PARSED, () => {
-                        v.play().catch(() => {});
+                        playHoverWithSound();
                     });
                     hoverHls.on(Hls.Events.ERROR, (_e, data) => {
                         if (data && data.fatal) {
@@ -1135,9 +1612,11 @@
                 const candidates = it._playUrl
                     ? [it._playUrl, ...playUrlCandidates(it.url)]
                     : playUrlCandidates(it.url);
-                bindVideoSrcWithFallback(v, candidates, { autoplay: true, muted: true })
+                bindVideoSrcWithFallback(v, candidates, { autoplay: false, muted: false })
                     .then(({ url }) => {
                         it._playUrl = url;
+                        if (!hoverPlayCard || hoverPlayCard[0] !== $card[0]) return;
+                        playHoverWithSound();
                     })
                     .catch(() => {
                         // 悬停失败静默：保留首帧海报
@@ -1379,7 +1858,8 @@
             const $card = $("<div class='lm-card'/>")
                 .toggleClass("selected", checked)
                 .toggleClass("lm-card-motion-ready", isMotion)
-                .attr("data-key", key);
+                .attr("data-key", key)
+                .attr("data-type", type);
             if (type === "image") {
                 const $img = $("<img class='lm-card-static'/>").attr({
                     src: it.url,
@@ -1395,6 +1875,9 @@
                     }
                 });
                 $card.append($img);
+            } else if (type === "audio") {
+                $card.append($("<div class='lm-card-poster'/>"));
+                $card.append($("<div class='lm-card-play'/>").text("♪"));
             } else if (isMotion) {
                 // 默认静态首帧（懒加载截取）；悬停才播完整动图/视频
                 $card.append($("<div class='lm-card-poster'/>"));
@@ -1421,6 +1904,7 @@
             bindCardEvents($card, it, key);
             $grid.append($card);
         });
+        applyPairMarks();
         updateStatusCount(list.length);
     }
 
@@ -1571,7 +2055,8 @@
      */
     const PAGE_IMAGE_FN = () => {
         const IMAGE_EXT = /\.(jpe?g|png|gif|webp|avif|bmp|jfif)(\?|#|$)/i;
-        const VIDEO_EXT = /\.(mp4|webm|mov|m4v)(\?|#|$)/i;
+        const VIDEO_EXT = /\.(mp4|webm|mov|m4v|mkv)(\?|#|$)/i;
+        const AUDIO_EXT = /\.(mp3|m4a|aac|flac|wav|ogg|opus|wma|oga)(\?|#|$)/i;
         const STREAM_EXT = /\.(m3u8|mpd)(\?|#|$)/i;
         const MEDIA_EXT = /\.(jpe?g|png|gif|webp|avif|bmp|jfif|mp4|webm|mov|m4v|m3u8|mpd)(\?|#|$)/i;
         const SKIP_URL =
@@ -1654,7 +2139,12 @@
         }
 
         function isMediaUrl(u) {
-            return isImageUrl(u) || VIDEO_EXT.test(u || "") || STREAM_EXT.test(u || "");
+            return (
+                isImageUrl(u) ||
+                VIDEO_EXT.test(u || "") ||
+                AUDIO_EXT.test(u || "") ||
+                STREAM_EXT.test(u || "")
+            );
         }
 
         function guessMediaType(u, forceGif) {
@@ -1662,6 +2152,7 @@
             if (/\.m3u8(\?|#|$)/i.test(u) || /hls[^/]*\.m3u8|\/hls_/i.test(u)) return "m3u8";
             if (/\.mpd(\?|#|$)/i.test(u) || /dash[^/]*\.mpd|\/dash_/i.test(u)) return "dash";
             if (/\.gif(\?|#|$)/i.test(u)) return "gif";
+            if (AUDIO_EXT.test(u)) return "audio";
             if (VIDEO_EXT.test(u)) return forceGif ? "gif" : "video";
             if (/\.webp(\?|#|$)/i.test(u) && (pageIsGifSection || forceGif || /\/gif|pinporn|animated/i.test(u))) {
                 return "gif";
@@ -2055,10 +2546,16 @@
                 if (/\.gif(\?|#|$)/i.test(n)) sc = 80;
                 if (pageIsGifSection && /\.webp(\?|#|$)/i.test(n)) sc = 78;
                 if (VIDEO_EXT.test(n)) sc = 84;
+                if (AUDIO_EXT.test(n)) sc = 86;
                 if (STREAM_EXT.test(n) || /m3u8|\.mpd/i.test(n)) sc = 92;
                 if (e.transferSize > 50000) sc += 8;
                 addCandidate(n, sc, null, "", {
-                    forceGif: pageIsGifSection && !VIDEO_EXT.test(n) && !STREAM_EXT.test(n),
+                    forceGif:
+                        pageIsGifSection &&
+                        !VIDEO_EXT.test(n) &&
+                        !STREAM_EXT.test(n) &&
+                        !AUDIO_EXT.test(n),
+                    media_type: AUDIO_EXT.test(n) ? "audio" : undefined,
                     source: "performance",
                     resolved: true,
                 });
@@ -2078,6 +2575,8 @@
                             source: "json-stream",
                             resolved: true,
                         });
+                    } else if (AUDIO_EXT.test(u)) {
+                        addCandidate(u, 90, null, "", { media_type: "audio", source: "json-audio", resolved: true });
                     } else if (VIDEO_EXT.test(u)) {
                         addCandidate(u, 88, null, "", { media_type: "video", source: "json-video", resolved: true });
                     } else if (IMAGE_EXT.test(u) && /movie_|trailer|poster|screenshot|ss_/i.test(u)) {
@@ -2213,6 +2712,22 @@
             } catch (_) {}
         })();
 
+        // audio elements
+        document.querySelectorAll("audio").forEach((a) => {
+            const sources = [];
+            if (a.currentSrc) sources.push(a.currentSrc);
+            if (a.src) sources.push(a.src);
+            a.querySelectorAll("source[src]").forEach((s) => {
+                if (s.src) sources.push(s.src);
+            });
+            for (const s of sources) {
+                const u = abs(s);
+                if (!u || isSkip(u)) continue;
+                addCandidate(u, 90, null, "", { media_type: "audio", source: "audio-tag" });
+            }
+            collectFromEl(a, 70);
+        });
+
         // video + source
         document.querySelectorAll("video").forEach((v) => {
             const poster = abs(v.getAttribute("poster") || "");
@@ -2262,20 +2777,24 @@
         document.querySelectorAll("source[src]").forEach((s) => {
             const u = abs(s.src || s.getAttribute("src"));
             if (!u || isSkip(u)) return;
-            if (!VIDEO_EXT.test(u) && !STREAM_EXT.test(u)) return;
+            if (!VIDEO_EXT.test(u) && !STREAM_EXT.test(u) && !AUDIO_EXT.test(u)) return;
             addCandidate(u, 80, null, "", {
                 media_type: guessMediaType(u, false),
                 source: "source-tag",
             });
         });
-        document.querySelectorAll('a[href*=".mp4"], a[href*=".webm"], a[href*=".m3u8"]').forEach((a) => {
-            const u = abs(a.href);
-            if (!u || isSkip(u) || !isMediaUrl(u)) return;
-            addCandidate(u, 75, null, (a.textContent || "").trim().slice(0, 80), {
-                media_type: guessMediaType(u, false),
-                source: "anchor-video",
+        document
+            .querySelectorAll(
+                'a[href*=".mp4"], a[href*=".webm"], a[href*=".m3u8"], a[href*=".mp3"], a[href*=".m4a"], a[href*=".aac"], a[href*=".flac"], a[href*=".ogg"], a[href*=".opus"]'
+            )
+            .forEach((a) => {
+                const u = abs(a.href);
+                if (!u || isSkip(u) || !isMediaUrl(u)) return;
+                addCandidate(u, 75, null, (a.textContent || "").trim().slice(0, 80), {
+                    media_type: guessMediaType(u, false),
+                    source: "anchor-media",
+                });
             });
-        });
 
         // img
         document.querySelectorAll("img").forEach((img) => {
@@ -2423,7 +2942,9 @@
                             ? "image/gif"
                             : x.media_type === "video"
                               ? "video/*"
-                              : "image/*",
+                              : x.media_type === "audio"
+                                ? "audio/*"
+                                : "image/*",
                 score: x.score,
                 source: x.source || "dom",
             }));
@@ -2679,11 +3200,19 @@
             items = [...map.values()];
             items.forEach((it, i) => {
                 it._key = it.url + "#" + i;
+                // Prefer network Content-Type so disguised audio is not forced to video by .mp4 URL
+                if (!it.media_type) {
+                    it.media_type = LMW.normalizeMediaType(it);
+                }
             });
             selected.clear();
+            clearAvPairs();
             await enrichHeaders(items, pageUrl);
             render();
-            setStatus(`载入 ${items.length} 条嗅探资源`);
+            const audioN = items.filter((x) => mediaTypeOf(x) === "audio").length;
+            setStatus(
+                `载入 ${items.length} 条嗅探资源` + (audioN ? `（含音频 ${audioN}）` : "")
+            );
         } catch (e) {
             setStatus("载入失败: " + e.message);
         }
@@ -2843,6 +3372,11 @@
 
     $("#btnParseImages").on("click", parsePageImages);
     $("#btnLoadCaught").on("click", loadCaught);
+    $("#btnDetectAvMerge").on("click", () => detectAvMergePairs());
+    $("#btnMergeAvSelected").on("click", () => mergeSelectedAv());
+    $("#btnOpenManage").on("click", () => {
+        chrome.tabs.create({ url: chrome.runtime.getURL("lmw-media-manage.html") });
+    });
     $("#btnSelectAll").on("click", () => {
         const list = getFilteredItems();
         list.forEach((it) => selected.add(it._key));

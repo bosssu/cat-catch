@@ -87,6 +87,18 @@ class Settings(BaseSettings):
     hls_partial_strategy: str = "tolerate"  # strict | tolerate | stop
     hls_max_duration_min: int = 180
 
+    # Feed ranking (random + recommend). Flat keys so settings.yaml maps cleanly.
+    feed_random_pool_mult: int = 3  # random: sample limit * mult then diversify
+    feed_recommend_candidate_recent: int = 250  # recent-id half of candidate pool
+    feed_recommend_candidate_random: int = 250  # RANDOM() long-tail half
+    feed_recommend_temperature: float = 28.0  # Gumbel; higher = more shuffle
+    feed_explore_every: int = 5  # force explore slot every N items; 0 = off
+    feed_fatigue_half_life_hours: float = 18.0
+    feed_w_interest: float = 0.45
+    feed_w_fresh: float = 0.20
+    feed_w_explore: float = 0.20
+    feed_w_revisit: float = 0.15
+
     profile: str = "pc"
 
     def medias_path(self) -> Path:

@@ -12,7 +12,7 @@ from app.services.util import url_hash
 
 IMAGE_EXT = {".jpg", ".jpeg", ".png", ".gif", ".webp", ".avif", ".bmp"}
 VIDEO_EXT = {".mp4", ".webm", ".mkv", ".mov", ".ts", ".m4v"}
-AUDIO_EXT = {".mp3", ".m4a", ".aac", ".ogg", ".opus", ".wav", ".flac"}
+AUDIO_EXT = {".mp3", ".m4a", ".aac", ".flac", ".wav", ".ogg", ".opus", ".wma", ".aiff", ".aif", ".oga"}
 
 
 def purge_missing_media() -> dict:
@@ -90,18 +90,46 @@ def rescan_medias(*, purge: bool = False) -> dict:
         if rel.startswith("."):
             continue
         ext = path.suffix.lower()
-        if ext in IMAGE_EXT:
-            mtype = "gif" if ext == ".gif" else "image"
-        elif ext in VIDEO_EXT:
-            mtype = "video"
-        elif ext in AUDIO_EXT:
-            mtype = "audio"
-        else:
+        # Candidate filter by extension OR always try classify for common media-ish names
+        maybe_media = (
+            ext in IMAGE_EXT
+            or ext in AUDIO_EXT
+            or ext in VIDEO_EXT
+            or ext in {".bin", ".dat", ".m4s", ".mp4a", ".f4v", ".3gp"}
+        )
+        if not maybe_media:
+            skipped += 1
+            continue
+        # Content classification (audio often uses .mp4 suffix)
+        try:
+            from app.services.media_process import classify_media_file
+
+            cls = classify_media_file(path)
+            mtype = cls.get("media_type") or "video"
+            mime = cls.get("mime") or ""
+        except Exception:
+            if ext in IMAGE_EXT:
+                mtype = "gif" if ext == ".gif" else "image"
+            elif ext in AUDIO_EXT:
+                mtype = "audio"
+            elif ext in VIDEO_EXT:
+                mtype = "video"
+            else:
+                skipped += 1
+                continue
+            mime = ""
+        if mtype not in ("image", "gif", "video", "audio"):
             skipped += 1
             continue
         with session_scope() as db:
             exists = db.scalars(select(MediaItem).where(MediaItem.rel_path == rel)).first()
             if exists:
+                # Fix mislabeled audio-as-video on rescan
+                if exists.media_type != mtype and mtype in ("audio", "video"):
+                    exists.media_type = mtype
+                    if mime:
+                        exists.mime = mime
+                    db.commit()
                 skipped += 1
                 continue
             item = MediaItem(
@@ -112,6 +140,7 @@ def rescan_medias(*, purge: bool = False) -> dict:
                 source_url="",
                 url_hash=url_hash(rel, "default"),
                 file_size=path.stat().st_size,
+                mime=mime,
                 tags_json="[]",
             )
             db.add(item)

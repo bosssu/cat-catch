@@ -539,6 +539,17 @@ async def _run_direct(
         dest_dir.mkdir(parents=True, exist_ok=True)
         dest = ensure_unique_path(dest_dir / fname)
         shutil.move(str(tmp_path), str(dest))
+        # Content probe after download (audio may use .mp4 suffix)
+        try:
+            from app.services.media_process import classify_media_file
+
+            cls = classify_media_file(dest, hinted=mtype, content_type=ct)
+            if cls.get("media_type") in ("audio", "video", "image", "gif"):
+                mtype = cls["media_type"]
+            if cls.get("mime"):
+                ct = cls["mime"] or ct
+        except Exception as e:
+            logger.warning("classify after download failed: %s", e)
         if used_gopeed:
             warn = "gopeed"
         elif used_multi:
@@ -805,13 +816,26 @@ async def _register_media(
         rel = dest.resolve().relative_to(settings.medias_path().resolve()).as_posix()
     except Exception:
         rel = dest.name
+    # Content-based type (audio tracks often ship as .mp4)
+    try:
+        from app.services.media_process import classify_media_file
+
+        cls = classify_media_file(dest, hinted=media_type, content_type=mime)
+        if cls.get("media_type") in ("audio", "video", "image", "gif"):
+            media_type = cls["media_type"]
+        if cls.get("mime"):
+            mime = cls["mime"] or mime
+    except Exception as e:
+        logger.warning("classify in _register_media: %s", e)
+    if media_type == "m3u8":
+        media_type = "video"
     with session_scope() as db:
         job = db.get(DownloadJob, job_id)
         tags_json = (job.tags_json if job and getattr(job, "tags_json", None) else None) or "[]"
         item = MediaItem(
             category="default",
             title=title[:512],
-            media_type=media_type if media_type != "m3u8" else "video",
+            media_type=media_type,
             rel_path=rel,
             source_url=source_url[:2048],
             url_hash=uh,
@@ -888,7 +912,11 @@ def register_uploaded_file(
 
     Uploads from extension capture must use dedupe=False: same page URL is reused
     for every capture and would otherwise collapse to the first row (unplayable).
+
+    media_type is re-checked via content (ffprobe / magic); extension is not trusted
+    (e.g. pure audio packaged as .mp4 → stored as audio).
     """
+    from app.services.media_process import classify_media_file
     from app.services.tags import normalize_tags, tags_from_json, tags_to_json
 
     settings = get_settings()
@@ -897,6 +925,12 @@ def register_uploaded_file(
     except Exception:
         rel = dest.name
     size = dest.stat().st_size if dest.is_file() else 0
+    # Content-based type: never trust suffix alone
+    cls = classify_media_file(dest, hinted=media_type, content_type=mime)
+    media_type = cls.get("media_type") or media_type or "video"
+    if media_type == "m3u8":
+        media_type = "video"
+    mime = (cls.get("mime") or mime or "").strip()
     # Unique per file path + size so re-uploads never clobber DB identity
     uh = url_hash(f"upload|{rel}|{size}|{source_url or ''}", "default")
     tag_json = tags_to_json(tags or [])
@@ -911,6 +945,7 @@ def register_uploaded_file(
         if existing:
             existing.file_size = size
             existing.mime = mime or existing.mime
+            existing.media_type = media_type or existing.media_type
             existing.title = (title or existing.title or dest.stem)[:512]
             if tags:
                 merged = normalize_tags(tags_from_json(existing.tags_json) + list(tags))

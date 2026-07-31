@@ -112,8 +112,23 @@ def index():
     return {"message": "LocalMediaWeb API", "docs": "/docs", "health": "/api/health"}
 
 
+@app.get("/manifest.webmanifest")
+def web_manifest():
+    path = STATIC_DIR / "manifest.webmanifest"
+    if not path.is_file():
+        return Response(status_code=404)
+    return FileResponse(
+        path,
+        media_type="application/manifest+json",
+        headers={"Cache-Control": "public, max-age=300, must-revalidate"},
+    )
+
+
 if STATIC_DIR.is_dir():
     app.mount("/assets", StaticFiles(directory=STATIC_DIR / "assets"), name="assets")
+    icons_dir = STATIC_DIR / "icons"
+    if icons_dir.is_dir():
+        app.mount("/icons", StaticFiles(directory=icons_dir), name="icons")
 
 
 def run() -> None:

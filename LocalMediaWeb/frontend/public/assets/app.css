@@ -69,18 +69,37 @@ html.lmw-standalone #app {
   max-height: 100dvh;
   overflow: hidden;
 }
-/* Admin / grid / search need page scroll inside standalone */
-html.lmw-standalone body.is-scroll-page {
-  overflow: auto;
-  max-height: none;
-  height: auto;
+/*
+ * Grid / admin / search need document scroll.
+ * - Feed (standalone) locks html+body overflow; non-feed must unlock BOTH.
+ * - Use !important so residual lmw-viewport-freeze / standalone max-height cannot trap.
+ */
+html:has(body.is-scroll-page),
+html.is-scroll-page,
+html.lmw-standalone:has(body.is-scroll-page),
+html.lmw-standalone.is-scroll-page,
+body.is-scroll-page {
+  overflow-x: hidden !important;
+  overflow-y: auto !important;
+  height: auto !important;
+  max-height: none !important;
+  min-height: 100%;
   min-height: 100dvh;
-  background: var(--bg);
+  -webkit-overflow-scrolling: touch;
+  overscroll-behavior-y: auto;
 }
-html.lmw-standalone body.is-scroll-page #app {
-  height: auto;
-  max-height: none;
-  overflow: visible;
+body.is-scroll-page {
+  touch-action: pan-y;
+}
+body.is-scroll-page #app {
+  height: auto !important;
+  max-height: none !important;
+  overflow: visible !important;
+}
+html.lmw-standalone:has(body.is-scroll-page),
+html.lmw-standalone.is-scroll-page,
+html.lmw-standalone body.is-scroll-page {
+  background: var(--bg);
 }
 html.lmw-standalone #view-feed,
 html.lmw-standalone .feed-scroller {
@@ -577,49 +596,6 @@ body.search-open .topnav { display: none; }
 #lmwFeedPlayer.is-ready {
   opacity: 1;
 }
-/*
- * Audio feed visual is 100% CSS so DOM remounts / black video cannot cover the note.
- * ::before = gradient + note icon (data-URI SVG). <audio> is parked off-layout.
- */
-.media-stage-audio {
-  background: #0c1018;
-}
-.media-stage-audio::before {
-  content: "";
-  position: absolute;
-  inset: 0;
-  z-index: 4;
-  pointer-events: none;
-  background:
-    url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'><circle cx='32' cy='32' r='30' fill='rgba(80,110,180,0.35)' stroke='rgba(200,220,255,0.7)' stroke-width='2'/><path fill='rgba(240,245,255,0.95)' d='M40 12v28.5a9 9 0 1 1-4-7.5V20l14-4v6.2l-10 2.8V12z'/></svg>")
-      center / min(42vw, 160px) no-repeat,
-    radial-gradient(ellipse at 50% 38%, #3a4d7a 0%, #1a2238 42%, #0c1018 100%);
-}
-/* Keep legacy DOM art as fallback but never block CSS icon */
-.media-stage-audio .audio-stage-art {
-  display: none;
-}
-/* Decoder only — never paint a black frame over the note */
-.media-stage-audio video,
-.media-stage-audio video.feed-player,
-.media-stage-audio #lmwFeedPlayer,
-.media-stage-audio audio.feed-audio-player,
-.media-stage-audio #lmwFeedAudio {
-  position: absolute !important;
-  width: 1px !important;
-  height: 1px !important;
-  opacity: 0.01 !important; /* not 0: some WebKit builds skip fully-invisible media */
-  pointer-events: none !important;
-  left: 0 !important;
-  top: 0 !important;
-  max-width: 1px !important;
-  max-height: 1px !important;
-  background: transparent !important;
-}
-.lightbox .lb-audio {
-  width: min(92vw, 480px);
-  max-width: 100%;
-}
 /* Loading spinner while single-stream buffer is empty */
 .media-loading {
   position: absolute;
@@ -823,11 +799,12 @@ body.is-chrome-hidden .media-play-toggle {
 
 /*
  * Viewport freeze (any rotate / big resize): kill snap + scroll while geometry rebuilds.
+ * Only on feed (not .is-scroll-page) so grid/admin cannot get stuck non-scrollable.
  */
-body.lmw-viewport-freeze {
+body.lmw-viewport-freeze:not(.is-scroll-page) {
   overflow: hidden !important;
 }
-body.lmw-viewport-freeze #feedScroller {
+body.lmw-viewport-freeze:not(.is-scroll-page) #feedScroller {
   overflow: hidden !important;
   overflow-y: hidden !important;
   scroll-snap-type: none !important;
@@ -882,7 +859,7 @@ body.lmw-orient-shielded .lmw-land-controls {
  * Phone landscape immersive (CSS "fullscreen" — never video.requestFullscreen).
  * Avoids browser pause-on-exit which broke inline playback after rotate.
  */
-body.lmw-phone-landscape {
+body.lmw-phone-landscape:not(.is-scroll-page) {
   overflow: hidden;
   background: #000;
 }
@@ -1419,21 +1396,6 @@ button.chip.tag.is-active {
   width: 100%;
   height: 100%;
 }
-.grid .cell .cell-thumb-audio {
-  background: radial-gradient(ellipse at 50% 45%, #2a3550 0%, #141820 100%);
-  object-fit: none;
-}
-.grid .cell .cell-thumb-audio::after {
-  content: "♪";
-  position: absolute;
-  inset: 0;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  font-size: 42px;
-  opacity: 0.7;
-  pointer-events: none;
-}
 .grid .cell .cell-motion {
   position: absolute;
   inset: 0;
@@ -1633,16 +1595,6 @@ button.chip.tag.is-active {
   background: #000;
   flex-shrink: 0;
   border: 1px solid var(--card-border);
-}
-.admin-thumb-audio {
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  background: radial-gradient(ellipse at 50% 45%, #2a3550 0%, #141820 100%);
-  color: #c8d2e6;
-  font-size: 26px;
-  line-height: 1;
-  user-select: none;
 }
 .admin-media-meta { flex: 1; min-width: 0; font-size: 13px; }
 .jobs .job {

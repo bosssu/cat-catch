@@ -189,26 +189,168 @@
         }
     }
 
+    /**
+     * Sample library items and rank multi-tag sets (exact co-occurrence).
+     * Falls back to frequent pairs when full sets are sparse.
+     */
+    async function loadTagCombos() {
+        const listEl = $("mmTagCombosList");
+        if (!listEl) return;
+        listEl.innerHTML = `<span class="muted mm-tag-combos-empty">统计中…</span>`;
+        try {
+            const setCounts = new Map(); // key -> { tags, count }
+            const pairCounts = new Map();
+            const pageLimit = 100;
+            const maxScan = 800;
+            let offset = 0;
+            let total = Infinity;
+            let scanned = 0;
+
+            while (offset < maxScan && offset < total) {
+                const data = await LMW.listMedia({
+                    offset,
+                    limit: pageLimit,
+                    sort: "new",
+                });
+                total = Number(data.total) || 0;
+                const items = data.items || [];
+                if (!items.length) break;
+                for (const m of items) {
+                    const raw = Array.isArray(m.tags) ? m.tags : [];
+                    const tags = [
+                        ...new Set(
+                            raw
+                                .map((t) => String(t || "").trim())
+                                .filter(Boolean)
+                        ),
+                    ].sort((a, b) => a.localeCompare(b, "zh"));
+                    if (tags.length < 2) continue;
+                    const key = tags.join("\0");
+                    const prev = setCounts.get(key) || { tags, count: 0 };
+                    prev.count += 1;
+                    setCounts.set(key, prev);
+                    for (let i = 0; i < tags.length; i++) {
+                        for (let j = i + 1; j < tags.length; j++) {
+                            const pk = tags[i] + "\0" + tags[j];
+                            const p = pairCounts.get(pk) || {
+                                tags: [tags[i], tags[j]],
+                                count: 0,
+                            };
+                            p.count += 1;
+                            pairCounts.set(pk, p);
+                        }
+                    }
+                }
+                scanned += items.length;
+                offset += items.length;
+                if (items.length < pageLimit) break;
+            }
+
+            let combos = [...setCounts.values()]
+                .filter((c) => c.count >= 1 && c.tags.length >= 2)
+                .sort((a, b) => b.count - a.count || b.tags.length - a.tags.length);
+
+            // Pad with co-occurring pairs if full sets are few
+            if (combos.length < 12) {
+                const seen = new Set(combos.map((c) => c.tags.join("\0")));
+                const pairs = [...pairCounts.values()]
+                    .filter((c) => c.count >= 2)
+                    .sort((a, b) => b.count - a.count);
+                for (const p of pairs) {
+                    const k = p.tags.join("\0");
+                    if (seen.has(k)) continue;
+                    seen.add(k);
+                    combos.push(p);
+                    if (combos.length >= 20) break;
+                }
+            }
+
+            combos = combos.slice(0, 20);
+            renderTagCombos(combos, scanned);
+        } catch (e) {
+            listEl.innerHTML = `<span class="muted mm-tag-combos-empty">标签组合加载失败</span>`;
+            console.warn("loadTagCombos", e);
+        }
+    }
+
+    function renderTagCombos(combos, scanned) {
+        const listEl = $("mmTagCombosList");
+        if (!listEl) return;
+        if (!combos || !combos.length) {
+            listEl.innerHTML = `<span class="muted mm-tag-combos-empty">暂无多标签组合（入库带标签后会出现）</span>`;
+            return;
+        }
+        listEl.innerHTML = combos
+            .map((c) => {
+                const text = c.tags.join(", ");
+                const display = c.tags.map((t) => "#" + t).join(" ");
+                return `<button type="button" class="mm-tag-combo" data-tags="${escapeHtml(
+                    text
+                )}" title="点击复制：${escapeHtml(text)}${
+                    scanned ? ` · 采样 ${scanned} 条` : ""
+                }"><span class="mm-tag-combo-text">${escapeHtml(
+                    display
+                )}</span><span class="mm-tag-combo-count">×${c.count}</span></button>`;
+            })
+            .join("");
+    }
+
+    async function copyTagCombo(text, btn) {
+        const value = String(text || "").trim();
+        if (!value) return;
+        try {
+            await navigator.clipboard.writeText(value);
+        } catch (_) {
+            // fallback
+            const ta = document.createElement("textarea");
+            ta.value = value;
+            ta.style.position = "fixed";
+            ta.style.left = "-9999px";
+            document.body.appendChild(ta);
+            ta.select();
+            try {
+                document.execCommand("copy");
+            } catch (e) { /* ignore */ }
+            ta.remove();
+        }
+        const input = $("mmUploadTags");
+        if (input) {
+            input.value = value;
+            input.dispatchEvent(new Event("input", { bubbles: true }));
+        }
+        setStatus("已复制标签组合：" + value);
+        if (btn) {
+            btn.classList.add("is-copied");
+            setTimeout(() => btn.classList.remove("is-copied"), 900);
+        }
+    }
+
     const RESTRICTED_TAG = "限制级";
 
     function isRestricted(m) {
         return (m.tags || []).includes(RESTRICTED_TAG);
     }
 
+    function typeLabel(t) {
+        const map = { video: "视频", audio: "音频", image: "图片", gif: "动图", m3u8: "m3u8" };
+        return map[t] || t || "media";
+    }
+
     function cardHtml(m) {
         const tags = (m.tags || []).map((t) => "#" + t).join(" ");
         const liked = m.liked ? "♥ " : "";
         const restricted = isRestricted(m);
-        return `<article class="mm-card${restricted ? " is-restricted" : ""}" data-id="${m.id}" data-type="${escapeHtml(m.media_type || "")}">
+        const mtype = m.media_type || "";
+        return `<article class="mm-card${restricted ? " is-restricted" : ""}" data-id="${m.id}" data-type="${escapeHtml(mtype)}">
   <input type="checkbox" class="mm-card-check" data-id="${m.id}" aria-label="选择 #${m.id}" />
   <div class="mm-thumb-wrap" data-preview="${m.id}" title="预览">
-    <div class="mm-thumb-ph" data-thumb-ph="${m.id}">${escapeHtml(m.media_type || "media")}</div>
+    <div class="mm-thumb-ph" data-thumb-ph="${m.id}">${escapeHtml(typeLabel(mtype))}</div>
     <img alt="" data-thumb="${m.id}" data-src="${escapeHtml(m.thumb_url || "")}" hidden />
     ${restricted ? `<span class="mm-badge-r" title="限制级">R</span>` : ""}
   </div>
   <div class="mm-card-body">
     <div class="mm-card-title" title="${escapeHtml(m.title || "")}">${escapeHtml(m.title || "(无标题)")}</div>
-    <div class="mm-card-meta">${liked}#${m.id} · ${escapeHtml(m.media_type || "")} · ${formatSize(m.file_size)}</div>
+    <div class="mm-card-meta">${liked}#${m.id} · ${escapeHtml(typeLabel(mtype))} · ${formatSize(m.file_size)}</div>
     <div class="mm-card-tags">${escapeHtml(tags || "无标签")}</div>
     <label class="mm-card-restricted" title="切换「限制级」标签">
       <input type="checkbox" class="mm-restricted-toggle" data-id="${m.id}" ${restricted ? "checked" : ""} />
@@ -363,6 +505,7 @@
             await refreshAllTagAc();
             await loadList({ reset: true });
             await loadTagOptions();
+            loadTagCombos();
         } catch (e) {
             setStatus("打标签失败：" + (e.message || e));
         }
@@ -381,6 +524,7 @@
             state.selected.clear();
             await loadList({ reset: true });
             await loadTagOptions();
+            loadTagCombos();
         } catch (e) {
             setStatus("批量删除失败：" + (e.message || e));
         }
@@ -448,6 +592,12 @@
         const t = (file.type || "").toLowerCase();
         if (t.includes("gif") || n.endsWith(".gif")) return "gif";
         if (t.startsWith("image/") || /\.(png|jpe?g|webp|avif|bmp)$/i.test(n)) return "image";
+        if (
+            t.startsWith("audio/") ||
+            /\.(mp3|m4a|aac|flac|wav|ogg|opus|wma|aiff?|oga)$/i.test(n)
+        ) {
+            return "audio";
+        }
         return "video";
     }
 
@@ -556,6 +706,7 @@
         if (done) await refreshAllTagAc();
         await loadList({ reset: true });
         await loadTagOptions();
+        loadTagCombos();
         setStatus(
             (failed ? `上传完成（${failed} 失败）` : "上传完成") +
                 (tags.length ? " · 标签 " + tags.map((t) => "#" + t).join(" ") : "")
@@ -569,7 +720,7 @@
         box.classList.add("hide");
         box.setAttribute("aria-hidden", "true");
         const stage = $("mmPreviewStage");
-        stage.querySelectorAll("video").forEach((v) => {
+        stage.querySelectorAll("video, audio").forEach((v) => {
             try {
                 v.pause();
                 v.removeAttribute("src");
@@ -596,6 +747,13 @@
                 img.src = url;
                 img.alt = m.title || "";
                 stage.appendChild(img);
+            } else if (m.media_type === "audio") {
+                const a = document.createElement("audio");
+                a.src = url;
+                a.controls = true;
+                a.autoplay = true;
+                a.style.width = "min(92vw, 480px)";
+                stage.appendChild(a);
             } else {
                 const v = document.createElement("video");
                 v.src = url;
@@ -647,6 +805,7 @@
             );
             await refreshAllTagAc();
             await loadTagOptions();
+            loadTagCombos();
         } catch (e) {
             setStatus("保存失败：" + (e.message || e));
         }
@@ -696,12 +855,24 @@
         $("btnRefresh").onclick = () => {
             checkHealth();
             loadTagOptions();
+            loadTagCombos();
             loadList({ reset: true });
         };
         $("btnOpenFeed").onclick = () => {
             chrome.tabs.create({ url: LMW.baseUrl() + "/" });
         };
         $("btnMore").onclick = () => loadList({ reset: false });
+
+        const combosList = $("mmTagCombosList");
+        if (combosList) {
+            combosList.addEventListener("click", (e) => {
+                const btn = e.target.closest(".mm-tag-combo");
+                if (!btn) return;
+                e.preventDefault();
+                e.stopPropagation();
+                copyTagCombo(btn.getAttribute("data-tags") || "", btn);
+            });
+        }
 
         const reloadDebounced = debounce(() => loadList({ reset: true }), 300);
         $("mmQ").addEventListener("input", reloadDebounced);
@@ -901,6 +1072,7 @@
         bind();
         await checkHealth();
         await loadTagOptions();
+        loadTagCombos();
         await loadList({ reset: true });
     }
 

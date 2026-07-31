@@ -519,6 +519,72 @@ const LMW = {
         });
     },
 
+    /**
+     * Duration-match silent video + pure audio in the library (server ffprobe).
+     * @param {{ ids?: number[], abs_tol_sec?: number, min_score?: number, include_av_videos?: boolean }} body
+     */
+    matchAvPairs(body = {}) {
+        return this.request("/api/media/av-match", {
+            method: "POST",
+            headers: this.headers(true),
+            body: JSON.stringify({
+                ids: body.ids || [],
+                abs_tol_sec: body.abs_tol_sec ?? 0.45,
+                rel_tol: body.rel_tol ?? 0.02,
+                min_score: body.min_score ?? 0.97,
+                include_av_videos: !!body.include_av_videos,
+            }),
+        });
+    },
+
+    /**
+     * Server downloads URL to temp dir and classifies with ffprobe/magic (no extension trust).
+     * @param {{ url: string, headers?: object, max_bytes?: number }} body
+     */
+    probeUrl(body = {}) {
+        return this.request("/api/media/probe-url", {
+            method: "POST",
+            headers: this.headers(true),
+            body: JSON.stringify({
+                url: body.url || "",
+                headers: body.headers || {},
+                max_bytes: body.max_bytes || 0,
+            }),
+        });
+    },
+
+    /**
+     * Re-probe library files on disk and fix media_type (audio-in-.mp4 etc.).
+     * @param {{ ids?: number[], include_images?: boolean }} body
+     */
+    reclassifyMedia(body = {}) {
+        return this.request("/api/media/reclassify", {
+            method: "POST",
+            headers: this.headers(true),
+            body: JSON.stringify({
+                ids: body.ids || [],
+                include_images: !!body.include_images,
+            }),
+        });
+    },
+
+    /**
+     * Merge library video_id + audio_id pairs into new video media items.
+     * @param {{ pairs: {video_id:number,audio_id:number}[], tags?: string[], title?: string, delete_sources?: boolean }} body
+     */
+    mergeAvLibrary(body = {}) {
+        return this.request("/api/media/merge-av", {
+            method: "POST",
+            headers: this.headers(true),
+            body: JSON.stringify({
+                pairs: body.pairs || [],
+                tags: body.tags || [],
+                title: body.title || "",
+                delete_sources: !!body.delete_sources,
+            }),
+        });
+    },
+
     listTags(params = {}) {
         const q = new URLSearchParams();
         if (params.q) q.set("q", params.q);
@@ -1554,11 +1620,58 @@ const LMW = {
         if (declared === "image" || type.startsWith("image/") || /\.(png|jpe?g|webp|avif|bmp)(\?|$)/i.test(url)) {
             return "image";
         }
-        if (declared === "video" || type.startsWith("video/") || /\.(mp4|webm|mkv|mov)(\?|$)/i.test(url)) {
+        // Prefer Content-Type / declared type over extension (audio may use .mp4/.bin disguise)
+        if (declared === "audio" || type.startsWith("audio/")) {
+            return "audio";
+        }
+        // Extension hints for common audio containers (not sole truth when CT present)
+        if (
+            /\.(mp3|m4a|aac|flac|wav|ogg|opus|wma|oga)(\?|#|$)/i.test(url) &&
+            !type.startsWith("video/")
+        ) {
+            return "audio";
+        }
+        if (declared === "video" || type.startsWith("video/") || /\.(mp4|webm|mkv|mov|m4v)(\?|$)/i.test(url)) {
             return "video";
         }
         if (data.isPlay) return "video";
         return "video";
+    },
+
+    /**
+     * Merge separate progressive video + audio blobs into one library video.
+     */
+    async uploadAvBlobs(videoBlob, audioBlob, meta = {}) {
+        const fd = new FormData();
+        fd.append("category", meta.category || "default");
+        fd.append("title", meta.title || "");
+        fd.append("source_url", meta.source_url || meta.url || "");
+        const restricted = !!(
+            meta.restricted === true ||
+            meta.restricted === 1 ||
+            meta.restricted === "1"
+        );
+        const tags = this.applyRestrictedTag(meta.tags || [], restricted);
+        if (tags.length) fd.append("tags", JSON.stringify(tags));
+        if (meta.use_jasna) fd.append("use_jasna", "1");
+        if (restricted) fd.append("restricted", "1");
+        const base = (meta.filename || meta.title || "merge").replace(/\.[^.]+$/, "");
+        fd.append("video", videoBlob, `${base}_video.mp4`);
+        if (audioBlob && audioBlob.size > 32) {
+            fd.append("audio", audioBlob, `${base}_audio.m4a`);
+        }
+        const headers = this.headers(false);
+        delete headers["Content-Type"];
+        const res = await fetch(this.baseUrl() + "/api/upload-av", {
+            method: "POST",
+            headers,
+            body: fd,
+        });
+        if (!res.ok) {
+            const text = await res.text().catch(() => "");
+            throw new Error(`${text || res.statusText}`);
+        }
+        return res.json();
     },
 
     async itemToIngest(data, pageUrl, tags) {

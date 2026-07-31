@@ -5,7 +5,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <title>服务器媒体管理 · LocalMediaWeb</title>
   <link rel="stylesheet" href="css/public.css" />
-  <link rel="stylesheet" href="css/lmw-media-manage.css?v=20260730jasna1" />
+  <link rel="stylesheet" href="css/lmw-media-manage.css?v=20260731tagcombo1" />
   <script src="js/init.js"></script>
   <script src="js/function.js"></script>
   <script src="js/local-media-web.js"></script>
@@ -32,6 +32,7 @@
         <select id="mmType" class="mm-select" title="类型">
           <option value="">全部类型</option>
           <option value="video">视频</option>
+          <option value="audio">音频</option>
           <option value="image">图片</option>
           <option value="gif">动图</option>
         </select>
@@ -54,15 +55,26 @@
     <div class="mm-upload" id="mmDrop">
       <div class="mm-upload-layout">
         <div class="mm-upload-drop">
-          <div class="mm-upload-icon" aria-hidden="true">⬇</div>
-          <div class="mm-upload-title">拖放文件到此处</div>
-          <div class="muted mm-drop-hint">或右侧选择本地文件 · 可多次叠加 · 同名同大小自动去重</div>
-          <div id="mmUploadProg" class="mm-upload-prog muted"></div>
+          <div class="mm-upload-drop-top">
+            <div class="mm-upload-icon" aria-hidden="true">⬇</div>
+            <div class="mm-upload-title">拖放文件到此处</div>
+            <div class="muted mm-drop-hint">或右侧选择本地文件 · 可多次叠加 · 同名同大小自动去重</div>
+            <div id="mmUploadProg" class="mm-upload-prog muted"></div>
+          </div>
+          <div class="mm-tag-combos" id="mmTagCombos" aria-label="常用标签组合">
+            <div class="mm-tag-combos-head">
+              <span class="mm-tag-combos-title">常用标签组合</span>
+              <span class="muted mm-tag-combos-hint">点击复制 · 可填入右侧标签框</span>
+            </div>
+            <div class="mm-tag-combos-list" id="mmTagCombosList">
+              <span class="muted mm-tag-combos-empty">加载中…</span>
+            </div>
+          </div>
         </div>
         <div class="mm-upload-side">
           <label class="button2 mm-file-label">
             选择文件
-            <input type="file" id="mmFiles" multiple accept="video/*,image/*,.mp4,.webm,.mkv,.mov,.gif,.png,.jpg,.jpeg,.webp" hidden />
+            <input type="file" id="mmFiles" multiple accept="video/*,audio/*,image/*,.mp4,.webm,.mkv,.mov,.mp3,.m4a,.aac,.flac,.wav,.ogg,.opus,.gif,.png,.jpg,.jpeg,.webp" hidden />
           </label>
           <input type="text" id="mmUploadTags" class="mm-input mm-upload-tags" placeholder="本批标签" autocomplete="off" spellcheck="false" />
           <label class="mm-check mm-check-restricted" title="本批上传打上「限制级」标签">
@@ -130,6 +142,6 @@
     </div>
   </div>
 
-  <script src="js/lmw-media-manage.js?v=20260730jasna2"></script>
+  <script src="js/lmw-media-manage.js?v=20260731tagcombo1"></script>
 </body>
 </html>

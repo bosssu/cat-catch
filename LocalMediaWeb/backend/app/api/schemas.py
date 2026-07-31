@@ -132,6 +132,46 @@ class MediaPatch(BaseModel):
     restricted: bool | None = None
 
 
+class AvMatchRequest(BaseModel):
+    """Find duration-matched video_only + audio_only pairs in the library."""
+    # Optional subset; empty = scan all complete video/audio files
+    ids: list[int] = Field(default_factory=list)
+    abs_tol_sec: float = 0.45
+    rel_tol: float = 0.02
+    min_score: float = 0.97
+    # When True, also consider videos that already contain an audio stream
+    include_av_videos: bool = False
+
+
+class AvMergePair(BaseModel):
+    video_id: int
+    audio_id: int
+
+
+class AvMergeRequest(BaseModel):
+    """Merge library video+audio items into new playable videos."""
+    pairs: list[AvMergePair] = Field(default_factory=list)
+    tags: list[str] = Field(default_factory=list)
+    # Optional title template; {video} {audio} placeholders
+    title: str = ""
+    delete_sources: bool = False
+
+
+class MediaReclassifyRequest(BaseModel):
+    """Re-probe on-disk files and fix media_type (ignore extension). Empty ids = all video/audio."""
+    ids: list[int] = Field(default_factory=list)
+    # When true, also scan image-looking rows that may be mislabeled
+    include_images: bool = False
+
+
+class ProbeUrlRequest(BaseModel):
+    """Download a remote URL to a temp file and classify by content (ffprobe/magic)."""
+    url: str
+    headers: dict[str, str] = Field(default_factory=dict)
+    # Soft cap so huge files don't fill disk during probe (bytes); 0 = use max_file_bytes
+    max_bytes: int = 0
+
+
 class TagSuggestRequest(BaseModel):
     title: str = ""
     url: str = ""

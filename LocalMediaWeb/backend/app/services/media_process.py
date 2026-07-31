@@ -9,7 +9,7 @@ from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any
 
-from app.core.config import ffmpeg_available
+from app.core.config import ffmpeg_available, ffprobe_available
 
 logger = logging.getLogger("lmw.media_process")
 
@@ -269,6 +269,278 @@ def merge_av_to_mp4(video: Path, audio: Path | None, out: Path) -> Path:
     if not out.is_file() or out.stat().st_size == 0:
         raise RuntimeError("merge produced empty file")
     return out
+
+
+def probe_single_file_role(path: Path) -> dict[str, Any]:
+    """
+    Classify a complete local file for A/V pairing.
+    role: video_only | audio_only | av | unknown
+    duration_sec: primary timeline length (prefer stream, else format)
+    """
+    out: dict[str, Any] = {
+        "role": "unknown",
+        "duration_sec": None,
+        "has_video": False,
+        "has_audio": False,
+        "error": "",
+        "summary": "",
+    }
+    info = probe_av_timeline(path)
+    out["has_video"] = bool(info.has_video)
+    out["has_audio"] = bool(info.has_audio)
+    out["error"] = info.error or ""
+    out["summary"] = info.summary()
+    if info.has_video and info.has_audio:
+        out["role"] = "av"
+        # Prefer video duration when both present
+        out["duration_sec"] = info.v_duration or info.format_duration or info.a_duration
+    elif info.has_video:
+        out["role"] = "video_only"
+        out["duration_sec"] = info.v_duration or info.format_duration
+    elif info.has_audio:
+        out["role"] = "audio_only"
+        out["duration_sec"] = info.a_duration or info.format_duration
+    else:
+        out["role"] = "unknown"
+        out["duration_sec"] = info.format_duration
+    return out
+
+
+def sniff_image_kind(path: Path) -> str | None:
+    """
+    Magic-byte image detection (no extension). Returns 'gif' | 'image' | None.
+    """
+    try:
+        with path.open("rb") as f:
+            head = f.read(32)
+    except OSError:
+        return None
+    if len(head) < 12:
+        return None
+    if head[:3] == b"\xff\xd8\xff":
+        return "image"  # JPEG
+    if head[:8] == b"\x89PNG\r\n\x1a\n":
+        return "image"
+    if head[:6] in (b"GIF87a", b"GIF89a"):
+        return "gif"
+    if head[:2] == b"BM":
+        return "image"  # BMP
+    if head[:4] == b"RIFF" and head[8:12] == b"WEBP":
+        return "image"
+    # ISO BMFF (AVIF / HEIC) — treat still as image when ftyp avif/heic
+    if len(head) >= 12 and head[4:8] == b"ftyp":
+        brand = head[8:12]
+        if brand in (b"avif", b"avis", b"heic", b"heif", b"mif1"):
+            return "image"
+    return None
+
+
+def _guess_mime_for_type(path: Path, media_type: str) -> str:
+    import mimetypes
+
+    mime = mimetypes.guess_type(path.name)[0] or ""
+    if media_type == "audio":
+        if not mime or mime.startswith("video/"):
+            # disguised audio often stored as .mp4 — prefer audio/mp4 over video/mp4
+            suf = path.suffix.lower()
+            if suf in (".mp4", ".m4a", ".m4b", ".mp4a"):
+                return "audio/mp4"
+            if suf == ".webm":
+                return "audio/webm"
+            return mime or "audio/mpeg"
+        return mime
+    if media_type == "video":
+        return mime or "video/mp4"
+    if media_type == "gif":
+        return mime or "image/gif"
+    if media_type == "image":
+        return mime or "image/jpeg"
+    return mime or "application/octet-stream"
+
+
+def classify_media_file(
+    path: Path,
+    *,
+    hinted: str | None = None,
+    content_type: str | None = None,
+) -> dict[str, Any]:
+    """
+    Content-based media_type (does NOT trust file extension).
+
+    Priority:
+      1. Image magic bytes
+      2. ffprobe streams (audio_only → audio; any video stream → video)
+      3. Weak fallbacks: Content-Type, then hinted type, then 'video'
+
+    Returns dict with: media_type, role, has_video, has_audio, duration_sec,
+    mime, method, error, summary
+    """
+    hinted_l = (hinted or "").strip().lower() or None
+    ct = (content_type or "").lower()
+    result: dict[str, Any] = {
+        "media_type": "video",
+        "role": "unknown",
+        "has_video": False,
+        "has_audio": False,
+        "duration_sec": None,
+        "mime": "",
+        "method": "fallback",
+        "error": "",
+        "summary": "",
+    }
+    if not path or not path.is_file():
+        result["error"] = "missing"
+        if hinted_l in ("image", "gif", "video", "audio"):
+            result["media_type"] = hinted_l
+        result["mime"] = _guess_mime_for_type(path or Path("x.bin"), result["media_type"])
+        return result
+    try:
+        size = path.stat().st_size
+    except OSError:
+        size = 0
+    if size < 8:
+        result["error"] = "empty"
+        result["media_type"] = hinted_l if hinted_l in ("image", "gif", "video", "audio") else "video"
+        result["mime"] = _guess_mime_for_type(path, result["media_type"])
+        return result
+
+    # 1) Still images by magic (extension may be .bin / .mp4 spoof — rare but cheap)
+    img_kind = sniff_image_kind(path)
+    if img_kind:
+        result["media_type"] = img_kind
+        result["role"] = "image"
+        result["method"] = "magic"
+        result["mime"] = _guess_mime_for_type(path, img_kind)
+        return result
+
+    # 2) ffprobe stream topology — authoritative for A/V (handles audio-in-.mp4)
+    if ffprobe_available() or ffmpeg_available():
+        role_info = probe_single_file_role(path)
+        result["role"] = role_info.get("role") or "unknown"
+        result["has_video"] = bool(role_info.get("has_video"))
+        result["has_audio"] = bool(role_info.get("has_audio"))
+        result["duration_sec"] = role_info.get("duration_sec")
+        result["summary"] = role_info.get("summary") or ""
+        result["error"] = role_info.get("error") or ""
+        role = result["role"]
+        if role == "audio_only" or (result["has_audio"] and not result["has_video"]):
+            result["media_type"] = "audio"
+            result["method"] = "ffprobe"
+            result["mime"] = _guess_mime_for_type(path, "audio")
+            return result
+        if role in ("video_only", "av") or result["has_video"]:
+            result["media_type"] = "video"
+            result["method"] = "ffprobe"
+            result["mime"] = _guess_mime_for_type(path, "video")
+            return result
+        # probe ran but no streams — fall through
+        if not result["error"]:
+            result["error"] = "no_av_streams"
+    else:
+        result["error"] = "ffprobe_unavailable"
+
+    # 3) Weak fallbacks (only when content probe failed)
+    if ct.startswith("audio/"):
+        result["media_type"] = "audio"
+        result["method"] = "content_type"
+    elif ct.startswith("image/gif") or "gif" in ct:
+        result["media_type"] = "gif"
+        result["method"] = "content_type"
+    elif ct.startswith("image/"):
+        result["media_type"] = "image"
+        result["method"] = "content_type"
+    elif ct.startswith("video/"):
+        result["media_type"] = "video"
+        result["method"] = "content_type"
+    elif hinted_l in ("image", "gif", "video", "audio"):
+        result["media_type"] = hinted_l
+        result["method"] = "hint"
+    else:
+        result["media_type"] = "video"
+        result["method"] = "fallback"
+    result["mime"] = _guess_mime_for_type(path, result["media_type"])
+    return result
+
+
+def duration_match_score(
+    d1: float | None,
+    d2: float | None,
+    *,
+    abs_tol: float = 0.45,
+    rel_tol: float = 0.02,
+) -> float | None:
+    """
+    Return match score in [0,1] if within tolerance, else None.
+    High score = closer durations.
+    """
+    if d1 is None or d2 is None:
+        return None
+    try:
+        a = float(d1)
+        b = float(d2)
+    except (TypeError, ValueError):
+        return None
+    if a <= 0.05 or b <= 0.05:
+        return None
+    delta = abs(a - b)
+    base = max(a, b)
+    if delta > abs_tol and delta / base > rel_tol:
+        return None
+    # Score: 1 when identical, decays with relative error
+    score = 1.0 - min(1.0, delta / max(base, 1e-6))
+    return float(score)
+
+
+def match_av_by_duration(
+    videos: list[dict[str, Any]],
+    audios: list[dict[str, Any]],
+    *,
+    abs_tol: float = 0.45,
+    rel_tol: float = 0.02,
+    min_score: float = 0.97,
+) -> list[dict[str, Any]]:
+    """
+    Greedy bipartite match: each video/audio used at most once.
+    videos/audios items need: id, duration_sec, title (optional)
+    """
+    candidates: list[tuple[float, dict[str, Any]]] = []
+    for v in videos:
+        vd = v.get("duration_sec")
+        for a in audios:
+            ad = a.get("duration_sec")
+            sc = duration_match_score(vd, ad, abs_tol=abs_tol, rel_tol=rel_tol)
+            if sc is None or sc < min_score:
+                continue
+            candidates.append(
+                (
+                    sc,
+                    {
+                        "video_id": int(v["id"]),
+                        "audio_id": int(a["id"]),
+                        "video_duration": float(vd),
+                        "audio_duration": float(ad),
+                        "delta_sec": float(vd) - float(ad),
+                        "score": round(sc, 5),
+                        "video_title": v.get("title") or "",
+                        "audio_title": a.get("title") or "",
+                    },
+                )
+            )
+    candidates.sort(key=lambda x: (-x[0], abs(x[1]["delta_sec"])))
+    used_v: set[int] = set()
+    used_a: set[int] = set()
+    pairs: list[dict[str, Any]] = []
+    for sc, pair in candidates:
+        vid = pair["video_id"]
+        aid = pair["audio_id"]
+        if vid in used_v or aid in used_a:
+            continue
+        used_v.add(vid)
+        used_a.add(aid)
+        pair = dict(pair)
+        pair["pair_index"] = len(pairs)
+        pairs.append(pair)
+    return pairs
 
 
 def write_temp_bytes(data: bytes, suffix: str) -> Path:
