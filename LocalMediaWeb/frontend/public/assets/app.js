@@ -1414,7 +1414,7 @@
     }
   }
 
-  /** Move singleton player into the active slide stage; rebind progress. */
+  /** Move singleton player into the active slide stage; rebind progress if needed. */
   function mountFeedPlayer(slideEl) {
     if (!slideEl) return null;
     const stage = slideEl.querySelector(".media-stage");
@@ -1437,10 +1437,13 @@
     // data-src on stage is the clip URL for this slide
     const clip = stage.getAttribute("data-src") || "";
     if (clip) v.setAttribute("data-src", clip);
-    try {
-      delete stage.dataset.progressBound;
-    } catch (_) {}
-    bindFeedProgress(stage);
+    // Rebind only when unbound or bound to a different video element.
+    // Blindly rebinding stacked click handlers on the center toggle (pause→play stutter on iOS).
+    const already =
+      stage.dataset.progressBound === "1" && stage._progressVideo === v;
+    if (!already) {
+      bindFeedProgress(stage, { force: true });
+    }
     applySoundToVideo(v);
     if (document.body.classList.contains("lmw-phone-landscape")) {
       try {
@@ -2797,20 +2800,27 @@
    * tap stage → show bar & center button (no pause);
    * tap center button → pause / resume;
    * auto-hide after idle (while paused, keep center button for resume).
+   *
+   * @param {{ force?: boolean }} opts force=true replaces prior listeners (clone toggle)
+   *   so mountFeedPlayer never stacks pause/play handlers.
    */
-  function bindFeedProgress(stage) {
-    if (!stage || stage.dataset.progressBound === "1") return;
+  function bindFeedProgress(stage, opts = {}) {
+    if (!stage) return;
+    const force = !!opts.force;
     const video = stage.querySelector("video");
     const bar = stage.querySelector(".feed-progress");
     if (!video || !bar) return;
-    stage.dataset.progressBound = "1";
+    if (!force && stage.dataset.progressBound === "1" && stage._progressVideo === video) {
+      return;
+    }
 
-    const fill = bar.querySelector(".feed-progress-fill");
-    const knob = bar.querySelector(".feed-progress-knob");
-    const curEl = bar.querySelector(".cur");
-    const durEl = bar.querySelector(".dur");
-    const track = bar.querySelector(".feed-progress-track");
+    // Drop prior toggle listeners by replacing the node (same element can be rebound many times).
     let toggleBtn = stage.querySelector(".media-play-toggle");
+    if (toggleBtn && (force || stage.dataset.progressBound === "1")) {
+      const fresh = toggleBtn.cloneNode(true);
+      toggleBtn.replaceWith(fresh);
+      toggleBtn = fresh;
+    }
     if (!toggleBtn) {
       toggleBtn = document.createElement("button");
       toggleBtn.type = "button";
@@ -2822,6 +2832,23 @@
       stage.insertBefore(toggleBtn, bar);
     }
 
+    // Abort previous media/track listeners if rebinding
+    try {
+      stage._progressAbort?.abort();
+    } catch (_) {}
+    const ac = typeof AbortController !== "undefined" ? new AbortController() : null;
+    stage._progressAbort = ac;
+    const sig = ac ? { signal: ac.signal } : undefined;
+
+    stage.dataset.progressBound = "1";
+    stage._progressVideo = video;
+
+    const fill = bar.querySelector(".feed-progress-fill");
+    const knob = bar.querySelector(".feed-progress-knob");
+    const curEl = bar.querySelector(".cur");
+    const durEl = bar.querySelector(".dur");
+    const track = bar.querySelector(".feed-progress-track");
+
     let hideTimer = null;
     let seeking = false;
     /** UI scrub target (seconds); drives bar while user drags. */
@@ -2832,6 +2859,8 @@
     let lastSeekIssuedAt = 0;
     /** Was playing when scrub started → resume after final seek. */
     let resumeAfterScrub = false;
+    /** Debounce touchend + ghost click (iOS). */
+    let lastToggleAt = 0;
     const HIDE_MS = 2800;
     /**
      * Preview seek interval while dragging.
@@ -3006,28 +3035,36 @@
       syncToggleIcon();
     };
 
-    video.addEventListener("timeupdate", paint);
-    video.addEventListener("loadedmetadata", paint);
-    video.addEventListener("durationchange", paint);
-    video.addEventListener("seeked", onSeeked);
-    video.addEventListener("play", () => {
-      syncToggleIcon();
-      // autoplay / resume: never leave center button open unless user opened the bar
-      if (bar.classList.contains("is-visible")) {
-        hideBarSoon();
-      } else {
-        toggleBtn.classList.remove("is-visible");
-      }
-    });
-    video.addEventListener("pause", () => {
-      syncToggleIcon();
-      // programmatic pause (slide leave / load / scrub) must NOT flash the control
-      if (!isChromeHidden() && isUserPaused() && !seeking) {
-        toggleBtn.classList.add("is-visible");
-      } else if (!seeking) {
-        toggleBtn.classList.remove("is-visible");
-      }
-    });
+    video.addEventListener("timeupdate", paint, sig);
+    video.addEventListener("loadedmetadata", paint, sig);
+    video.addEventListener("durationchange", paint, sig);
+    video.addEventListener("seeked", onSeeked, sig);
+    video.addEventListener(
+      "play",
+      () => {
+        syncToggleIcon();
+        // autoplay / resume: never leave center button open unless user opened the bar
+        if (bar.classList.contains("is-visible")) {
+          hideBarSoon();
+        } else {
+          toggleBtn.classList.remove("is-visible");
+        }
+      },
+      sig
+    );
+    video.addEventListener(
+      "pause",
+      () => {
+        syncToggleIcon();
+        // programmatic pause (slide leave / load / scrub) must NOT flash the control
+        if (!isChromeHidden() && isUserPaused() && !seeking) {
+          toggleBtn.classList.add("is-visible");
+        } else if (!seeking) {
+          toggleBtn.classList.remove("is-visible");
+        }
+      },
+      sig
+    );
 
     // Only clicks that hit the video's drawn box (not letterbox / empty stage)
     // show progress + center control; do NOT toggle play on stage tap.
@@ -3044,90 +3081,132 @@
     };
 
     let tapTimer = null;
-    stage.addEventListener("click", (e) => {
-      if (e.target.closest(".feed-progress")) return;
-      if (e.target.closest(".media-play-toggle")) return;
-      if (e.target.closest(".hud")) return;
-      if (Date.now() < (stage._uiCooldownUntil || 0)) return;
-      // User gesture: complete phone-landscape fullscreen if auto request was blocked
-      try {
-        tryPendingLandscapeFullscreen();
-      } catch (_) {}
-      // Landscape: primarily hit-layer toggles; this is backup when meta HUD is up
-      // (hit has pointer-events:none) — do not require video pixel hit (letterbox OK).
-      const land = document.body.classList.contains("lmw-phone-landscape");
-      if (!land && !pointHitsVideo(e.clientX, e.clientY)) return;
-      if (tapTimer) clearTimeout(tapTimer);
-      tapTimer = setTimeout(() => {
-        tapTimer = null;
-        if (document.body.classList.contains("lmw-phone-landscape")) {
-          try {
-            state._landSuppressAutoShowUntil = 0;
-            if (isLandControlsOpen()) hideLandControls();
-            else showLandControls({ force: true, fromUser: true });
-          } catch (_) {}
-          return;
+    stage.addEventListener(
+      "click",
+      (e) => {
+        if (e.target.closest(".feed-progress")) return;
+        if (e.target.closest(".media-play-toggle")) return;
+        if (e.target.closest(".hud")) return;
+        if (Date.now() < (stage._uiCooldownUntil || 0)) return;
+        // User gesture: complete phone-landscape fullscreen if auto request was blocked
+        try {
+          tryPendingLandscapeFullscreen();
+        } catch (_) {}
+        // Landscape: primarily hit-layer toggles; this is backup when meta HUD is up
+        // (hit has pointer-events:none) — do not require video pixel hit (letterbox OK).
+        const land = document.body.classList.contains("lmw-phone-landscape");
+        if (!land && !pointHitsVideo(e.clientX, e.clientY)) return;
+        if (tapTimer) clearTimeout(tapTimer);
+        tapTimer = setTimeout(() => {
+          tapTimer = null;
+          if (document.body.classList.contains("lmw-phone-landscape")) {
+            try {
+              state._landSuppressAutoShowUntil = 0;
+              if (isLandControlsOpen()) hideLandControls();
+              else showLandControls({ force: true, fromUser: true });
+            } catch (_) {}
+            return;
+          }
+          // immersive: don't pop chrome when UI is hidden
+          if (!isChromeHidden()) showChrome();
+        }, 260);
+      },
+      sig
+    );
+    stage.addEventListener(
+      "dblclick",
+      () => {
+        if (tapTimer) {
+          clearTimeout(tapTimer);
+          tapTimer = null;
         }
-        // immersive: don't pop chrome when UI is hidden
-        if (!isChromeHidden()) showChrome();
-      }, 260);
-    });
-    stage.addEventListener("dblclick", () => {
-      if (tapTimer) {
-        clearTimeout(tapTimer);
-        tapTimer = null;
-      }
-    });
+      },
+      sig
+    );
 
-    toggleBtn.addEventListener("click", (e) => {
-      e.preventDefault();
-      e.stopPropagation();
+    /** Resolve live player (singleton may move; prefer current stage video). */
+    const getToggleVideo = () =>
+      stage.querySelector("video") || stage._progressVideo || video;
+
+    const doTogglePlayPause = () => {
+      const v = getToggleVideo();
+      if (!v || v.tagName !== "VIDEO") return;
       if (Date.now() < (stage._uiCooldownUntil || 0)) return;
-      if (video.paused) {
-        video.dataset.userPaused = "0";
+      const now = Date.now();
+      // iOS often delivers pointerup + ghost click → pause then immediate play (stutter)
+      if (now - lastToggleAt < 380) return;
+      lastToggleAt = now;
+      if (v.paused) {
+        v.dataset.userPaused = "0";
         // User gesture: hard resume (survives post-rotate / post-immersive stuck state)
         armPlaybackGuard(1500);
-        pauseOtherFeedVideos(video);
-        const slideEl = video.closest(".snap-slide");
+        pauseOtherFeedVideos(v);
+        const slideEl = v.closest(".snap-slide");
         if (slideEl) {
           try {
             mountFeedPlayer(slideEl);
           } catch (_) {}
         }
-        const gen = bumpVideoPlayGen(video);
-        playVideoRobust(video, gen).then((ok) => {
-          if (!ok || video.paused) {
-            // Gesture context still active — one more force activate
+        const live = getToggleVideo() || v;
+        const gen = bumpVideoPlayGen(live);
+        playVideoRobust(live, gen).then((ok) => {
+          if (!ok || live.paused) {
             if (slideEl) {
               try {
                 activateFeedSlide(slideEl, { force: true });
               } catch (_) {}
             } else {
-              softResumeFeedVideo(video);
+              softResumeFeedVideo(live);
             }
           } else {
-            video.classList.add("is-ready");
+            live.classList.add("is-ready");
             if (slideEl) setSlideLoading(slideEl, false);
           }
           syncToggleIcon();
         });
       } else {
-        video.dataset.userPaused = "1";
+        v.dataset.userPaused = "1";
         try {
-          video.pause();
+          v.pause();
         } catch (_) {}
       }
       syncToggleIcon();
       if (!isChromeHidden()) showChrome();
-    });
-    toggleBtn.addEventListener("dblclick", (e) => {
-      e.preventDefault();
-      e.stopPropagation();
-    });
+    };
+
+    // pointerup is the primary control on iOS; click is suppressed after pointer to kill ghost double-toggle
+    toggleBtn.addEventListener(
+      "pointerup",
+      (e) => {
+        if (e.button != null && e.button !== 0) return;
+        e.preventDefault();
+        e.stopPropagation();
+        doTogglePlayPause();
+      },
+      sig
+    );
+    toggleBtn.addEventListener(
+      "click",
+      (e) => {
+        e.preventDefault();
+        e.stopPropagation();
+        // Fallback for environments without Pointer Events; debounce still applies
+        doTogglePlayPause();
+      },
+      sig
+    );
+    toggleBtn.addEventListener(
+      "dblclick",
+      (e) => {
+        e.preventDefault();
+        e.stopPropagation();
+      },
+      sig
+    );
 
     const ratioFromEvent = (clientX) => {
       const rect = track.getBoundingClientRect();
-      const d = video.duration;
+      const d = getToggleVideo()?.duration;
       if (!rect.width || !d || !isFinite(d)) return null;
       const r = Math.min(1, Math.max(0, (clientX - rect.left) / rect.width));
       return { r, t: r * d, d };
@@ -3145,11 +3224,12 @@
     const onPointerDown = (e) => {
       if (!e.isPrimary && e.pointerType === "touch") return;
       seeking = true;
+      const v = getToggleVideo();
       // Pause while scrubbing so the decoder is not decoding + seeking at once.
-      resumeAfterScrub = !video.paused && video.dataset.userPaused !== "1";
-      if (!video.paused) {
+      resumeAfterScrub = !!(v && !v.paused && v.dataset.userPaused !== "1");
+      if (v && !v.paused) {
         try {
-          video.pause();
+          v.pause();
         } catch (_) {}
       }
       showChrome();
@@ -3184,13 +3264,16 @@
       resumeAfterSeekIfNeeded().catch(() => {});
     };
 
-    track.addEventListener("pointerdown", onPointerDown);
-    track.addEventListener("pointermove", onPointerMove);
-    track.addEventListener("pointerup", onPointerUp);
-    track.addEventListener("pointercancel", onPointerUp);
+    // Seek helpers use closed-over `video` — keep them on the bound element (singleton).
+    // scheduleSeek/flushSeek still reference `video` from outer scope — OK for shared player.
+
+    track.addEventListener("pointerdown", onPointerDown, sig);
+    track.addEventListener("pointermove", onPointerMove, sig);
+    track.addEventListener("pointerup", onPointerUp, sig);
+    track.addEventListener("pointercancel", onPointerUp, sig);
     // prevent stage immersive handlers from eating bar interactions
-    bar.addEventListener("click", (e) => e.stopPropagation());
-    bar.addEventListener("dblclick", (e) => e.stopPropagation());
+    bar.addEventListener("click", (e) => e.stopPropagation(), sig);
+    bar.addEventListener("dblclick", (e) => e.stopPropagation(), sig);
 
     syncToggleIcon();
     paint();
@@ -3753,8 +3836,58 @@
     }
   }
 
-  /** Review modal state: media id currently being edited */
+  /** Review modal state */
   let _reviewMediaId = null;
+  /** "view" | "edit" — has-content opens in view; empty opens in edit */
+  let _reviewUiMode = "edit";
+  /** Snapshot when opening / after save (view mode shows this; cancel edit reverts to it) */
+  let _reviewSavedText = "";
+
+  function applyReviewModalMode(mode) {
+    _reviewUiMode = mode === "view" ? "view" : "edit";
+    const input = document.getElementById("reviewInput");
+    const viewEl = document.getElementById("reviewViewText");
+    const btnEdit = document.getElementById("btnReviewEdit");
+    const btnSave = document.getElementById("btnReviewSave");
+    const btnClear = document.getElementById("btnReviewClear");
+    const btnCancel = document.getElementById("btnReviewCancel");
+    const isView = _reviewUiMode === "view";
+
+    if (viewEl) {
+      viewEl.textContent = _reviewSavedText || "";
+      viewEl.classList.toggle("hide", !isView);
+    }
+    if (input) {
+      if (isView) {
+        input.value = _reviewSavedText || "";
+        input.readOnly = true;
+        input.classList.add("hide");
+      } else {
+        input.readOnly = false;
+        input.classList.remove("hide");
+      }
+    }
+    if (btnEdit) btnEdit.classList.toggle("hide", !isView);
+    if (btnSave) btnSave.classList.toggle("hide", isView);
+    if (btnClear) btnClear.classList.toggle("hide", isView);
+    if (btnCancel) btnCancel.textContent = isView ? "关闭" : "取消";
+  }
+
+  function enterReviewEditMode() {
+    const input = document.getElementById("reviewInput");
+    if (input) {
+      input.value = _reviewSavedText || "";
+      input.readOnly = false;
+    }
+    applyReviewModalMode("edit");
+    try {
+      if (input) {
+        input.focus();
+        const len = input.value.length;
+        input.setSelectionRange(len, len);
+      }
+    } catch (_) {}
+  }
 
   function openReviewModal(id) {
     const item = state.items.find((x) => x.id === id);
@@ -3765,14 +3898,20 @@
     if (!modal || !input) return;
     const title = item ? (item.title || `#${id}`) : `#${id}`;
     if (sub) sub.textContent = title;
-    input.value = item && item.review != null ? String(item.review) : "";
+    const existing = item && item.review != null ? String(item.review) : "";
+    _reviewSavedText = existing;
+    input.value = existing;
     modal.classList.remove("hide");
     modal.setAttribute("aria-hidden", "false");
-    try {
-      input.focus();
-      const len = input.value.length;
-      input.setSelectionRange(len, len);
-    } catch (_) {}
+    // Empty → edit immediately; has content → read-only view until 编辑
+    if (existing.trim()) {
+      applyReviewModalMode("view");
+    } else {
+      applyReviewModalMode("edit");
+      try {
+        input.focus();
+      } catch (_) {}
+    }
   }
 
   function closeReviewModal() {
@@ -3782,6 +3921,29 @@
       modal.setAttribute("aria-hidden", "true");
     }
     _reviewMediaId = null;
+    _reviewUiMode = "edit";
+    _reviewSavedText = "";
+    const input = document.getElementById("reviewInput");
+    if (input) {
+      input.readOnly = false;
+      input.classList.remove("hide");
+      input.value = "";
+    }
+  }
+
+  function cancelReviewModal() {
+    // View: just close. Edit with prior content: discard draft back to view. Edit empty: close.
+    if (_reviewUiMode === "view") {
+      closeReviewModal();
+      return;
+    }
+    if ((_reviewSavedText || "").trim()) {
+      const input = document.getElementById("reviewInput");
+      if (input) input.value = _reviewSavedText;
+      applyReviewModalMode("view");
+      return;
+    }
+    closeReviewModal();
   }
 
   function syncReviewButton(id, reviewText) {
@@ -3794,13 +3956,16 @@
   async function saveReview({ clear = false } = {}) {
     const id = _reviewMediaId;
     if (id == null) return;
+    if (_reviewUiMode === "view" && !clear) return;
     const input = document.getElementById("reviewInput");
     let text = clear ? "" : input ? input.value : "";
     if (text.length > 2000) text = text.slice(0, 2000);
     const btnSave = document.getElementById("btnReviewSave");
     const btnClear = document.getElementById("btnReviewClear");
+    const btnEdit = document.getElementById("btnReviewEdit");
     if (btnSave) btnSave.disabled = true;
     if (btnClear) btnClear.disabled = true;
+    if (btnEdit) btnEdit.disabled = true;
     try {
       const m = await api(`/api/media/${id}`, {
         method: "PATCH",
@@ -3809,23 +3974,30 @@
       });
       const idx = state.items.findIndex((x) => x.id === id);
       if (idx >= 0) {
-        state.items[idx] = Object.assign({}, state.items[idx], m, { review: m.review != null ? m.review : text });
+        state.items[idx] = Object.assign({}, state.items[idx], m, {
+          review: m.review != null ? m.review : text,
+        });
       }
       const saved = idx >= 0 ? state.items[idx].review : text;
-      if (input && !clear) input.value = saved || "";
-      if (input && clear) input.value = "";
+      _reviewSavedText = saved || "";
+      if (input) input.value = _reviewSavedText;
       syncReviewButton(id, saved);
-      if (clear) {
-        // stay open after clear so user can retype; still persist empty
-      } else if (_reviewMediaId === id) {
-        // only close if still editing this id (avoid race if user opened another item)
-        closeReviewModal();
+      if (_reviewMediaId !== id) return;
+      // After save: if still has content → view mode; if cleared → stay in edit for rewrite
+      if ((saved || "").trim()) {
+        applyReviewModalMode("view");
+      } else {
+        applyReviewModalMode("edit");
+        try {
+          input?.focus();
+        } catch (_) {}
       }
     } catch (e) {
       alert("保存点评失败: " + e.message);
     } finally {
       if (btnSave) btnSave.disabled = false;
       if (btnClear) btnClear.disabled = false;
+      if (btnEdit) btnEdit.disabled = false;
     }
   }
 
@@ -5460,9 +5632,14 @@
             closeReviewModal();
             return;
           }
+          if (t.closest("#btnReviewEdit")) {
+            e.preventDefault();
+            enterReviewEditMode();
+            return;
+          }
           if (t.closest("#btnReviewCancel")) {
             e.preventDefault();
-            closeReviewModal();
+            cancelReviewModal();
             return;
           }
           if (t.closest("#btnReviewSave")) {
@@ -5472,6 +5649,8 @@
           }
           if (t.closest("#btnReviewClear")) {
             e.preventDefault();
+            // Clear only in edit mode; persists empty after confirm via save
+            if (_reviewUiMode !== "edit") return;
             saveReview({ clear: true });
             return;
           }
@@ -5481,7 +5660,7 @@
           const m = document.getElementById("reviewModal");
           if (m && !m.classList.contains("hide")) {
             e.preventDefault();
-            closeReviewModal();
+            cancelReviewModal();
           }
         });
       }

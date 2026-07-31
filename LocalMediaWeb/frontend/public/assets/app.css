@@ -1384,12 +1384,37 @@ button.chip.tag.is-active {
   line-height: 1.45;
   outline: none;
 }
+.review-input.hide {
+  display: none;
+}
 .review-input:focus {
   border-color: rgba(109, 140, 255, 0.55);
   box-shadow: 0 0 0 3px rgba(109, 140, 255, 0.18);
 }
 .review-input::placeholder {
   color: rgba(255, 255, 255, 0.35);
+}
+.review-view-text {
+  width: 100%;
+  min-height: 120px;
+  max-height: min(40vh, 280px);
+  overflow: auto;
+  box-sizing: border-box;
+  padding: 12px;
+  border-radius: 12px;
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  background: rgba(0, 0, 0, 0.22);
+  color: var(--fg, #f2f2f7);
+  font-size: 14px;
+  line-height: 1.5;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+.review-view-text.hide {
+  display: none;
+}
+.review-modal-actions .btn.hide {
+  display: none !important;
 }
 .review-modal-actions {
   display: flex;

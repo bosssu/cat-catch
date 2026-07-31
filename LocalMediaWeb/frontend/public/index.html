@@ -16,7 +16,7 @@
   <link rel="icon" type="image/png" sizes="192x192" href="/icons/icon-192.png" />
   <link rel="icon" type="image/png" sizes="512x512" href="/icons/icon-512.png" />
   <title>LocalMediaWeb</title>
-  <link rel="stylesheet" href="/assets/app.css?v=20260731review1upload1" />
+  <link rel="stylesheet" href="/assets/app.css?v=20260731pausereview1" />
 </head>
 <body>
   <div id="app">
@@ -235,8 +235,10 @@
       <div class="review-modal-card">
         <h2 id="reviewModalTitle" class="review-modal-title">点评</h2>
         <p class="muted review-modal-sub" id="reviewModalSub"></p>
+        <div id="reviewViewText" class="review-view-text hide" aria-live="polite"></div>
         <textarea id="reviewInput" class="review-input" rows="6" maxlength="2000" placeholder="写下对这条媒体的点评…"></textarea>
         <div class="review-modal-actions">
+          <button type="button" id="btnReviewEdit" class="btn ghost hide">编辑</button>
           <button type="button" id="btnReviewClear" class="btn ghost">清空</button>
           <span class="review-spacer"></span>
           <button type="button" id="btnReviewCancel" class="btn ghost">取消</button>
@@ -245,6 +247,6 @@
       </div>
     </div>
   </div>
-  <script src="/assets/app.js?v=20260731review1upload1"></script>
+  <script src="/assets/app.js?v=20260731pausereview1"></script>
 </body>
 </html>
