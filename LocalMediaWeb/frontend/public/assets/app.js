@@ -5286,6 +5286,60 @@
     });
   }
 
+  function parseTagsInput(raw) {
+    return String(raw || "")
+      .split(/[,，]/)
+      .map((s) => s.trim())
+      .filter(Boolean);
+  }
+
+  async function uploadAlbumFile(file, { tags, restricted }) {
+    const fd = new FormData();
+    fd.append("title", file.name.replace(/\.[^.]+$/, "") || file.name);
+    fd.append("source_url", "");
+    const mime = file.type || "";
+    fd.append(
+      "media_type",
+      mime.startsWith("image/") ? "image" : mime.startsWith("audio/") ? "audio" : "video"
+    );
+    fd.append("remux", "1");
+    if (tags && tags.length) fd.append("tags", JSON.stringify(tags));
+    if (restricted) fd.append("restricted", "1");
+    fd.append("file", file, file.name || "upload.bin");
+    // Do not set Content-Type — browser sets multipart boundary
+    return api("/api/upload", { method: "POST", body: fd });
+  }
+
+  async function runAlbumUpload(fileList) {
+    const files = Array.from(fileList || []);
+    const prog = document.getElementById("albumUploadProg");
+    if (!files.length) return;
+    const tags = parseTagsInput(document.getElementById("albumUploadTags")?.value);
+    const restricted = !!document.getElementById("albumUploadRestricted")?.checked;
+    let ok = 0;
+    let fail = 0;
+    const errors = [];
+    for (let i = 0; i < files.length; i++) {
+      if (prog) prog.textContent = `${i + 1}/${files.length} 上传中… ${files[i].name}`;
+      try {
+        await uploadAlbumFile(files[i], { tags, restricted });
+        ok += 1;
+      } catch (e) {
+        fail += 1;
+        errors.push(`${files[i].name}: ${e.message || e}`);
+      }
+    }
+    if (prog) {
+      prog.textContent =
+        `完成：成功 ${ok}` +
+        (fail ? `，失败 ${fail}` : "") +
+        (errors.length ? " — " + errors.slice(0, 2).join("; ") : "");
+    }
+    try {
+      await refreshAdminMedia();
+    } catch (_) {}
+  }
+
   async function refreshAdminMedia() {
     const box = document.getElementById("adminMedia");
     const meta = document.getElementById("adminMediaMeta");
@@ -5588,6 +5642,16 @@
         } catch (e) {
           console.warn("restricted filter refresh", e);
         }
+      });
+    }
+    const albumIn = document.getElementById("albumUploadInput");
+    if (albumIn && albumIn.dataset.bound !== "1") {
+      albumIn.dataset.bound = "1";
+      albumIn.addEventListener("change", () => {
+        const list = albumIn.files;
+        runAlbumUpload(list).finally(() => {
+          albumIn.value = "";
+        });
       });
     }
     const btnRescan = $("#btnRescan");

@@ -16,7 +16,7 @@
   <link rel="icon" type="image/png" sizes="192x192" href="/icons/icon-192.png" />
   <link rel="icon" type="image/png" sizes="512x512" href="/icons/icon-512.png" />
   <title>LocalMediaWeb</title>
-  <link rel="stylesheet" href="/assets/app.css?v=20260731review1" />
+  <link rel="stylesheet" href="/assets/app.css?v=20260731review1upload1" />
 </head>
 <body>
   <div id="app">
@@ -161,6 +161,21 @@
           <input type="checkbox" id="includeRestrictedToggle" />
         </label>
         <p class="muted tip">默认关闭：服务端只推送不含「限制级」标签的内容。打开后才会推送带该标签的内容。</p>
+        <hr class="admin-sep" />
+        <h3 class="admin-subhead">从相册上传</h3>
+        <p class="muted tip">iOS / Android 可选相册图片与视频；视频服务端默认 remux。多选后排队上传。</p>
+        <label class="btn file-label" style="display:inline-flex;align-items:center;gap:8px;cursor:pointer;">
+          选择照片或视频
+          <input type="file" id="albumUploadInput" accept="image/*,video/*" multiple hidden />
+        </label>
+        <label>本批标签
+          <input id="albumUploadTags" type="text" placeholder="逗号分隔，可选" autocomplete="off" />
+        </label>
+        <label class="switch-row" title="本批打上限制级标签">
+          <span>限制级</span>
+          <input type="checkbox" id="albumUploadRestricted" />
+        </label>
+        <div id="albumUploadProg" class="muted tip" aria-live="polite"></div>
       </div>
       <div class="admin-card">
         <h2>
@@ -230,6 +245,6 @@
       </div>
     </div>
   </div>
-  <script src="/assets/app.js?v=20260731review1"></script>
+  <script src="/assets/app.js?v=20260731review1upload1"></script>
 </body>
 </html>

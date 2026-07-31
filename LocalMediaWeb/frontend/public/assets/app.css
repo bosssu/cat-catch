@@ -1636,6 +1636,17 @@ button.chip.tag.is-active {
   font-size: 12px;
   line-height: 1.45;
 }
+.admin-sep {
+  border: 0;
+  border-top: 1px solid rgba(255, 255, 255, 0.08);
+  margin: 16px 0 12px;
+}
+.admin-subhead {
+  margin: 0 0 8px;
+  font-size: 1rem;
+  font-weight: 600;
+  color: var(--fg, #e8eaf0);
+}
 .row {
   display: flex;
   flex-wrap: wrap;
