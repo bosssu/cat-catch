@@ -48,6 +48,7 @@ def _migrate_sqlite_columns(engine) -> None:
         ("media_items", "dwell_ms_total", "INTEGER DEFAULT 0"),
         ("media_items", "last_viewed_at", "DATETIME"),
         ("media_items", "tags_json", "TEXT DEFAULT '[]'"),
+        ("media_items", "review", "TEXT DEFAULT ''"),
         ("download_jobs", "tags_json", "TEXT DEFAULT '[]'"),
         ("download_jobs", "use_jasna", "INTEGER DEFAULT 0"),
     ]

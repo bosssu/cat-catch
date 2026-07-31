@@ -56,6 +56,7 @@ class MediaOut(BaseModel):
     skip_count: int = 0
     view_count: int = 0
     tags: list[str] = Field(default_factory=list)
+    review: str = ""
     created_at: datetime | None = None
     file_url: str
     thumb_url: str
@@ -130,6 +131,8 @@ class MediaPatch(BaseModel):
     tags: list[str] | None = None
     # When set, add/remove the 限制级 tag (applied after optional tags replace)
     restricted: bool | None = None
+    # Free-text review note; max 2000 chars; whitespace-only clears to ""
+    review: str | None = None
 
 
 class AvMatchRequest(BaseModel):

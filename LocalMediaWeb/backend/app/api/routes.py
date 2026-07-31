@@ -104,6 +104,7 @@ def _media_out(m: MediaItem) -> MediaOut:
         skip_count=int(getattr(m, "skip_count", 0) or 0),
         view_count=int(getattr(m, "view_count", 0) or 0),
         tags=tags_from_json(getattr(m, "tags_json", None)),
+        review=getattr(m, "review", None) or "",
         created_at=m.created_at,
         # ?v= changes after demosaic / re-encode so blob cache + browser revalidate
         file_url=f"/api/media/{m.id}/file?v={ver}",
@@ -642,6 +643,11 @@ def patch_media(media_id: int, body: MediaPatch, db=Depends(get_db)):
     if body.restricted is not None:
         cur = tags_from_json(m.tags_json)
         m.tags_json = tags_to_json(set_restricted_flag(cur, bool(body.restricted)))
+    if body.review is not None:
+        text = body.review if isinstance(body.review, str) else str(body.review)
+        if len(text) > 2000:
+            raise HTTPException(400, "review too long (max 2000)")
+        m.review = "" if not text.strip() else text
     db.commit()
     db.refresh(m)
     return _media_out(m)

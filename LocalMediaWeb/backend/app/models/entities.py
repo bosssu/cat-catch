@@ -29,6 +29,8 @@ class MediaItem(Base):
     warning: Mapped[str] = mapped_column(Text, default="")
     # JSON array string, e.g. ["video","bilibili"] — unlimited tags (app layer normalize)
     tags_json: Mapped[str] = mapped_column(Text, default="[]")
+    # Free-text review note (not searchable via list_media q)
+    review: Mapped[str] = mapped_column(Text, default="")
     # Feed / personalization (single-user LAN; "like" ≈ favorite)
     liked: Mapped[bool] = mapped_column(Boolean, default=False, index=True)
     like_count: Mapped[int] = mapped_column(Integer, default=0)  # toggles still 0/1; kept for UI
