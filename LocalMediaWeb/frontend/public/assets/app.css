@@ -1299,9 +1299,107 @@ button.chip.tag.is-active {
   border-color: transparent;
   box-shadow: 0 6px 20px rgba(255, 77, 122, 0.45);
 }
+.hud .round.review.on {
+  color: #8eb4ff;
+  border-color: rgba(109, 140, 255, 0.55);
+  background: rgba(109, 140, 255, 0.18);
+  box-shadow: 0 4px 16px rgba(109, 140, 255, 0.28);
+}
 .hud .round.danger:hover {
   background: var(--danger-soft);
   border-color: rgba(255, 107, 122, 0.45);
+}
+
+/* Feed review modal (above feed HUD / lightbox-adjacent) */
+.review-modal {
+  position: fixed;
+  inset: 0;
+  z-index: 220;
+  display: flex;
+  align-items: flex-end;
+  justify-content: center;
+  pointer-events: auto;
+}
+.review-modal.hide {
+  display: none;
+}
+.review-modal-backdrop {
+  position: absolute;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.55);
+  backdrop-filter: blur(4px);
+  -webkit-backdrop-filter: blur(4px);
+}
+.review-modal-card {
+  position: relative;
+  z-index: 1;
+  width: min(520px, 100%);
+  max-height: min(78vh, 640px);
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding: 18px 16px calc(16px + env(safe-area-inset-bottom, 0px));
+  border-radius: 16px 16px 0 0;
+  background: linear-gradient(180deg, #1a1a24 0%, #12121a 100%);
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  border-bottom: none;
+  box-shadow: 0 -12px 40px rgba(0, 0, 0, 0.45);
+}
+@media (min-width: 720px) {
+  .review-modal {
+    align-items: center;
+  }
+  .review-modal-card {
+    border-radius: 16px;
+    border-bottom: 1px solid rgba(255, 255, 255, 0.1);
+    padding-bottom: 16px;
+  }
+}
+.review-modal-title {
+  margin: 0;
+  font-size: 17px;
+  font-weight: 600;
+  letter-spacing: 0.02em;
+}
+.review-modal-sub {
+  margin: 0;
+  font-size: 12px;
+  line-height: 1.35;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.review-input {
+  width: 100%;
+  min-height: 120px;
+  resize: vertical;
+  box-sizing: border-box;
+  padding: 12px 12px;
+  border-radius: 12px;
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  background: rgba(0, 0, 0, 0.35);
+  color: var(--fg, #f2f2f7);
+  font: inherit;
+  font-size: 14px;
+  line-height: 1.45;
+  outline: none;
+}
+.review-input:focus {
+  border-color: rgba(109, 140, 255, 0.55);
+  box-shadow: 0 0 0 3px rgba(109, 140, 255, 0.18);
+}
+.review-input::placeholder {
+  color: rgba(255, 255, 255, 0.35);
+}
+.review-modal-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+.review-spacer {
+  flex: 1 1 auto;
+  min-width: 8px;
 }
 
 .hint {

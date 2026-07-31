@@ -16,7 +16,7 @@
   <link rel="icon" type="image/png" sizes="192x192" href="/icons/icon-192.png" />
   <link rel="icon" type="image/png" sizes="512x512" href="/icons/icon-512.png" />
   <title>LocalMediaWeb</title>
-  <link rel="stylesheet" href="/assets/app.css?v=20260731r22" />
+  <link rel="stylesheet" href="/assets/app.css?v=20260731review1" />
 </head>
 <body>
   <div id="app">
@@ -214,7 +214,22 @@
       <div class="lb-hint">点击空白或关闭按钮退出</div>
       <div id="lbBody" class="lb-body"></div>
     </div>
+
+    <div id="reviewModal" class="review-modal hide" aria-hidden="true" role="dialog" aria-labelledby="reviewModalTitle">
+      <div class="review-modal-backdrop" data-review-dismiss="1"></div>
+      <div class="review-modal-card">
+        <h2 id="reviewModalTitle" class="review-modal-title">点评</h2>
+        <p class="muted review-modal-sub" id="reviewModalSub"></p>
+        <textarea id="reviewInput" class="review-input" rows="6" maxlength="2000" placeholder="写下对这条媒体的点评…"></textarea>
+        <div class="review-modal-actions">
+          <button type="button" id="btnReviewClear" class="btn ghost">清空</button>
+          <span class="review-spacer"></span>
+          <button type="button" id="btnReviewCancel" class="btn ghost">取消</button>
+          <button type="button" id="btnReviewSave" class="btn primary">保存</button>
+        </div>
+      </div>
+    </div>
   </div>
-  <script src="/assets/app.js?v=20260731r22"></script>
+  <script src="/assets/app.js?v=20260731review1"></script>
 </body>
 </html>

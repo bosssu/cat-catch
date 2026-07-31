@@ -1320,6 +1320,7 @@
     heart: `<svg viewBox="0 0 24 24" aria-hidden="true"><path fill="currentColor" d="M12 21.35l-1.45-1.32C5.4 15.36 2 12.28 2 8.5 2 5.42 4.42 3 7.5 3c1.74 0 3.41.81 4.5 2.09C13.09 3.81 14.76 3 16.5 3 19.58 3 22 5.42 22 8.5c0 3.78-3.4 6.86-8.55 11.54L12 21.35z"/></svg>`,
     skip: `<svg viewBox="0 0 24 24" aria-hidden="true"><path fill="currentColor" d="M6 18l8.5-6L6 6v12zM16 6v12h2V6h-2z"/></svg>`,
     trash: `<svg viewBox="0 0 24 24" aria-hidden="true"><path fill="currentColor" d="M6 19c0 1.1.9 2 2 2h8c1.1 0 2-.9 2-2V7H6v12zM19 4h-3.5l-1-1h-5l-1 1H5v2h14V4z"/></svg>`,
+    review: `<svg viewBox="0 0 24 24" aria-hidden="true"><path fill="currentColor" d="M20 2H4c-1.1 0-2 .9-2 2v12c0 1.1.9 2 2 2h4l4 4 4-4h4c1.1 0 2-.9 2-2V4c0-1.1-.9-2-2-2zm-2 12H6v-2h12v2zm0-3H6V9h12v2zm0-3H6V6h12v2z"/></svg>`,
     eye: `<svg viewBox="0 0 24 24" width="14" height="14" aria-hidden="true"><path fill="currentColor" d="M12 4.5C7 4.5 2.73 7.61 1 12c1.73 4.39 6 7.5 11 7.5s9.27-3.11 11-7.5c-1.73-4.39-6-7.5-11-7.5zM12 17c-2.76 0-5-2.24-5-5s2.24-5 5-5 5 2.24 5 5-2.24 5-5 5zm0-8a3 3 0 100 6 3 3 0 000-6z"/></svg>`,
     x: `<svg viewBox="0 0 24 24" aria-hidden="true"><path fill="currentColor" d="M18.3 5.71L12 12l6.3 6.29-1.41 1.42L10.59 13.4 4.3 19.71 2.89 18.3 9.17 12 2.89 5.71 4.3 4.29l6.29 6.3 6.29-6.3z"/></svg>`,
     volOn: `<svg viewBox="0 0 24 24" aria-hidden="true"><path fill="currentColor" d="M3 9v6h4l5 5V4L7 9H3zm13.5 3c0-1.77-1.02-3.29-2.5-4.03v8.05c1.48-.73 2.5-2.25 2.5-4.02zM14 3.23v2.06c2.89.86 5 3.54 5 6.71s-2.11 5.85-5 6.71v2.06c4.01-.91 7-4.49 7-8.77s-2.99-7.86-7-8.77z"/></svg>`,
@@ -2349,7 +2350,7 @@
             <div class="actions">
               <button type="button" class="round mute-btn" data-act="mute" data-id="${item.id}" title="取消静音（播放声音）">${state.wantSound ? ICO.volOn : ICO.volOff}</button>
               <button type="button" class="round like ${liked}" data-act="like" data-id="${item.id}" title="喜欢 (L)">${ICO.heart}</button>
-              <button type="button" class="round danger" data-act="del" data-id="${item.id}" title="删除">${ICO.trash}</button>
+              <button type="button" class="round review ${(item.review || "").trim() ? "on" : ""}" data-act="review" data-id="${item.id}" title="点评">${ICO.review}</button>
             </div>
           </div>
         </section>`;
@@ -3746,16 +3747,84 @@
       }
       return;
     }
-    if (act === "del") {
-      if (!confirm(`确定删除 #${id}？将删除磁盘文件。`)) return;
-      try {
-        await api(`/api/media/${id}`, { method: "DELETE" });
-        state.items = state.items.filter((x) => x.id !== id);
-        renderFeed();
-        renderGrid();
-      } catch (e) {
-        alert("删除失败: " + e.message);
+    if (act === "review") {
+      openReviewModal(id);
+      return;
+    }
+  }
+
+  /** Review modal state: media id currently being edited */
+  let _reviewMediaId = null;
+
+  function openReviewModal(id) {
+    const item = state.items.find((x) => x.id === id);
+    _reviewMediaId = id;
+    const modal = document.getElementById("reviewModal");
+    const input = document.getElementById("reviewInput");
+    const sub = document.getElementById("reviewModalSub");
+    if (!modal || !input) return;
+    const title = item ? (item.title || item.filename || `#${id}`) : `#${id}`;
+    if (sub) sub.textContent = title;
+    input.value = item && item.review != null ? String(item.review) : "";
+    modal.classList.remove("hide");
+    modal.setAttribute("aria-hidden", "false");
+    try {
+      input.focus();
+      const len = input.value.length;
+      input.setSelectionRange(len, len);
+    } catch (_) {}
+  }
+
+  function closeReviewModal() {
+    const modal = document.getElementById("reviewModal");
+    if (modal) {
+      modal.classList.add("hide");
+      modal.setAttribute("aria-hidden", "true");
+    }
+    _reviewMediaId = null;
+  }
+
+  function syncReviewButton(id, reviewText) {
+    const on = !!(reviewText || "").trim();
+    document.querySelectorAll(`.snap-slide[data-id="${id}"] button.round.review`).forEach((b) => {
+      b.classList.toggle("on", on);
+    });
+  }
+
+  async function saveReview({ clear = false } = {}) {
+    const id = _reviewMediaId;
+    if (id == null) return;
+    const input = document.getElementById("reviewInput");
+    let text = clear ? "" : input ? input.value : "";
+    if (text.length > 2000) text = text.slice(0, 2000);
+    const btnSave = document.getElementById("btnReviewSave");
+    const btnClear = document.getElementById("btnReviewClear");
+    if (btnSave) btnSave.disabled = true;
+    if (btnClear) btnClear.disabled = true;
+    try {
+      const m = await api(`/api/media/${id}`, {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ review: text }),
+      });
+      const idx = state.items.findIndex((x) => x.id === id);
+      if (idx >= 0) {
+        state.items[idx] = Object.assign({}, state.items[idx], m, { review: m.review != null ? m.review : text });
       }
+      const saved = idx >= 0 ? state.items[idx].review : text;
+      if (input && !clear) input.value = saved || "";
+      if (input && clear) input.value = "";
+      syncReviewButton(id, saved);
+      if (clear) {
+        // stay open after clear so user can retype; still persist empty
+      } else {
+        closeReviewModal();
+      }
+    } catch (e) {
+      alert("保存点评失败: " + e.message);
+    } finally {
+      if (btnSave) btnSave.disabled = false;
+      if (btnClear) btnClear.disabled = false;
     }
   }
 
@@ -5323,6 +5392,46 @@
   }
 
   function bind() {
+    // —— Review modal (once) ——
+    if (!document.documentElement.dataset.lmwReviewBound) {
+      document.documentElement.dataset.lmwReviewBound = "1";
+      const reviewModal = document.getElementById("reviewModal");
+      if (reviewModal) {
+        reviewModal.addEventListener("click", (e) => {
+          const t = e.target;
+          if (!t || !t.closest) return;
+          if (t.closest("[data-review-dismiss]")) {
+            e.preventDefault();
+            closeReviewModal();
+            return;
+          }
+          if (t.closest("#btnReviewCancel")) {
+            e.preventDefault();
+            closeReviewModal();
+            return;
+          }
+          if (t.closest("#btnReviewSave")) {
+            e.preventDefault();
+            saveReview({ clear: false });
+            return;
+          }
+          if (t.closest("#btnReviewClear")) {
+            e.preventDefault();
+            saveReview({ clear: true });
+            return;
+          }
+        });
+        document.addEventListener("keydown", (e) => {
+          if (e.key !== "Escape") return;
+          const m = document.getElementById("reviewModal");
+          if (m && !m.classList.contains("hide")) {
+            e.preventDefault();
+            closeReviewModal();
+          }
+        });
+      }
+    }
+
     // —— Global click delegation (survives re-renders; capture beats feed layer) ——
     if (!document.documentElement.dataset.lmwSearchBound) {
       document.documentElement.dataset.lmwSearchBound = "1";
