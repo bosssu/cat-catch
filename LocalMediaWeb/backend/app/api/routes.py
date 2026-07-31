@@ -21,6 +21,7 @@ from app.api.schemas import (
     JasnaJobOut,
     JobOut,
     MediaDeleteBatch,
+    MediaDedupeRequest,
     MediaJasnaBatch,
     MediaOut,
     MediaPatch,
@@ -38,6 +39,7 @@ from app.core.config import (
 )
 from app.core.db import get_db
 from app.models.entities import DownloadJob, JasnaJob, MediaItem
+from app.services.dedupe import dedupe_identical_media
 from app.services.download import enqueue_jobs, register_uploaded_file, request_cancel
 from app.services.jasna import enqueue_jasna_for_media, request_cancel as jasna_request_cancel
 from app.services.feed_rank import (
@@ -628,6 +630,21 @@ def delete_media_batch(body: MediaDeleteBatch, db=Depends(get_db)):
     return {"deleted": len(deleted), "ids": deleted}
 
 
+@router.post("/media/dedupe", dependencies=[Depends(require_token)])
+def media_dedupe(body: MediaDedupeRequest = MediaDedupeRequest(), db=Depends(get_db)):
+    """
+    One-click dedupe: drop MediaItem rows whose files are byte-identical
+    (same size + SHA-256). Keeps the preferred item per group (liked /
+    engagement / review, then oldest id). Does not merge tags.
+    """
+    result = dedupe_identical_media(
+        db,
+        dry_run=bool(body.dry_run),
+        delete_row=_delete_media_row,
+    )
+    return result.as_dict()
+
+
 @router.patch("/media/{media_id}", dependencies=[Depends(require_token)])
 def patch_media(media_id: int, body: MediaPatch, db=Depends(get_db)):
     m = db.get(MediaItem, media_id)
@@ -795,7 +812,7 @@ async def upload(
     if mtype == "audio" and (not mime or mime.startswith("video/")):
         mime = cls.get("mime") or "audio/mp4"
     tag_list = apply_restricted_flag(tags, _flag_true(restricted))
-    item = register_uploaded_file(
+    reg = register_uploaded_file(
         category="default",
         dest=dest,
         title=title or Path(raw_name).stem,
@@ -805,12 +822,16 @@ async def upload(
         dedupe=False,
         tags=tag_list,
     )
+    item = reg.item
+    if reg.duplicate:
+        note = (note + ";content_duplicate") if note else "content_duplicate"
     jasna_job_id = None
-    if _flag_true(use_jasna) and mtype == "video":
+    if not reg.duplicate and _flag_true(use_jasna) and mtype == "video":
         jasna_job_id = enqueue_jasna_for_media(item.id)
     return {
         "media_id": item.id,
         "item": _media_out(item),
+        "duplicate": bool(reg.duplicate),
         "note": note,
         "classify": {
             "media_type": mtype,
@@ -1119,7 +1140,7 @@ def media_merge_av_library(body: AvMergeRequest, db=Depends(get_db)):
             if dest.exists():
                 dest.unlink()
             merge_av_to_mp4(vpath, apath, dest)
-            item = register_uploaded_file(
+            reg = register_uploaded_file(
                 category="default",
                 dest=dest,
                 title=title,
@@ -1133,8 +1154,12 @@ def media_merge_av_library(body: AvMergeRequest, db=Depends(get_db)):
                     + tags_from_json(getattr(ma, "tags_json", None))
                 ),
             )
+            item = reg.item
             if body.delete_sources:
                 for m in (mv, ma):
+                    # Never delete the row we just re-used as the merge result
+                    if reg.duplicate and int(m.id) == int(item.id):
+                        continue
                     try:
                         _delete_media_row(db, m)
                     except Exception:
@@ -1146,7 +1171,8 @@ def media_merge_av_library(body: AvMergeRequest, db=Depends(get_db)):
                     "item": _media_out(item),
                     "video_id": vid,
                     "audio_id": aid,
-                    "note": "merged",
+                    "note": "content_duplicate" if reg.duplicate else "merged",
+                    "duplicate": bool(reg.duplicate),
                 }
             )
         except Exception as e:
@@ -1206,7 +1232,7 @@ async def upload_av(
             dest.write_bytes(vdata)
             dest = remux_to_playable(dest, prefer_ext="mp4")
             note = f"video_only:{e}"
-        item = register_uploaded_file(
+        reg = register_uploaded_file(
             category="default",
             dest=dest,
             title=title or "capture",
@@ -1216,12 +1242,16 @@ async def upload_av(
             dedupe=False,
             tags=apply_restricted_flag(tags, _flag_true(restricted)),
         )
+        item = reg.item
+        if reg.duplicate:
+            note = (note + ";content_duplicate") if note else "content_duplicate"
         jasna_job_id = None
-        if _flag_true(use_jasna):
+        if not reg.duplicate and _flag_true(use_jasna):
             jasna_job_id = enqueue_jasna_for_media(item.id)
         return {
             "media_id": item.id,
             "item": _media_out(item),
+            "duplicate": bool(reg.duplicate),
             "note": note,
             "jasna_job_id": jasna_job_id,
         }

@@ -121,17 +121,41 @@ def rescan_medias(*, purge: bool = False) -> dict:
         if mtype not in ("image", "gif", "video", "audio"):
             skipped += 1
             continue
+        from app.services.dedupe import find_item_by_content, hash_media_file
+
+        chash, fsize = hash_media_file(path)
+        if not fsize:
+            try:
+                fsize = int(path.stat().st_size)
+            except OSError:
+                fsize = 0
         with session_scope() as db:
             exists = db.scalars(select(MediaItem).where(MediaItem.rel_path == rel)).first()
             if exists:
-                # Fix mislabeled audio-as-video on rescan
+                # Fix mislabeled audio-as-video on rescan; backfill content_hash
+                changed = False
                 if exists.media_type != mtype and mtype in ("audio", "video"):
                     exists.media_type = mtype
-                    if mime:
-                        exists.mime = mime
+                    changed = True
+                if mime and exists.mime != mime:
+                    exists.mime = mime
+                    changed = True
+                if chash and not (getattr(exists, "content_hash", None) or "").strip():
+                    exists.content_hash = chash
+                    changed = True
+                if fsize and not exists.file_size:
+                    exists.file_size = fsize
+                    changed = True
+                if changed:
                     db.commit()
                 skipped += 1
                 continue
+            # Content already indexed under another path → skip orphan twin
+            if chash:
+                twin = find_item_by_content(db, chash, fsize, exclude_rel=rel)
+                if twin:
+                    skipped += 1
+                    continue
             item = MediaItem(
                 category="default",
                 title=path.stem,
@@ -139,7 +163,8 @@ def rescan_medias(*, purge: bool = False) -> dict:
                 rel_path=rel,
                 source_url="",
                 url_hash=url_hash(rel, "default"),
-                file_size=path.stat().st_size,
+                content_hash=chash or "",
+                file_size=fsize,
                 mime=mime,
                 tags_json="[]",
             )

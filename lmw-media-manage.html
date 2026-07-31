@@ -5,7 +5,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <title>服务器媒体管理 · LocalMediaWeb</title>
   <link rel="stylesheet" href="css/public.css" />
-  <link rel="stylesheet" href="css/lmw-media-manage.css?v=20260731tagcombo1" />
+  <link rel="stylesheet" href="css/lmw-media-manage.css?v=20260731contentgate1" />
   <script src="js/init.js"></script>
   <script src="js/function.js"></script>
   <script src="js/local-media-web.js"></script>
@@ -58,7 +58,7 @@
           <div class="mm-upload-drop-top">
             <div class="mm-upload-icon" aria-hidden="true">⬇</div>
             <div class="mm-upload-title">拖放文件到此处</div>
-            <div class="muted mm-drop-hint">或右侧选择本地文件 · 可多次叠加 · 同名同大小自动去重</div>
+            <div class="muted mm-drop-hint">或右侧选择本地文件 · 可多次叠加 · 同名同大小队列去重 · 库内内容相同则跳过</div>
             <div id="mmUploadProg" class="mm-upload-prog muted"></div>
           </div>
           <div class="mm-tag-combos" id="mmTagCombos" aria-label="常用标签组合">
@@ -104,6 +104,7 @@
         <button type="button" id="btnBatchMerge" class="button2">合并标签</button>
         <button type="button" id="btnBatchReplace" class="button2">覆盖标签</button>
         <button type="button" id="btnBatchJasna" class="button2" title="对选中视频执行 jasna 去马赛克（GPU 串行队列；成功后替换为 h264/mp4）">使用jasna去码</button>
+        <button type="button" id="btnDedupe" class="button2" title="扫描库内文件内容（SHA-256）完全相同的条目，每组仅保留一条并删除其余">一键去重</button>
         <button type="button" id="btnBatchDel" class="button2 danger">批量删除</button>
       </div>
       <span id="mmStatus" class="mm-status muted"></span>
@@ -142,6 +143,6 @@
     </div>
   </div>
 
-  <script src="js/lmw-media-manage.js?v=20260731tagcombo1"></script>
+  <script src="js/lmw-media-manage.js?v=20260731contentgate1"></script>
 </body>
 </html>

@@ -610,6 +610,18 @@ const LMW = {
         });
     },
 
+    /**
+     * One-click dedupe: remove MediaItems whose files are byte-identical.
+     * @param {{ dry_run?: boolean }} [opts]
+     */
+    dedupeMedia(opts = {}) {
+        return this.request("/api/media/dedupe", {
+            method: "POST",
+            headers: this.headers(true),
+            body: JSON.stringify({ dry_run: !!opts.dry_run }),
+        });
+    },
+
     /** Enqueue jasna demosaic for one media item. */
     enqueueJasna(mediaId, { force = false } = {}) {
         const q = force ? "?force=1" : "";
@@ -1791,8 +1803,13 @@ const LMW = {
         const jobs = jobIds.length ? await this.waitJobs(jobIds, { onProgress }) : [];
         let fallbackOk = 0;
         let failed = 0;
+        let contentDuplicates = 0;
         for (const job of jobs) {
-            if (job.status === "success") continue;
+            if (job.status === "success") {
+                const em = String(job.error_message || "");
+                if (em.includes("content_duplicate")) contentDuplicates++;
+                continue;
+            }
             const can =
                 fallback &&
                 job.client_fallback_allowed !== false &&
@@ -1808,19 +1825,26 @@ const LMW = {
                 continue;
             }
             try {
-                await this.clientFetchAndUpload(item, cat);
-                fallbackOk++;
+                const up = await this.clientFetchAndUpload(item, cat);
+                if (up && up.duplicate) contentDuplicates++;
+                else fallbackOk++;
             } catch (e) {
                 console.warn("LMW fallback failed", e);
                 failed++;
             }
         }
+        const pureSuccess = jobs.filter(
+            (j) =>
+                j.status === "success" &&
+                !String(j.error_message || "").includes("content_duplicate")
+        ).length;
         return {
             ...ingestRes,
             jobs,
             fallbackOk,
             failed,
-            success: jobs.filter((j) => j.status === "success").length + fallbackOk,
+            contentDuplicates,
+            success: pureSuccess + fallbackOk,
         };
     },
 

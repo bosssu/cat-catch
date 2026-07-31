@@ -15,6 +15,7 @@ from app.models.entities import DownloadJob, MediaItem
 from app.services.dash import DashError, download_dash
 from app.services.hls import HlsError, download_hls
 from app.services.thumb import generate_thumb
+from app.services.dedupe import find_item_by_content, hash_media_file
 from app.services.util import (
     detect_media_type,
     guess_ext,
@@ -829,33 +830,85 @@ async def _register_media(
         logger.warning("classify in _register_media: %s", e)
     if media_type == "m3u8":
         media_type = "video"
+
+    chash, fsize = hash_media_file(dest)
+    if not fsize and dest.is_file():
+        try:
+            fsize = int(dest.stat().st_size)
+        except OSError:
+            fsize = 0
+
+    content_dup = False
     with session_scope() as db:
         job = db.get(DownloadJob, job_id)
         tags_json = (job.tags_json if job and getattr(job, "tags_json", None) else None) or "[]"
-        item = MediaItem(
-            category="default",
-            title=title[:512],
-            media_type=media_type,
-            rel_path=rel,
-            source_url=source_url[:2048],
-            url_hash=uh,
-            file_size=dest.stat().st_size if dest.is_file() else 0,
-            mime=mime or "",
-            partial=partial,
-            warning=warning or "",
-            tags_json=tags_json,
-        )
-        db.add(item)
-        db.flush()
-        media_id = item.id
         want_jasna = bool(job and getattr(job, "use_jasna", False))
-        if job:
-            job.status = "success"
-            job.media_id = media_id
-            job.progress = 100
-            job.error_message = warning or ""
-            job.headers_json = "{}"  # drop secrets
-        db.commit()
+
+        # Content gate: same file bytes already in library → reuse row, drop new file
+        existing = None
+        if chash:
+            existing = find_item_by_content(
+                db, chash, fsize, exclude_rel=rel
+            )
+        if existing:
+            from app.services.tags import normalize_tags, tags_from_json, tags_to_json
+
+            content_dup = True
+            media_id = int(existing.id)
+            if not (getattr(existing, "content_hash", None) or "").strip():
+                existing.content_hash = chash
+            if tags_json and tags_json != "[]":
+                merged = normalize_tags(
+                    tags_from_json(existing.tags_json) + tags_from_json(tags_json)
+                )
+                existing.tags_json = tags_to_json(merged)
+            warn = (warning or "").strip()
+            note = "content_duplicate"
+            existing.warning = (
+                f"{existing.warning};{note}".strip(";") if existing.warning else note
+            )
+            if job:
+                job.status = "success"
+                job.media_id = media_id
+                job.progress = 100
+                job.error_message = (warn + f" [{note}]").strip() if warn else note
+                job.headers_json = "{}"
+            db.commit()
+        else:
+            item = MediaItem(
+                category="default",
+                title=title[:512],
+                media_type=media_type,
+                rel_path=rel,
+                source_url=source_url[:2048],
+                url_hash=uh,
+                content_hash=chash or "",
+                file_size=fsize,
+                mime=mime or "",
+                partial=partial,
+                warning=warning or "",
+                tags_json=tags_json,
+            )
+            db.add(item)
+            db.flush()
+            media_id = item.id
+            if job:
+                job.status = "success"
+                job.media_id = media_id
+                job.progress = 100
+                job.error_message = warning or ""
+                job.headers_json = "{}"  # drop secrets
+            db.commit()
+
+    if content_dup:
+        # Drop the just-downloaded copy; library already has identical bytes
+        try:
+            if dest.is_file():
+                dest.unlink(missing_ok=True)
+        except OSError:
+            logger.warning("unlink content-dup download failed: %s", dest)
+        # Do not re-thumb or re-queue jasna for an existing item
+        return
 
     thumb_rel = await asyncio.to_thread(
         generate_thumb, dest, media_id, media_type if media_type != "m3u8" else "video"
@@ -896,6 +949,17 @@ def _finish_fail(
         db.commit()
 
 
+class RegisterResult:
+    """Result of registering a file under Medias/."""
+
+    __slots__ = ("item", "duplicate", "content_hash")
+
+    def __init__(self, item: MediaItem, *, duplicate: bool = False, content_hash: str = ""):
+        self.item = item
+        self.duplicate = duplicate
+        self.content_hash = content_hash or ""
+
+
 def register_uploaded_file(
     *,
     category: str,
@@ -906,12 +970,15 @@ def register_uploaded_file(
     mime: str,
     dedupe: bool = False,
     tags: list | None = None,
-) -> MediaItem:
+) -> RegisterResult:
     """
     Register a file already written under Medias/.
 
-    Uploads from extension capture must use dedupe=False: same page URL is reused
-    for every capture and would otherwise collapse to the first row (unplayable).
+    Always enforces **content** dedupe: if SHA-256 matches an existing library
+    file, the new ``dest`` is discarded and the existing row is returned with
+    ``duplicate=True`` (tags merged). URL-based ``dedupe`` remains optional for
+    same-path / legacy source_url collapse (extension capture uses False so
+    different captures on the same page URL stay distinct **unless** bytes match).
 
     media_type is re-checked via content (ffprobe / magic); extension is not trusted
     (e.g. pure audio packaged as .mp4 → stored as audio).
@@ -931,22 +998,47 @@ def register_uploaded_file(
     if media_type == "m3u8":
         media_type = "video"
     mime = (cls.get("mime") or mime or "").strip()
-    # Unique per file path + size so re-uploads never clobber DB identity
+    chash, hsize = hash_media_file(dest)
+    if hsize:
+        size = hsize
+    # Unique per file path + size so re-uploads never clobber DB identity by URL alone
     uh = url_hash(f"upload|{rel}|{size}|{source_url or ''}", "default")
     tag_json = tags_to_json(tags or [])
+    content_dup = False
     with session_scope() as db:
         existing = None
-        if dedupe and source_url:
+        # 1) Byte-identical library hit (any path / any source_url)
+        if chash:
+            existing = find_item_by_content(db, chash, size, exclude_rel=rel)
+            if existing:
+                content_dup = True
+        # 2) Optional URL-style dedupe (legacy)
+        if not existing and dedupe and source_url:
             existing = db.scalars(
                 select(MediaItem).where(MediaItem.url_hash == uh)
             ).first()
+        # 3) Same rel_path (overwrite / re-register same dest)
         if not existing:
             existing = db.scalars(select(MediaItem).where(MediaItem.rel_path == rel)).first()
-        if existing:
+
+        if existing and content_dup:
+            if not (getattr(existing, "content_hash", None) or "").strip():
+                existing.content_hash = chash
+            if tags:
+                merged = normalize_tags(tags_from_json(existing.tags_json) + list(tags))
+                existing.tags_json = tags_to_json(merged)
+            db.commit()
+            db.refresh(existing)
+            media_id = existing.id
+            mtype = existing.media_type or media_type
+            dest_for_thumb = None  # keep existing thumb
+        elif existing:
             existing.file_size = size
             existing.mime = mime or existing.mime
             existing.media_type = media_type or existing.media_type
             existing.title = (title or existing.title or dest.stem)[:512]
+            if chash:
+                existing.content_hash = chash
             if tags:
                 merged = normalize_tags(tags_from_json(existing.tags_json) + list(tags))
                 existing.tags_json = tags_to_json(merged)
@@ -963,6 +1055,7 @@ def register_uploaded_file(
                 rel_path=rel,
                 source_url=(source_url or "")[:2048],
                 url_hash=uh,
+                content_hash=chash or "",
                 file_size=size,
                 mime=mime or "",
                 tags_json=tag_json,
@@ -973,15 +1066,33 @@ def register_uploaded_file(
             media_id = item.id
             mtype = media_type
             dest_for_thumb = dest
+            content_dup = False
 
-    thumb_rel = generate_thumb(dest_for_thumb, media_id, mtype)
-    if thumb_rel:
+    if content_dup:
+        # Drop the new copy when it is not the kept library path
+        try:
+            kept_rel = ""
+            with session_scope() as db:
+                kept = db.get(MediaItem, media_id)
+                kept_rel = (kept.rel_path if kept else "") or ""
+            if dest.is_file() and kept_rel and rel != kept_rel:
+                dest.unlink(missing_ok=True)
+        except OSError:
+            logger.warning("unlink content-dup upload failed: %s", dest)
         with session_scope() as db:
             item = db.get(MediaItem, media_id)
-            if item:
-                item.thumb_rel = thumb_rel
-                db.commit()
-                db.refresh(item)
-                return item
+            return RegisterResult(item, duplicate=True, content_hash=chash)
+
+    if dest_for_thumb is not None:
+        thumb_rel = generate_thumb(dest_for_thumb, media_id, mtype)
+        if thumb_rel:
+            with session_scope() as db:
+                item = db.get(MediaItem, media_id)
+                if item:
+                    item.thumb_rel = thumb_rel
+                    db.commit()
+                    db.refresh(item)
+                    return RegisterResult(item, duplicate=False, content_hash=chash)
     with session_scope() as db:
-        return db.get(MediaItem, media_id)
+        item = db.get(MediaItem, media_id)
+        return RegisterResult(item, duplicate=False, content_hash=chash)

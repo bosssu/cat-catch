@@ -530,6 +530,68 @@
         }
     }
 
+    /**
+     * Server scans file content (size + SHA-256); removes items that
+     * reference byte-identical media, keeping one preferred row per group.
+     */
+    async function oneClickDedupe() {
+        const btn = $("btnDedupe");
+        if (btn) btn.disabled = true;
+        try {
+            setStatus("正在扫描重复媒体…");
+            const preview = await LMW.dedupeMedia({ dry_run: true });
+            const nGroups = preview.duplicate_groups || 0;
+            const nDrop = (preview.deleted_ids && preview.deleted_ids.length) || preview.would_delete || 0;
+            if (!nGroups || !nDrop) {
+                setStatus(
+                    `去重完成：未发现内容完全相同的条目（扫描 ${preview.scanned || 0} 项）`
+                );
+                return;
+            }
+            const lines = (preview.groups || [])
+                .slice(0, 8)
+                .map(
+                    (g) =>
+                        `· 保留 #${g.keep_id}，删除 ${(g.remove_ids || []).join(",")}` +
+                        (g.file_size ? `（${formatSize(g.file_size)}）` : "")
+                );
+            const more =
+                (preview.groups || []).length > 8
+                    ? `\n…另有 ${(preview.groups || []).length - 8} 组`
+                    : "";
+            const ok = confirm(
+                `发现 ${nGroups} 组完全相同文件，将删除 ${nDrop} 条重复 item（每组保留 1 条）。\n` +
+                    `优先保留：已喜欢 / 有点评 / 互动更高 / 更早入库。\n\n` +
+                    lines.join("\n") +
+                    more +
+                    `\n\n确定执行？不可恢复。`
+            );
+            if (!ok) {
+                setStatus("已取消去重");
+                return;
+            }
+            setStatus(`正在删除 ${nDrop} 条重复…`);
+            const r = await LMW.dedupeMedia({ dry_run: false });
+            const deleted = r.deleted || (r.deleted_ids && r.deleted_ids.length) || 0;
+            for (const id of r.deleted_ids || []) {
+                state.selected.delete(Number(id));
+            }
+            setStatus(
+                `去重完成：删除 ${deleted} 条 · 保留 ${
+                    (r.kept_ids && r.kept_ids.length) || 0
+                } 组代表 · 扫描 ${r.scanned || 0}`
+            );
+            updateSelUi();
+            await loadList({ reset: true });
+            await loadTagOptions();
+            loadTagCombos();
+        } catch (e) {
+            setStatus("去重失败：" + (e.message || e));
+        } finally {
+            if (btn) btn.disabled = false;
+        }
+    }
+
     async function batchJasna() {
         const ids = selectedIds();
         if (!ids.length) {
@@ -657,6 +719,7 @@
         $("btnUpload").disabled = true;
         let done = 0;
         let failed = 0;
+        let dups = 0;
         const queue = files.slice();
 
         async function worker() {
@@ -664,7 +727,7 @@
                 const file = queue.shift();
                 if (!file) break;
                 const title = (file.name || "upload").replace(/\.[^.]+$/, "");
-                $("mmUploadProg").textContent = `上传中 ${done + failed + 1}/${files.length} · ${file.name}`;
+                $("mmUploadProg").textContent = `上传中 ${done + failed + dups + 1}/${files.length} · ${file.name}`;
                 try {
                     const useJasna = !!(
                         $("mmUseJasna") && $("mmUseJasna").checked
@@ -681,11 +744,15 @@
                         use_jasna: useJasna,
                         restricted,
                     });
-                    done++;
-                    if (up && up.jasna_job_id) {
-                        $("mmUploadProg").textContent =
-                            `上传中 ${done + failed}/${files.length} · jasna #${up.jasna_job_id} 排队`;
-                        pollJasnaJob(up.jasna_job_id).catch(() => {});
+                    if (up && up.duplicate) {
+                        dups++;
+                    } else {
+                        done++;
+                        if (up && up.jasna_job_id) {
+                            $("mmUploadProg").textContent =
+                                `上传中 ${done + failed + dups}/${files.length} · jasna #${up.jasna_job_id} 排队`;
+                            pollJasnaJob(up.jasna_job_id).catch(() => {});
+                        }
                     }
                 } catch (e) {
                     failed++;
@@ -702,13 +769,21 @@
         state.pendingFiles = [];
         $("mmFiles").value = "";
         refreshPendingUi();
-        $("mmUploadProg").textContent = `完成：成功 ${done}${failed ? ` · 失败 ${failed}` : ""}`;
-        if (done) await refreshAllTagAc();
+        $("mmUploadProg").textContent =
+            `完成：成功 ${done}` +
+            (dups ? ` · 内容重复跳过 ${dups}` : "") +
+            (failed ? ` · 失败 ${failed}` : "");
+        if (done || dups) await refreshAllTagAc();
         await loadList({ reset: true });
         await loadTagOptions();
         loadTagCombos();
         setStatus(
-            (failed ? `上传完成（${failed} 失败）` : "上传完成") +
+            (failed
+                ? `上传完成（${failed} 失败）`
+                : dups && !done
+                  ? "上传完成（全部为库内已有内容）"
+                  : "上传完成") +
+                (dups ? ` · 重复 ${dups}` : "") +
                 (tags.length ? " · 标签 " + tags.map((t) => "#" + t).join(" ") : "")
         );
     }
@@ -895,6 +970,8 @@
         $("btnBatchDel").onclick = () => batchDelete();
         const btnJasna = $("btnBatchJasna");
         if (btnJasna) btnJasna.onclick = () => batchJasna();
+        const btnDedupe = $("btnDedupe");
+        if (btnDedupe) btnDedupe.onclick = () => oneClickDedupe();
 
         // Tag library autocomplete: batch bar / upload / edit modal
         if (typeof LMW.attachTagAutocomplete === "function") {

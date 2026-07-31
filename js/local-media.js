@@ -3288,11 +3288,18 @@
                 .filter(Boolean)
                 .join("；");
             let msg =
-                `完成: 成功 ${result.success || 0}, 重复 ${result.duplicates || 0}, 回退上传 ${result.fallbackOk || 0}, 失败 ${result.failed || 0}` +
+                `完成: 成功 ${result.success || 0}, 链接重复 ${result.duplicates || 0}` +
+                (result.contentDuplicates
+                    ? `, 内容重复 ${result.contentDuplicates}`
+                    : "") +
+                `, 回退上传 ${result.fallbackOk || 0}, 失败 ${result.failed || 0}` +
                 `（任务 ${payload.length}）`;
             if (result.duplicates > 0) {
                 msg +=
-                    "（「重复」= 同一链接+相同起止时间段已入库；要截另一段请改时间后重选再提交）";
+                    "（「链接重复」= 同一 URL+相同起止时间已入库；要截另一段请改时间后重选）";
+            }
+            if (result.contentDuplicates > 0) {
+                msg += "（「内容重复」= 文件字节与库内已有完全相同，未再建条目）";
             }
             if (rangeHints) msg += " · 本次范围 " + rangeHints;
             if (tags.length) msg += " · 标签 " + tags.join(",");

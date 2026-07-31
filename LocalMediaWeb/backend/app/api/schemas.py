@@ -119,6 +119,11 @@ class MediaDeleteBatch(BaseModel):
     ids: list[int] = Field(default_factory=list)
 
 
+class MediaDedupeRequest(BaseModel):
+    """One-click remove items that reference byte-identical media files."""
+    dry_run: bool = False
+
+
 class MediaJasnaBatch(BaseModel):
     """Enqueue jasna demosaic for selected media ids (video/m3u8 only)."""
     ids: list[int] = Field(default_factory=list)

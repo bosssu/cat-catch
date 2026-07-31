@@ -22,6 +22,8 @@ class MediaItem(Base):
     rel_path: Mapped[str] = mapped_column(String(1024), unique=True)
     source_url: Mapped[str] = mapped_column(String(2048), default="", index=True)
     url_hash: Mapped[str] = mapped_column(String(64), index=True, default="")
+    # SHA-256 of file bytes; used to reject byte-identical re-ingest
+    content_hash: Mapped[str] = mapped_column(String(64), index=True, default="")
     file_size: Mapped[int] = mapped_column(Integer, default=0)
     mime: Mapped[str] = mapped_column(String(128), default="")
     thumb_rel: Mapped[str] = mapped_column(String(1024), default="")

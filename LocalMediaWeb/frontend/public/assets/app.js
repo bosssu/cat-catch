@@ -5490,12 +5490,14 @@
     const restricted = !!document.getElementById("albumUploadRestricted")?.checked;
     let ok = 0;
     let fail = 0;
+    let dups = 0;
     const errors = [];
     for (let i = 0; i < files.length; i++) {
       if (prog) prog.textContent = `${i + 1}/${files.length} 上传中… ${files[i].name}`;
       try {
-        await uploadAlbumFile(files[i], { tags, restricted });
-        ok += 1;
+        const r = await uploadAlbumFile(files[i], { tags, restricted });
+        if (r && r.duplicate) dups += 1;
+        else ok += 1;
       } catch (e) {
         fail += 1;
         errors.push(`${files[i].name}: ${e.message || e}`);
@@ -5504,6 +5506,7 @@
     if (prog) {
       prog.textContent =
         `完成：成功 ${ok}` +
+        (dups ? `，内容重复跳过 ${dups}` : "") +
         (fail ? `，失败 ${fail}` : "") +
         (errors.length ? " — " + errors.slice(0, 2).join("; ") : "");
     }
