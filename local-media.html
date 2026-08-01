@@ -20,8 +20,13 @@
       <button type="button" id="btnLoadCaught" class="button2">载入嗅探资源</button>
       <button type="button" id="btnSelectAll" class="button2">全选</button>
       <button type="button" id="btnInvert" class="button2">反选</button>
+      <button type="button" id="btnDeleteSelected" class="button2" title="从当前列表移除选中的项（不删服务器库内文件）">删除选中项</button>
       <button type="button" id="btnDetectAvMerge" class="button2" title="在已勾选的项中比对完整音/视频时长，标出高度匹配的可合并对">检测选中中的可合并项</button>
-      <button type="button" id="btnMergeAvSelected" class="button2 primary" title="将匹配的音视频快速合并并写入媒体库" disabled>合并选中音视频</button>
+      <button type="button" id="btnMergeAvSelected" class="button2 primary" title="将匹配的音视频快速合并并写入媒体库；也可手动勾选 1 视频 + 1 音频后直接合并" disabled>合并选中音视频</button>
+      <label class="lm-check" title="合并或入库成功后，自动从当前列表移除对应项">
+        <input type="checkbox" id="lmAutoRemove" checked />
+        处理完后自动移除
+      </label>
       <button type="button" id="btnOpenManage" class="button2" title="打开服务器媒体管理（已入库列表）">服务器媒体管理</button>
       <select id="typeFilter" title="媒体类型">
         <option value="">全部类型</option>
@@ -108,7 +113,7 @@
     </div>
   </div>
 
-  <script src="js/local-media.js?v=20260731mergesrcdel"></script>
+  <script src="js/local-media.js?v=20260801fastprobe"></script>
 </body>
 </html>
 

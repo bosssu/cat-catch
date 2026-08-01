@@ -175,6 +175,8 @@ G.OptionLists = {
     lmwFloatMinPx: 72,
     // 入库后使用 jasna 去马赛克（视频；服务端串行 GPU 队列）
     lmwUseJasna: false,
+    /** 加入本地媒体库：合并/入库成功后自动从列表移除对应项（默认开） */
+    lmwAutoRemoveAfterProcess: true,
     // 入库时默认打上「限制级」标签（各入库 UI 可单独勾选，会写回此偏好）
     lmwRestricted: false,
 

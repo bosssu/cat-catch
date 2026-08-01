@@ -905,8 +905,11 @@ def media_reclassify(body: MediaReclassifyRequest, db=Depends(get_db)):
 @router.post("/media/probe-url", dependencies=[Depends(require_token)])
 async def media_probe_url(body: ProbeUrlRequest):
     """
-    Download remote URL into a temp file, classify with ffprobe/magic, delete temp.
+    Lightweight remote classify: download only a small head (and optional tail),
+    run ffprobe/magic, delete temp. Does NOT pull the full media file.
+
     Used by extension when list items may use a video extension for pure audio.
+    Full-file download remains for merge/ingest, not for type detection.
     """
     import tempfile
 
@@ -915,11 +918,22 @@ async def media_probe_url(body: ProbeUrlRequest):
     url = (body.url or "").strip()
     if not url or not url.startswith(("http://", "https://")):
         raise HTTPException(400, "valid http(s) url required")
-    settings = get_settings()
-    max_b = int(body.max_bytes or 0) or int(settings.max_file_bytes or 0) or (512 * 1024 * 1024)
-    # Cap probe downloads at 256MB to avoid filling disk for casual classify
-    max_b = min(max_b, 256 * 1024 * 1024)
+    # Default: ~4MiB head — enough for most containers / stream headers; not full film
+    PROBE_DEFAULT_HEAD = 4 * 1024 * 1024
+    PROBE_DEFAULT_TAIL = 1 * 1024 * 1024
+    PROBE_HARD_CAP = 32 * 1024 * 1024  # never more than 32MiB for a probe call
+    max_b = int(body.max_bytes or 0) or PROBE_DEFAULT_HEAD
+    max_b = max(64 * 1024, min(max_b, PROBE_HARD_CAP))
+    tb = int(body.tail_bytes or 0)
+    if tb == 0:
+        tail_b = PROBE_DEFAULT_TAIL
+    elif tb < 0:
+        tail_b = 0
+    else:
+        tail_b = min(tb, PROBE_HARD_CAP)
     headers = {str(k): str(v) for k, v in (body.headers or {}).items() if v is not None}
+    # Avoid clobbering an explicit Range from the caller
+    has_range = any(k.lower() == "range" for k in headers)
     suffix = Path(url.split("?")[0]).suffix or ".bin"
     if len(suffix) > 12:
         suffix = ".bin"
@@ -934,36 +948,104 @@ async def media_probe_url(body: ProbeUrlRequest):
             pass
         tmp_path = Path(name)
         written = 0
+        truncated = False
+        ct = ""
+        content_len: int | None = None
         async with httpx.AsyncClient(
             follow_redirects=True,
-            timeout=httpx.Timeout(60.0, connect=20.0),
+            timeout=httpx.Timeout(45.0, connect=15.0),
             trust_env=True,
         ) as client:
-            async with client.stream("GET", url, headers=headers) as resp:
+            req_headers = dict(headers)
+            if not has_range:
+                # Ask CDN for only the head when possible (206 or full 200)
+                req_headers["Range"] = f"bytes=0-{max_b - 1}"
+            async with client.stream("GET", url, headers=req_headers) as resp:
                 if resp.status_code >= 400:
                     raise HTTPException(400, f"download HTTP {resp.status_code}")
                 ct = (resp.headers.get("content-type") or "").split(";")[0].strip()
+                # Content-Range: bytes 0-N/total  or Content-Length on 200
+                cr = resp.headers.get("content-range") or ""
+                if "/" in cr:
+                    try:
+                        total_s = cr.rsplit("/", 1)[-1].strip()
+                        if total_s.isdigit():
+                            content_len = int(total_s)
+                    except ValueError:
+                        pass
+                if content_len is None:
+                    try:
+                        cl = int(resp.headers.get("content-length") or 0)
+                        if cl > 0:
+                            content_len = cl
+                    except ValueError:
+                        pass
                 with tmp_path.open("wb") as out:
-                    async for chunk in resp.aiter_bytes(1024 * 256):
+                    async for chunk in resp.aiter_bytes(64 * 1024):
                         if not chunk:
                             continue
-                        written += len(chunk)
-                        if written > max_b:
-                            raise HTTPException(400, "probe file too large")
+                        remain = max_b - written
+                        if remain <= 0:
+                            truncated = True
+                            break
+                        if len(chunk) > remain:
+                            out.write(chunk[:remain])
+                            written += remain
+                            truncated = True
+                            break
                         out.write(chunk)
+                        written += len(chunk)
+                # If server ignored Range and kept streaming, we already stopped early
+                if content_len is not None and content_len > written:
+                    truncated = True
+
+            # Optional tail for moov-at-end: append after a gap is invalid for mp4;
+            # instead re-fetch only the last tail_b into a *separate* classify pass
+            # by rewriting file as head||tail only when both fit and file is larger.
+            # For simplicity: if head alone has no duration and we know size, replace
+            # with head + last tail (ffmpeg often still reads streams from head).
+            if (
+                tail_b > 0
+                and content_len is not None
+                and content_len > written + 1024
+                and content_len - written > tail_b // 2
+            ):
+                start = max(0, content_len - tail_b)
+                # Skip if tail overlaps head we already have
+                if start >= written:
+                    try:
+                        th = dict(headers)
+                        th["Range"] = f"bytes={start}-{content_len - 1}"
+                        tr = await client.get(url, headers=th)
+                        if tr.status_code in (200, 206) and tr.content:
+                            # Write sparse-ish: head + tail concatenated with note.
+                            # Stream topology is usually in moov (tail) or early boxes (head);
+                            # concatenating is imperfect but often enough for role detect.
+                            with tmp_path.open("ab") as out:
+                                out.write(tr.content[:tail_b])
+                            written += min(len(tr.content), tail_b)
+                            truncated = True
+                    except Exception:
+                        pass
+
         if written < 16:
             raise HTTPException(400, "empty download")
         cls = classify_media_file(tmp_path, content_type=ct)
+        method = cls.get("method") or ""
+        if truncated and method:
+            method = f"{method}_partial"
         return {
             "url": url,
             "bytes": written,
+            "truncated": truncated,
+            "content_length": content_len,
             "media_type": cls.get("media_type"),
             "role": cls.get("role"),
             "has_video": cls.get("has_video"),
             "has_audio": cls.get("has_audio"),
             "duration_sec": cls.get("duration_sec"),
             "mime": cls.get("mime"),
-            "method": cls.get("method"),
+            "method": method,
             "summary": cls.get("summary"),
             "error": cls.get("error") or "",
         }

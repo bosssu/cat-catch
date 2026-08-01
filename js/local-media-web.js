@@ -538,18 +538,26 @@ const LMW = {
     },
 
     /**
-     * Server downloads URL to temp dir and classifies with ffprobe/magic (no extension trust).
-     * @param {{ url: string, headers?: object, max_bytes?: number }} body
+     * Lightweight remote classify: server downloads only a small head (default ~4MiB)
+     * + optional tail, ffprobe/magic, discards temp. Not a full-file cache for merge.
+     * @param {{ url: string, headers?: object, max_bytes?: number, tail_bytes?: number }} body
      */
     probeUrl(body = {}) {
+        const payload = {
+            url: body.url || "",
+            headers: body.headers || {},
+        };
+        // 0 → server default (~4MiB). Pass explicit max_bytes only when needed.
+        if (body.max_bytes != null && body.max_bytes > 0) {
+            payload.max_bytes = body.max_bytes;
+        }
+        if (body.tail_bytes != null) {
+            payload.tail_bytes = body.tail_bytes;
+        }
         return this.request("/api/media/probe-url", {
             method: "POST",
             headers: this.headers(true),
-            body: JSON.stringify({
-                url: body.url || "",
-                headers: body.headers || {},
-                max_bytes: body.max_bytes || 0,
-            }),
+            body: JSON.stringify(payload),
         });
     },
 

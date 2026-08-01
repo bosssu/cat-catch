@@ -523,6 +523,81 @@
         $("body").css("overflow", "hidden");
     }
 
+    function isJasnaChecked() {
+        return !!(document.getElementById("lmUseJasna") && document.getElementById("lmUseJasna").checked);
+    }
+
+    function isAutoRemoveChecked() {
+        const el = document.getElementById("lmAutoRemove");
+        // 默认开：控件缺失时也视为开启
+        return !el || !!el.checked;
+    }
+
+    /** jasna 勾选时，入库/合并前二次确认 */
+    function confirmJasnaIfNeeded(opLabel) {
+        if (!isJasnaChecked()) return true;
+        return confirm(
+            `已勾选「使用 jasna 去马赛克」。\n` +
+                `${opLabel}将在写入媒体库后由服务器调用 jasna（GPU 串行队列，可能较久）。\n\n是否继续？`
+        );
+    }
+
+    function isAllFilteredSelected() {
+        const list = getFilteredItems();
+        return list.length > 0 && list.every((it) => selected.has(it._key));
+    }
+
+    function updateSelectAllBtn() {
+        const btn = document.getElementById("btnSelectAll");
+        if (!btn) return;
+        btn.textContent = isAllFilteredSelected() ? "取消全选" : "全选";
+    }
+
+    /**
+     * 从列表移除指定 key 的项（本地网格，不删服务器）。
+     * @param {Iterable<string>} keys
+     * @returns {number} 实际移除数量
+     */
+    function removeItemsByKeys(keys) {
+        const drop = keys instanceof Set ? keys : new Set(keys);
+        if (!drop.size) return 0;
+        const before = items.length;
+        items = items.filter((it) => !drop.has(it._key));
+        for (const k of drop) selected.delete(k);
+        // 清掉涉及已删项的配对
+        if (avPairs.length) {
+            avPairs = avPairs.filter((p) => {
+                if (p.source === "page") {
+                    return !(drop.has(p.video_key) || drop.has(p.audio_key));
+                }
+                return true;
+            });
+            avPairByKey.clear();
+            for (const p of avPairs) {
+                const idx = Number(p.pair_index) || 0;
+                if (p.source === "page") {
+                    if (p.video_key) avPairByKey.set(p.video_key, { pair_index: idx, role: "video", pair: p });
+                    if (p.audio_key) avPairByKey.set(p.audio_key, { pair_index: idx, role: "audio", pair: p });
+                } else {
+                    if (p.video_id) avPairByKey.set("lib:" + p.video_id, { pair_index: idx, role: "video", pair: p });
+                    if (p.audio_id) avPairByKey.set("lib:" + p.audio_id, { pair_index: idx, role: "audio", pair: p });
+                }
+            }
+        }
+        return before - items.length;
+    }
+
+    function deleteSelectedItems() {
+        if (!selected.size) {
+            setStatus("请先选择要删除的项");
+            return;
+        }
+        const n = selected.size;
+        removeItemsByKeys(new Set(selected));
+        render();
+        setStatus(`已从列表移除 ${n} 项`);
+    }
+
     function updateStatusCount(listLen) {
         const n = listLen != null ? listLen : $("#grid .lm-card").length;
         const total = items.length;
@@ -532,14 +607,81 @@
             `共 ${n} 项${filterHint}，已选 ${selected.size}${pairHint} · 服务器 ${LMW.baseUrl()} · 单击选择 / 双击预览`
         );
         updateMergeBtn();
+        updateSelectAllBtn();
+    }
+
+    /** 手动勾选恰好 2 项时，是否可作为「待合并对」启用按钮 */
+    function canManualTwoItemMerge() {
+        if (selected.size !== 2) return false;
+        const chosen = getSelectedItems();
+        if (chosen.length !== 2) return false;
+        // 排除纯图/动图；其余（含伪装成 mp4 的音频）交给合并时内容识别
+        return chosen.every((it) => {
+            const t = mediaTypeOf(it);
+            return t !== "image" && t !== "gif";
+        });
     }
 
     function updateMergeBtn() {
         const btn = document.getElementById("btnMergeAvSelected");
         if (!btn) return;
         const n = collectMergePairs().length;
-        btn.disabled = n === 0;
-        btn.textContent = n > 0 ? `合并选中音视频 (${n})` : "合并选中音视频";
+        const manual = n === 0 && canManualTwoItemMerge();
+        const count = n > 0 ? n : manual ? 1 : 0;
+        btn.disabled = count === 0;
+        btn.textContent = count > 0 ? `合并选中音视频 (${count})` : "合并选中音视频";
+    }
+
+    /**
+     * 手动选中 2 项时，内容识别后组成 1 对 page pair。
+     * @returns {Promise<object[]>}
+     */
+    async function buildManualMergePairsFromSelection() {
+        const chosen = getSelectedItems();
+        if (chosen.length !== 2) return [];
+        setStatus("识别选中两项的音/视频角色…");
+        for (const it of chosen) {
+            const t = mediaTypeOf(it);
+            if (t === "m3u8" || t === "dash" || t === "image" || t === "gif") continue;
+            if (it._classifyMethod !== "server" && it._classifyMethod !== "element") {
+                await classifyItemContent(it);
+            }
+        }
+        let video = null;
+        let audio = null;
+        for (const it of chosen) {
+            const t = mediaTypeOf(it);
+            if (t === "video" && !video) video = it;
+            else if (t === "audio" && !audio) audio = it;
+        }
+        // 若仍无法区分：按时长/类型兜底 — 一个有画面一个无画面已由 classify 处理
+        if (!video || !audio) {
+            // 再试一次：未归为 audio 的 progressive 可能还是 video 扩展名
+            const rest = chosen.filter((it) => it !== video && it !== audio);
+            for (const it of rest) {
+                await classifyItemContent(it);
+            }
+            video = null;
+            audio = null;
+            for (const it of chosen) {
+                const t = mediaTypeOf(it);
+                if (t === "video" && !video) video = it;
+                else if (t === "audio" && !audio) audio = it;
+            }
+        }
+        if (!video || !audio) return [];
+        return [
+            {
+                source: "page",
+                video_key: video._key,
+                audio_key: audio._key,
+                video_item: video,
+                audio_item: audio,
+                pair_index: 0,
+                score: 1,
+                manual: true,
+            },
+        ];
     }
 
     function clearAvPairs() {
@@ -627,8 +769,9 @@
 
     /**
      * Content-based type + duration for progressive files.
-     * Prefers server download→ffprobe (handles audio disguised as .mp4).
-     * Falls back to HTMLMediaElement (videoWidth===0 ⇒ audio).
+     * Fast path: browser metadata only (Range/partial — no full file).
+     * Slow path: server probe of small head (~4MiB), never full-film download.
+     * Merge still does its own full fetch; probe result is not reused as blob cache.
      */
     async function classifyItemContent(it) {
         if (!it || !it.url) return null;
@@ -636,7 +779,22 @@
         if (t0 === "m3u8" || t0 === "dash" || t0 === "image" || t0 === "gif") {
             return { media_type: t0, duration_sec: null, method: "skip" };
         }
-        // Server: download to temp + ffprobe (authoritative)
+
+        // 1) Client first: preload=metadata is usually much faster than server full GET
+        const elInfo = await probeItemWithElement(it, 8000);
+        if (elInfo && elInfo.media_type) {
+            const hasDur = elInfo.duration_sec != null && elInfo.duration_sec > 0.05;
+            // Enough for pair detect / manual role when we have type + duration,
+            // or clear audio-only (no picture plane — common disguised .mp4 audio)
+            if (
+                (elInfo.media_type === "audio" || elInfo.media_type === "video") &&
+                (hasDur || elInfo.media_type === "audio")
+            ) {
+                return elInfo;
+            }
+        }
+
+        // 2) Server: only a few MiB head (+ optional tail), not whole file
         try {
             const headers = {};
             const src = it._headers || {};
@@ -646,27 +804,36 @@
                     headers[k] = String(v);
                 }
             }
-            const r = await LMW.probeUrl({ url: it.url, headers });
+            const r = await LMW.probeUrl({
+                url: it.url,
+                headers,
+                // explicit small cap (server default is also ~4MiB)
+                max_bytes: 4 * 1024 * 1024,
+            });
             if (r && r.media_type) {
                 it.media_type = r.media_type;
                 it._contentRole = r.role || "";
                 it._durationSec =
                     r.duration_sec != null && Number(r.duration_sec) > 0
                         ? Number(r.duration_sec)
-                        : it._durationSec;
-                it._classifyMethod = r.method || "server";
+                        : it._durationSec || (elInfo && elInfo.duration_sec) || null;
+                it._classifyMethod = r.method || "server_partial";
+                // Prefer client duration if server partial lost moov
+                if (!(it._durationSec > 0) && elInfo && elInfo.duration_sec > 0) {
+                    it._durationSec = elInfo.duration_sec;
+                }
                 return {
                     media_type: r.media_type,
                     duration_sec: it._durationSec,
                     role: r.role,
                     method: r.method,
+                    truncated: !!r.truncated,
                 };
             }
         } catch (e) {
-            console.warn("probe-url failed, fallback element", it.url, e);
+            console.warn("probe-url failed", it.url, e);
         }
-        // Client fallback: <video> with no picture plane ≈ audio-only container
-        return probeItemWithElement(it);
+        return elInfo || null;
     }
 
     function probeItemWithElement(it, timeoutMs = 12000) {
@@ -889,16 +1056,31 @@
     }
 
     async function mergeSelectedAv() {
-        const pairs = collectMergePairs();
+        let pairs = collectMergePairs();
+        // 无检测结果时：支持网格里手动勾选恰好 2 项直接合并
+        if (!pairs.length && canManualTwoItemMerge()) {
+            pairs = await buildManualMergePairsFromSelection();
+            if (!pairs.length) {
+                setStatus("选中的两项无法识别为「1 视频 + 1 音频」，请先「检测选中中的可合并项」或改选");
+                updateMergeBtn();
+                return;
+            }
+        }
         if (!pairs.length) {
-            setStatus("请先「检测选中中的可合并项」");
+            setStatus("请先「检测选中中的可合并项」，或在网格中手动勾选 1 视频 + 1 音频");
+            return;
+        }
+        if (!confirmJasnaIfNeeded("合并选中音视频")) {
+            setStatus("已取消合并（jasna 确认）");
             return;
         }
         const pageN = pairs.filter((p) => p.source === "page").length;
         const libN = pairs.filter((p) => p.source === "library").length;
+        const manualN = pairs.filter((p) => p.manual).length;
         if (
             !confirm(
                 `合并 ${pairs.length} 对音视频并写入媒体库？\n` +
+                    (manualN ? `· 手动选中 ${manualN} 对\n` : "") +
                     (pageN
                         ? `· 当前列表 ${pageN} 对：下载后合并，仅保留合并成品（临时文件自动清理）\n`
                         : "") +
@@ -916,7 +1098,9 @@
         let ok = 0;
         let fail = 0;
         const restricted = !!(document.getElementById("lmRestricted") && document.getElementById("lmRestricted").checked);
-        const useJasna = !!(document.getElementById("lmUseJasna") && document.getElementById("lmUseJasna").checked);
+        const useJasna = isJasnaChecked();
+        /** @type {Set<string>} */
+        const mergedPageKeys = new Set();
         try {
             // library pairs batch
             const libPairs = pairs.filter((p) => p.source === "library");
@@ -952,19 +1136,30 @@
                         use_jasna: useJasna,
                     });
                     ok++;
+                    if (p.video_key) mergedPageKeys.add(p.video_key);
+                    if (p.audio_key) mergedPageKeys.add(p.audio_key);
                 } catch (e) {
                     fail++;
                     console.warn("merge page pair", e);
                 }
             }
-            setStatus(`合并完成：成功 ${ok}` + (fail ? ` · 失败 ${fail}` : "") + " · 已写入媒体库");
+            let extra = "";
+            if (isAutoRemoveChecked() && mergedPageKeys.size) {
+                const removed = removeItemsByKeys(mergedPageKeys);
+                if (removed) extra = ` · 已自动移除列表 ${removed} 项`;
+            }
             clearAvPairs();
+            if (extra) render();
+            setStatus(
+                `合并完成：成功 ${ok}` + (fail ? ` · 失败 ${fail}` : "") + " · 已写入媒体库" + extra
+            );
         } catch (e) {
             setStatus("合并失败：" + ((e && e.message) || e));
         } finally {
             if (btn) btn.disabled = false;
             if (detectBtn) detectBtn.disabled = false;
             updateMergeBtn();
+            updateSelectAllBtn();
         }
     }
 
@@ -976,6 +1171,7 @@
         const it = items.find((x) => x._key === key);
         updateRangeBadge($card, it);
         updateMergeBtn();
+        updateSelectAllBtn();
     }
 
     function parseTimeToSeconds(time) {
@@ -3224,6 +3420,10 @@
             setStatus("请先选择媒体");
             return;
         }
+        if (!confirmJasnaIfNeeded("入库选中媒体")) {
+            setStatus("已取消入库（jasna 确认）");
+            return;
+        }
         const pageUrl = await getPageUrl();
         const first = chosen[0];
         const dlg = await LMW.openIngestDialog({
@@ -3240,12 +3440,13 @@
         const tags = dlg.tags || [];
         const useJasna =
             dlg.use_jasna === true ||
-            !!(document.getElementById("lmUseJasna") && document.getElementById("lmUseJasna").checked) ||
+            isJasnaChecked() ||
             (typeof G !== "undefined" && G.lmwUseJasna === true);
         const restricted =
             dlg.restricted === true ||
             !!(document.getElementById("lmRestricted") && document.getElementById("lmRestricted").checked) ||
             (typeof G !== "undefined" && G.lmwRestricted === true);
+        const chosenKeys = chosen.map((it) => it._key).filter(Boolean);
         try {
             const payload = [];
             let clipCount = 0;
@@ -3303,6 +3504,20 @@
             }
             if (rangeHints) msg += " · 本次范围 " + rangeHints;
             if (tags.length) msg += " · 标签 " + tags.join(",");
+            // 处理完后自动移除：提交成功即从列表去掉对应项（含成功/重复，排除整批失败）
+            const processed =
+                (result.success || 0) +
+                    (result.duplicates || 0) +
+                    (result.contentDuplicates || 0) +
+                    (result.fallbackOk || 0) >
+                0;
+            if (isAutoRemoveChecked() && processed && chosenKeys.length) {
+                const removed = removeItemsByKeys(chosenKeys);
+                if (removed) {
+                    msg += ` · 已自动移除列表 ${removed} 项`;
+                    render();
+                }
+            }
             if (useJasna) {
                 const mediaIds = [];
                 for (const j of result.jobs || []) {
@@ -3381,12 +3596,22 @@
     $("#btnLoadCaught").on("click", loadCaught);
     $("#btnDetectAvMerge").on("click", () => detectAvMergePairs());
     $("#btnMergeAvSelected").on("click", () => mergeSelectedAv());
+    $("#btnDeleteSelected").on("click", () => deleteSelectedItems());
     $("#btnOpenManage").on("click", () => {
         chrome.tabs.create({ url: chrome.runtime.getURL("lmw-media-manage.html") });
     });
     $("#btnSelectAll").on("click", () => {
         const list = getFilteredItems();
-        list.forEach((it) => selected.add(it._key));
+        if (!list.length) {
+            updateSelectAllBtn();
+            return;
+        }
+        const allOn = isAllFilteredSelected();
+        if (allOn) {
+            list.forEach((it) => selected.delete(it._key));
+        } else {
+            list.forEach((it) => selected.add(it._key));
+        }
         // 批量：就地更新卡片，避免不必要闪烁；若未渲染则 render
         const $cards = $("#grid .lm-card");
         if (!$cards.length) {
@@ -3411,6 +3636,24 @@
     });
     $("#typeFilter, #resFilter, #longFilter, #cookieFilter").on("change", render);
     $("#btnIngest").on("click", doIngest);
+
+    // 默认开启；可持久化偏好
+    const $autoRemove = $("#lmAutoRemove");
+    if ($autoRemove.length) {
+        let autoRm = true;
+        if (typeof G !== "undefined" && G.lmwAutoRemoveAfterProcess != null) {
+            autoRm = !!G.lmwAutoRemoveAfterProcess;
+        }
+        $autoRemove.prop("checked", autoRm);
+        $autoRemove.on("change", function () {
+            const on = !!this.checked;
+            if (typeof G !== "undefined") G.lmwAutoRemoveAfterProcess = on;
+            try {
+                chrome.storage.sync.set({ lmwAutoRemoveAfterProcess: on });
+                chrome.storage.local.set({ lmwAutoRemoveAfterProcess: on });
+            } catch (e) { /* ignore */ }
+        });
+    }
 
     const $restricted = $("#lmRestricted");
     if ($restricted.length) {

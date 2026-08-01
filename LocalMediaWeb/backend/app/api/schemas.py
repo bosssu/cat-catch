@@ -176,8 +176,12 @@ class ProbeUrlRequest(BaseModel):
     """Download a remote URL to a temp file and classify by content (ffprobe/magic)."""
     url: str
     headers: dict[str, str] = Field(default_factory=dict)
-    # Soft cap so huge files don't fill disk during probe (bytes); 0 = use max_file_bytes
+    # Soft cap for probe download (bytes). 0 = default small head (~4MiB), not full file.
+    # Set large only when you intentionally want a near-full download for probe.
     max_bytes: int = 0
+    # When Content-Length is known and file is larger than max_bytes, also fetch
+    # this many trailing bytes (helps moov-at-end MP4). 0 = default 1MiB; -1 = disable.
+    tail_bytes: int = 0
 
 
 class TagSuggestRequest(BaseModel):
