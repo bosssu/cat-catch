@@ -1,0 +1,221 @@
+/* Convention scraper — aligned with lmw-media-manage dark theme */
+
+.cs-body {
+  margin: 0;
+  min-height: 100vh;
+  background: #0f1117;
+  color: #e8eaf0;
+  font-family: "Segoe UI", "Microsoft YaHei", system-ui, sans-serif;
+  font-size: 13px;
+  line-height: 1.45;
+}
+
+.cs-header {
+  position: sticky;
+  top: 0;
+  z-index: 20;
+  background: rgba(15, 17, 23, 0.94);
+  border-bottom: 1px solid rgba(255, 255, 255, 0.06);
+  padding: 12px 18px;
+  backdrop-filter: blur(12px);
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+}
+
+.cs-title {
+  font-size: 16px;
+  font-weight: 600;
+  letter-spacing: 0.02em;
+}
+
+.cs-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  align-items: center;
+}
+
+.cs-main {
+  max-width: 960px;
+  margin: 0 auto;
+  padding: 16px 18px 40px;
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+}
+
+.cs-card {
+  background: rgba(255, 255, 255, 0.03);
+  border: 1px solid rgba(255, 255, 255, 0.06);
+  border-radius: 10px;
+  padding: 14px 16px;
+}
+
+.cs-card h2 {
+  margin: 0 0 10px;
+  font-size: 13px;
+  font-weight: 600;
+  color: #c5c9d6;
+}
+
+.cs-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px 12px;
+  align-items: center;
+  margin-bottom: 8px;
+}
+
+.cs-row:last-child {
+  margin-bottom: 0;
+}
+
+.cs-input {
+  background: #1a1d27;
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  color: #e8eaf0;
+  border-radius: 6px;
+  padding: 7px 10px;
+  font-size: 13px;
+  min-width: 0;
+}
+
+.cs-input:focus {
+  outline: none;
+  border-color: rgba(96, 165, 250, 0.55);
+}
+
+.cs-input.url {
+  flex: 1 1 280px;
+}
+
+.cs-input.num {
+  width: 64px;
+  min-width: 64px;
+  text-align: center;
+}
+
+.cs-link-item .cs-input[type="text"] {
+  width: 72px;
+}
+
+.cs-link-item select.cs-input,
+#newNavTab {
+  width: 96px;
+  cursor: pointer;
+}
+
+.cs-check {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  cursor: pointer;
+  user-select: none;
+  color: #c5c9d6;
+  white-space: nowrap;
+}
+
+.cs-check input {
+  accent-color: #60a5fa;
+}
+
+.cs-link-list {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  min-height: 48px;
+  margin-bottom: 4px;
+}
+
+.cs-link-item {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px 10px;
+  align-items: center;
+  padding: 10px 12px;
+  background: rgba(0, 0, 0, 0.22);
+  border-radius: 8px;
+  border: 1px solid rgba(96, 165, 250, 0.25);
+  background: rgba(96, 165, 250, 0.06);
+}
+
+.cs-link-item.running {
+  border-color: rgba(96, 165, 250, 0.45);
+  box-shadow: 0 0 0 1px rgba(96, 165, 250, 0.15);
+}
+
+.cs-idx {
+  color: #8b90a0;
+  font-variant-numeric: tabular-nums;
+  min-width: 1.6em;
+}
+
+.cs-empty {
+  color: #8b90a0;
+  padding: 8px 0;
+}
+
+.cs-log {
+  font-family: ui-monospace, "Cascadia Mono", Consolas, monospace;
+  font-size: 12px;
+  line-height: 1.5;
+  max-height: 320px;
+  overflow: auto;
+  white-space: pre-wrap;
+  word-break: break-word;
+  background: #0a0c12;
+  border-radius: 8px;
+  padding: 10px 12px;
+  border: 1px solid rgba(255, 255, 255, 0.06);
+  color: #b8c0d0;
+}
+
+.cs-log .ok {
+  color: #6ee7b7;
+}
+.cs-log .warn {
+  color: #fbbf24;
+}
+.cs-log .err {
+  color: #f87171;
+}
+.cs-log .info {
+  color: #93c5fd;
+}
+
+.cs-hint {
+  color: #8b90a0;
+  font-size: 12px;
+  margin-top: 6px;
+}
+
+.cs-globals {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(160px, 1fr));
+  gap: 10px 14px;
+}
+
+.cs-field label {
+  display: block;
+  color: #8b90a0;
+  font-size: 11px;
+  margin-bottom: 4px;
+}
+
+.cs-field .cs-input {
+  width: 100%;
+  box-sizing: border-box;
+}
+
+.button2.danger {
+  color: #fecaca;
+  border-color: rgba(248, 113, 113, 0.35);
+}
+
+.button2:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}

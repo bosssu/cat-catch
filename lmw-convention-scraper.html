@@ -1,0 +1,100 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>约定抓取器 · LocalMediaWeb</title>
+  <link rel="stylesheet" href="css/public.css" />
+  <link rel="stylesheet" href="css/lmw-convention-scraper.css" />
+  <script src="js/init.js"></script>
+  <script src="js/function.js"></script>
+  <script src="js/local-media-web.js"></script>
+  <script src="js/lmw-av-utils.js"></script>
+  <script src="js/lmw-scraper-drivers.js"></script>
+</head>
+<body class="cs-body">
+  <header class="cs-header">
+    <div class="cs-title">约定抓取器</div>
+    <div class="cs-actions">
+      <button type="button" id="btnBackManage" class="button2" title="返回服务器媒体管理">服务器媒体管理</button>
+      <button type="button" id="btnStart" class="button2 primary">开始抓取</button>
+      <button type="button" id="btnStop" class="button2 danger" disabled>停止</button>
+    </div>
+  </header>
+
+  <main class="cs-main">
+    <section class="cs-card">
+      <h2>目标链接</h2>
+      <div id="linkList" class="cs-link-list"></div>
+      <div class="cs-row" style="margin-top:12px">
+        <input type="text" id="newUrl" class="cs-input url" placeholder="https://www.douyin.com/" autocomplete="off" spellcheck="false" />
+        <label class="cs-check" title="打开主页后自动进入的侧栏标签；选「无」则不点侧栏">
+          进入标签
+          <select id="newNavTab" class="cs-input" style="width:96px">
+            <option value="无" selected>无</option>
+            <option value="推荐">推荐</option>
+            <option value="精选">精选</option>
+            <option value="关注">关注</option>
+            <option value="朋友">朋友</option>
+            <option value="直播">直播</option>
+            <option value="我的">我的</option>
+            <option value="放映厅">放映厅</option>
+          </select>
+        </label>
+        <label class="cs-check" title="该站媒体可能音视频分轨，达标后走检测可合并">
+          <input type="checkbox" id="newAvSep" />
+          存在音视频分离
+        </label>
+        <label class="cs-check">目标条数
+          <input type="number" id="newCount" class="cs-input num" min="1" max="500" value="8" />
+        </label>
+        <button type="button" id="btnAdd" class="button2 primary">添加</button>
+      </div>
+      <p class="cs-hint">「进入标签」默认 <b>无</b>（不点侧栏）。选 <b>推荐</b> 等会在打开链接后自动进入对应侧栏。也可直接填深度链接如 <code>?recommend=1</code>。分离开：完整 AV 直入 + 可合并；分离关：全部视频直入。</p>
+    </section>
+
+    <section class="cs-card">
+      <h2>全局参数</h2>
+      <div class="cs-globals">
+        <div class="cs-field">
+          <label for="defCount">默认目标条数</label>
+          <input type="number" id="defCount" class="cs-input" min="1" max="500" value="8" />
+        </div>
+        <div class="cs-field">
+          <label for="intervalMs">操作间隔 (ms)</label>
+          <input type="number" id="intervalMs" class="cs-input" min="300" max="30000" value="2000" />
+        </div>
+        <div class="cs-field">
+          <label for="maxWaitMs">单链最长等待 (ms)</label>
+          <input type="number" id="maxWaitMs" class="cs-input" min="10000" max="3600000" value="180000" />
+        </div>
+        <div class="cs-field">
+          <label class="cs-check" style="margin-top:18px">
+            <input type="checkbox" id="optRestricted" />
+            限制级入库
+          </label>
+        </div>
+        <div class="cs-field">
+          <label class="cs-check" style="margin-top:18px">
+            <input type="checkbox" id="optJasna" />
+            jasna 去码
+          </label>
+        </div>
+        <div class="cs-field">
+          <label class="cs-check" style="margin-top:18px" title="本链处理完后关闭目标标签页">
+            <input type="checkbox" id="optCloseTab" checked />
+            完成后关标签
+          </label>
+        </div>
+      </div>
+    </section>
+
+    <section class="cs-card">
+      <h2>运行日志</h2>
+      <div id="log" class="cs-log" aria-live="polite"></div>
+    </section>
+  </main>
+
+  <script src="js/lmw-convention-scraper.js"></script>
+</body>
+</html>

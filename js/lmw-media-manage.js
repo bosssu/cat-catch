@@ -936,6 +936,14 @@
         $("btnOpenFeed").onclick = () => {
             chrome.tabs.create({ url: LMW.baseUrl() + "/" });
         };
+        const btnCs = $("btnConventionScraper");
+        if (btnCs) {
+            btnCs.onclick = () => {
+                chrome.tabs.create({
+                    url: chrome.runtime.getURL("lmw-convention-scraper.html"),
+                });
+            };
+        }
         $("btnMore").onclick = () => loadList({ reset: false });
 
         const combosList = $("mmTagCombosList");
