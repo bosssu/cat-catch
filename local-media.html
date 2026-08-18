@@ -5,12 +5,13 @@
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <title>LocalMediaWeb</title>
   <link rel="stylesheet" href="css/public.css" />
-  <link rel="stylesheet" href="css/local-media.css?v=20260731hoversound" />
+  <link rel="stylesheet" href="css/local-media.css?v=20260808mergeErr" />
   <script src="js/init.js"></script>
   <script src="lib/jquery.min.js"></script>
   <script src="lib/hls.min.js"></script>
   <script src="js/function.js"></script>
-  <script src="js/local-media-web.js"></script>
+  <script src="js/local-media-web.js?v=20260808ingestProgress"></script>
+  <script src="js/lmw-av-utils.js?v=20260812avPairMatch"></script>
 </head>
 <body>
   <header class="lm-header">
@@ -21,8 +22,14 @@
       <button type="button" id="btnSelectAll" class="button2">全选</button>
       <button type="button" id="btnInvert" class="button2">反选</button>
       <button type="button" id="btnDeleteSelected" class="button2" title="从当前列表移除选中的项（不删服务器库内文件）">删除选中项</button>
-      <button type="button" id="btnDetectAvMerge" class="button2" title="在已勾选的项中比对完整音/视频时长，标出高度匹配的可合并对">检测选中中的可合并项</button>
+      <button type="button" id="btnListDedupe" class="button2" title="先内容识别（区分视频/音频，后缀与时长可能相同），再在同类型内去掉重复项；不会把可合并的音+视当成重复">一键去重</button>
+      <button type="button" id="btnDetectAvMerge" class="button2" title="在已勾选项中比对时长 + URL/捕获顺序等信号；仅唯一高置信对自动成组，歧义时请手动勾 1 视频+1 音频">检测选中中的可合并项</button>
       <button type="button" id="btnMergeAvSelected" class="button2 primary" title="将匹配的音视频快速合并并写入媒体库；也可手动勾选 1 视频 + 1 音频后直接合并" disabled>合并选中音视频</button>
+      <button type="button" id="btnMultiMerge" class="button2 primary" title="按顺序多段合并：先检测可合并音视频，再由服务端 ffmpeg 按选择顺序拼接成一条后入库">多段合并</button>
+      <label class="lm-check" title="网格卡片边长约为现在的 2 倍，便于点选与预览">
+        <input type="checkbox" id="lmLargePreview" />
+        大预览
+      </label>
       <label class="lm-check" title="合并或入库成功后，自动从当前列表移除对应项">
         <input type="checkbox" id="lmAutoRemove" checked />
         处理完后自动移除
@@ -63,10 +70,11 @@
         <input type="checkbox" id="lmRestricted" />
         限制级
       </label>
-      <label class="lm-check" title="视频入库成功后由服务器调用 jasna 去马赛克（GPU 串行；成功后替换为 h264/mp4）">
+      <label class="lm-check" title="提交本机 JasnaBridge（默认 8791）去码后再入库；需先启动中间件">
         <input type="checkbox" id="lmUseJasna" />
         使用 jasna 去马赛克
       </label>
+      <button type="button" id="btnDownloadLocal" class="button2 primary" title="将选中的视频与音频下载到本机；下载前自动检测可合并项；同文件去重；音频按内容改扩展名。m3u8 走切片下载并可使用已设时间段">下载选中视频到本地</button>
       <button type="button" id="btnIngest" class="button2 primary">入库选中媒体</button>
     </div>
     <div id="status" class="lm-status"></div>
@@ -88,16 +96,17 @@
     <div class="lm-modal-card lm-range-card" role="dialog" aria-labelledby="lmRangeTitle">
       <div class="lm-modal-head" id="lmRangeTitle">m3u8 截取范围（可多段）</div>
       <div class="lm-modal-hint" id="lmRangeHint">
-        填写一组起止时间后点「添加」加入候选；可添加多组，每组入库为独立条目。完全相同的时间段会提示「重复」。候选为空时按「完整片」处理。
+        填写一组起止时间后点「添加」加入候选；可添加多组，每组入库为独立条目。结束 00:00:00 / 留空 = 本 m3u8 片尾（不是网页播放器总时长）。候选为空 = 完整片。
       </div>
-      <p class="lm-modal-desc">格式 <code>HH:MM:SS</code> / <code>MM:SS</code> / 秒数。结束时间留空 = 到末尾。</p>
+      <p class="lm-modal-desc">格式 <code>HH:MM:SS</code> / <code>MM:SS</code> / 秒数。注意：<code>00:50:00</code> 是 50 分钟，不是 50 秒。</p>
       <div class="lm-modal-url" id="lmRangeUrl"></div>
+      <p class="lm-modal-desc lm-range-status" id="lmRangeStatus" style="color:#c45c26;min-height:1.2em;margin:0.25em 0;"></p>
       <div class="lm-modal-fields lm-range-inputs">
         <label>开始时间
           <input type="text" id="lmRangeStart" spellcheck="false" placeholder="00:00:00" />
         </label>
         <label>结束时间
-          <input type="text" id="lmRangeEnd" spellcheck="false" placeholder="00:00:00（到末尾可填 00:00:00 或留空）" />
+          <input type="text" id="lmRangeEnd" spellcheck="false" placeholder="00:00:00 = 到本列表末尾" />
         </label>
         <button type="button" id="lmRangeAdd" class="button2 lm-range-add-btn">添加</button>
       </div>
@@ -113,7 +122,7 @@
     </div>
   </div>
 
-  <script src="js/local-media.js?v=20260801fastprobe"></script>
+  <script src="js/local-media.js?v=20260812avPairMatch"></script>
 </body>
 </html>
 
