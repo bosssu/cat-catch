@@ -3,13 +3,15 @@ from __future__ import annotations
 
 import json
 import logging
+import shutil
 import subprocess
 import tempfile
 from dataclasses import asdict, dataclass
+from functools import lru_cache
 from pathlib import Path
 from typing import Any
 
-from app.core.config import ffmpeg_available, ffprobe_available
+from app.core.config import ffmpeg_available, ffprobe_available, get_settings
 
 logger = logging.getLogger("lmw.media_process")
 
@@ -98,18 +100,74 @@ def _needs_mobile_transcode(src: Path, codec_blob: str) -> bool:
     return any(b in codec_blob for b in bad)
 
 
+@lru_cache(maxsize=1)
+def _qsv_h264_available() -> bool:
+    """True if this ffmpeg build exposes h264_qsv (Intel QSV / N5095 etc.)."""
+    if not ffmpeg_available():
+        return False
+    try:
+        proc = subprocess.run(
+            ["ffmpeg", "-hide_banner", "-encoders"],
+            capture_output=True,
+            text=True,
+            timeout=15,
+            check=False,
+        )
+        blob = (proc.stdout or "") + (proc.stderr or "")
+        return "h264_qsv" in blob
+    except Exception:
+        return False
+
+
+def _video_encode_args() -> list[str]:
+    """
+    Prefer hardware H.264 when configured and available; always fall back to libx264.
+    """
+    mode = (getattr(get_settings(), "ffmpeg_hw_encode", None) or "auto").strip().lower()
+    if mode in ("qsv", "auto") and (mode == "qsv" or _qsv_h264_available()):
+        # global_quality ~ CRF-like for QSV; ICQ mode is widely supported on recent ffmpeg
+        return [
+            "-c:v",
+            "h264_qsv",
+            "-global_quality",
+            "23",
+            "-look_ahead",
+            "1",
+            "-pix_fmt",
+            "nv12",
+        ]
+    return list(_MOBILE_MP4_V)
+
+
 def encode_mobile_mp4(src: Path, out: Path, *, extra_inputs: list[Path] | None = None) -> Path:
-    """Force H.264/AAC progressive MP4 for mobile Safari etc."""
+    """Force H.264/AAC progressive MP4 for mobile Safari etc. (HW encode when possible)."""
     out.parent.mkdir(parents=True, exist_ok=True)
     if out.exists():
         out.unlink()
-    cmd = ["ffmpeg", "-hide_banner", "-loglevel", "error", "-y", "-i", str(src)]
-    if extra_inputs:
-        for p in extra_inputs:
-            cmd += ["-i", str(p)]
-        cmd += ["-map", "0:v:0", "-map", "1:a:0?", "-shortest"]
-    cmd += _MOBILE_MP4_V + _MOBILE_MP4_A + _MOBILE_MP4_TAIL + [str(out)]
-    _run_ffmpeg(cmd, timeout=1800)
+
+    def _build(v_args: list[str]) -> list[str]:
+        cmd = ["ffmpeg", "-hide_banner", "-loglevel", "error", "-y", "-i", str(src)]
+        if extra_inputs:
+            for p in extra_inputs:
+                cmd += ["-i", str(p)]
+            cmd += ["-map", "0:v:0", "-map", "1:a:0?", "-shortest"]
+        cmd += v_args + _MOBILE_MP4_A + _MOBILE_MP4_TAIL + [str(out)]
+        return cmd
+
+    preferred = _video_encode_args()
+    try:
+        _run_ffmpeg(_build(preferred), timeout=1800)
+    except Exception as e:
+        if preferred != _MOBILE_MP4_V:
+            logger.warning("HW encode failed for %s (%s); fallback libx264", src.name, e)
+            if out.exists():
+                try:
+                    out.unlink()
+                except OSError:
+                    pass
+            _run_ffmpeg(_build(list(_MOBILE_MP4_V)), timeout=1800)
+        else:
+            raise
     if not out.is_file() or out.stat().st_size == 0:
         raise RuntimeError("mobile encode produced empty file")
     return out
@@ -268,6 +326,165 @@ def merge_av_to_mp4(video: Path, audio: Path | None, out: Path) -> Path:
 
     if not out.is_file() or out.stat().st_size == 0:
         raise RuntimeError("merge produced empty file")
+    return out
+
+
+def _ffmpeg_concat_list_line(path: Path) -> str:
+    """One line for ffmpeg concat demuxer (escape single quotes)."""
+    # Prefer absolute POSIX-ish path; Windows backslashes → forward for ffmpeg
+    p = str(path.resolve()).replace("\\", "/")
+    p = p.replace("'", r"'\''")
+    return f"file '{p}'"
+
+
+def concat_videos_to_mp4(paths: list[Path], out: Path) -> Path:
+    """
+    Concatenate progressive video files in order into one mp4 (ffmpeg).
+    Prefer stream copy; on failure re-encode with mobile-friendly H.264/AAC.
+    Single input: remux/copy into ``out`` (same pipeline as multi when possible).
+    """
+    if not ffmpeg_available():
+        raise RuntimeError("ffmpeg not found; cannot concat videos")
+    cleaned = [Path(p) for p in paths if p and Path(p).is_file() and Path(p).stat().st_size > 32]
+    if not cleaned:
+        raise RuntimeError("no valid input files for concat")
+    out = Path(out)
+    out.parent.mkdir(parents=True, exist_ok=True)
+    if out.exists():
+        out.unlink()
+
+    if len(cleaned) == 1:
+        # One segment: copy/remux into ``out`` without mutating the source
+        src = cleaned[0]
+        cmd = [
+            "ffmpeg",
+            "-hide_banner",
+            "-loglevel",
+            "error",
+            "-y",
+            "-i",
+            str(src),
+            "-c",
+            "copy",
+            "-movflags",
+            "+faststart",
+            str(out),
+        ]
+        try:
+            _run_ffmpeg(cmd)
+            codecs = _probe_codecs(out)
+            if _needs_mobile_transcode(out, codecs):
+                tmp = out.with_name(out.stem + "_m.mp4")
+                encode_mobile_mp4(out, tmp)
+                out.unlink(missing_ok=True)
+                tmp.replace(out)
+        except RuntimeError:
+            if out.exists():
+                try:
+                    out.unlink()
+                except OSError:
+                    pass
+            encode_mobile_mp4(src, out)
+        if not out.is_file() or out.stat().st_size == 0:
+            raise RuntimeError("single-file concat/remux produced empty file")
+        return out
+
+    fd_list, list_name = tempfile.mkstemp(suffix="_concat.txt", prefix="lmw_")
+    try:
+        import os as _os
+
+        _os.close(fd_list)
+    except OSError:
+        pass
+    list_path = Path(list_name)
+    try:
+        list_path.write_text(
+            "\n".join(_ffmpeg_concat_list_line(p) for p in cleaned) + "\n",
+            encoding="utf-8",
+        )
+        # 1) stream copy
+        cmd_copy = [
+            "ffmpeg",
+            "-hide_banner",
+            "-loglevel",
+            "error",
+            "-y",
+            "-f",
+            "concat",
+            "-safe",
+            "0",
+            "-i",
+            str(list_path),
+            "-c",
+            "copy",
+            "-movflags",
+            "+faststart",
+            str(out),
+        ]
+        try:
+            _run_ffmpeg(cmd_copy, timeout=max(600, 120 * len(cleaned)))
+            codecs = _probe_codecs(out)
+            if _needs_mobile_transcode(out, codecs):
+                tmp = out.with_name(out.stem + "_m.mp4")
+                encode_mobile_mp4(out, tmp)
+                out.unlink(missing_ok=True)
+                tmp.replace(out)
+        except RuntimeError as e1:
+            logger.info("concat copy failed, re-encoding: %s", e1)
+            if out.exists():
+                try:
+                    out.unlink()
+                except OSError:
+                    pass
+            # 2) re-encode whole concat (handles mixed codecs / missing indices)
+            cmd_enc = [
+                "ffmpeg",
+                "-hide_banner",
+                "-loglevel",
+                "error",
+                "-y",
+                "-f",
+                "concat",
+                "-safe",
+                "0",
+                "-i",
+                str(list_path),
+                *_video_encode_args(),
+                *_MOBILE_MP4_A,
+                *_MOBILE_MP4_TAIL,
+                str(out),
+            ]
+            try:
+                _run_ffmpeg(cmd_enc, timeout=max(900, 180 * len(cleaned)))
+            except RuntimeError:
+                # 3) normalize each segment then copy-concat
+                norm_dir = Path(tempfile.mkdtemp(prefix="lmw_concat_norm_"))
+                try:
+                    norms: list[Path] = []
+                    for i, p in enumerate(cleaned):
+                        n = norm_dir / f"part_{i:04d}.mp4"
+                        encode_mobile_mp4(p, n)
+                        norms.append(n)
+                    list_path.write_text(
+                        "\n".join(_ffmpeg_concat_list_line(p) for p in norms) + "\n",
+                        encoding="utf-8",
+                    )
+                    if out.exists():
+                        out.unlink()
+                    _run_ffmpeg(cmd_copy, timeout=max(600, 120 * len(norms)))
+                finally:
+                    try:
+                        shutil.rmtree(norm_dir, ignore_errors=True)
+                    except Exception:
+                        pass
+    finally:
+        try:
+            list_path.unlink(missing_ok=True)
+        except OSError:
+            pass
+
+    if not out.is_file() or out.stat().st_size == 0:
+        raise RuntimeError("concat produced empty file")
     return out
 
 
@@ -688,8 +905,27 @@ def probe_av_timeline(
     return info
 
 
-def _run_align_ffmpeg(src: Path, out: Path, *, reencode_video: bool) -> None:
-    """Write aligned mp4 to out. Video copy first; optional full re-encode."""
+# async=N: stretch/squeeze up to N samples per correction for mid-stream drift / gaps
+_AV_AFILTER_SOFT = "aresample=async=1000:first_pts=0"
+_AV_AFILTER_HARD = "aresample=async=1000:min_hard_comp=0.100:first_pts=0"
+
+
+def _run_align_ffmpeg(
+    src: Path,
+    out: Path,
+    *,
+    reencode_video: bool,
+    hard: bool = False,
+    has_audio: bool = True,
+    has_video: bool = True,
+) -> None:
+    """
+    Write aligned progressive mp4 to out.
+
+    - soft: video copy (or reencode if requested) + AAC with aresample async
+    - hard: discard corrupt, regenerate PTS, full H.264+AAC, CFR video clock
+      (best recovery after HLS DISCONTINUITY / missing mid segments)
+    """
     out.parent.mkdir(parents=True, exist_ok=True)
     if out.exists():
         out.unlink()
@@ -699,56 +935,82 @@ def _run_align_ffmpeg(src: Path, out: Path, *, reencode_video: bool) -> None:
         "-loglevel",
         "error",
         "-y",
-        "-fflags",
-        "+genpts",
-        "-i",
-        str(src),
-        "-map",
-        "0:v:0?",
-        "-map",
-        "0:a:0?",
     ]
-    if reencode_video:
+    if hard:
+        # Tolerate broken mid-stream timestamps from concat gaps / DISCONTINUITY
         cmd += [
-            "-c:v",
-            "libx264",
-            "-profile:v",
-            "main",
-            "-level",
-            "4.0",
-            "-pix_fmt",
-            "yuv420p",
-            "-preset",
-            "veryfast",
-            "-crf",
-            "20",
+            "-fflags",
+            "+genpts+igndts+discardcorrupt",
+            "-err_detect",
+            "ignore_err",
+            "-analyzeduration",
+            "100M",
+            "-probesize",
+            "100M",
         ]
     else:
-        cmd += ["-c:v", "copy"]
+        cmd += ["-fflags", "+genpts"]
+    cmd += ["-i", str(src)]
+    if has_video:
+        cmd += ["-map", "0:v:0?"]
+    if has_audio:
+        cmd += ["-map", "0:a:0?"]
+    if has_video:
+        if reencode_video or hard:
+            cmd += [
+                "-c:v",
+                "libx264",
+                "-profile:v",
+                "main",
+                "-level",
+                "4.0",
+                "-pix_fmt",
+                "yuv420p",
+                "-preset",
+                "veryfast",
+                "-crf",
+                "20",
+                # Rebuild continuous video clock (kills mid-file A/V drift after gaps)
+                # -vsync for older ffmpeg; -fps_mode on newer — use vsync for wider support
+                "-vsync",
+                "cfr",
+            ]
+        else:
+            cmd += ["-c:v", "copy"]
+    else:
+        cmd += ["-vn"]
+    if has_audio:
+        cmd += [
+            "-c:a",
+            "aac",
+            "-b:a",
+            "192k",
+            "-ac",
+            "2",
+            "-ar",
+            "48000",
+            "-af",
+            _AV_AFILTER_HARD if hard else _AV_AFILTER_SOFT,
+        ]
+    else:
+        cmd += ["-an"]
     cmd += [
-        "-c:a",
-        "aac",
-        "-b:a",
-        "192k",
-        "-ac",
-        "2",
-        "-ar",
-        "48000",
-        # Stretch/squeeze audio to video clock; reset audio PTS from 0
-        "-af",
-        "aresample=async=1:first_pts=0",
         "-movflags",
         "+faststart",
-        # Avoid leftover chapters / odd start from mid-HLS cut
         "-avoid_negative_ts",
         "make_zero",
+        # Drop non-media that confuses players after mid-HLS cut
+        "-map_metadata",
+        "-1",
+        "-map_chapters",
+        "-1",
         str(out),
     ]
     _run_ffmpeg(cmd, timeout=3600)
 
 
 def before_av_not_ok(report: dict[str, Any] | None) -> bool:
-    """True when pre-align probe shows skew or probe error (worth persisting JSON)."""
+    """True when pre-align probe shows skew, error, or uncertain timeline."""
     if not report:
         return False
     before = report.get("before") or {}
@@ -756,7 +1018,24 @@ def before_av_not_ok(report: dict[str, Any] | None) -> bool:
         return False
     if before.get("error"):
         return True
+    if before.get("uncertain"):
+        return True
     return bool(before.get("skew"))
+
+
+def _timeline_uncertain(info: AvTimelineInfo) -> bool:
+    """True when probe cannot confidently claim A/V are aligned."""
+    if info.error:
+        return True
+    if not (info.has_video and info.has_audio):
+        return False
+    # Both fell back to format duration → stream clocks unknown
+    if info.v_duration is None or info.a_duration is None:
+        return True
+    # start_time completely missing on either side after mux
+    if info.v_start is None or info.a_start is None:
+        return True
+    return False
 
 
 def align_av_timeline(
@@ -764,22 +1043,25 @@ def align_av_timeline(
     *,
     threshold: float = AV_SKEW_THRESHOLD_SEC,
     force: bool = False,
+    hard: bool = False,
 ) -> tuple[Path, dict[str, Any]]:
     """
-    Probe A/V timeline, optionally re-time so audio tracks the video clock.
+    Probe A/V timeline and re-time so audio tracks the video clock.
 
     Used after HLS segment concat / clip (before library ingest + jasna).
 
-    - force=False (default): only remux when probe reports skew / error.
-    - force=True: always run align remux (debug / hard recovery).
+    - force=False: remux only when probe reports skew / error / uncertain.
+    - force=True: always run align remux (HLS default — probe often false-clean).
+    - hard=True: skip soft copy path; full H.264+AAC re-encode with CFR
+      (partial download, DISCONTINUITY, mid-gap, or soft still skew).
 
-    Returns (final_path, debug_report) where report has before/after probe
-    summaries for logs and job.warning.
+    Returns (final_path, debug_report) with before/after probe for logs/UI.
     """
     report: dict[str, Any] = {
         "action": "none",
         "threshold": threshold,
         "force": force,
+        "hard": hard,
         "before": None,
         "after": None,
         "ok": False,
@@ -792,10 +1074,18 @@ def align_av_timeline(
         return src, report
 
     before = probe_av_timeline(src, threshold=threshold)
-    report["before"] = before.as_dict()
-    logger.info("av-timeline BEFORE %s | %s", src.name, before.summary())
+    bd = before.as_dict()
+    uncertain = _timeline_uncertain(before)
+    bd["uncertain"] = uncertain
+    report["before"] = bd
+    logger.info(
+        "av-timeline BEFORE %s | %s%s",
+        src.name,
+        before.summary(),
+        " UNCERTAIN" if uncertain else "",
+    )
 
-    need = force or before.skew or bool(before.error)
+    need = force or hard or before.skew or bool(before.error) or uncertain
     # Video-only: still remux to mp4+faststart if .ts
     if not before.has_audio and before.has_video and src.suffix.lower() in (".ts", ".m2ts"):
         need = True
@@ -803,7 +1093,7 @@ def align_av_timeline(
         report["action"] = "skip_clean"
         report["ok"] = True
         report["note"] = "already_aligned"
-        report["after"] = before.as_dict()
+        report["after"] = bd
         return src, report
 
     if not before.has_video and not before.has_audio:
@@ -813,32 +1103,86 @@ def align_av_timeline(
         return src, report
 
     work_out = src.with_name(src.stem + ".__avfix.mp4")
-    action = "copy_v_async_a"
+    has_a = bool(before.has_audio)
+    has_v = bool(before.has_video)
+    action = "hard_reencode_v_async_a" if hard else "copy_v_async_a"
     try:
-        _run_align_ffmpeg(src, work_out, reencode_video=False)
-    except Exception as e1:
-        logger.warning("av align (copy video) failed %s: %s — reencode", src.name, e1)
-        if work_out.exists():
+        if hard:
+            _run_align_ffmpeg(
+                src,
+                work_out,
+                reencode_video=True,
+                hard=True,
+                has_audio=has_a,
+                has_video=has_v,
+            )
+        else:
             try:
-                work_out.unlink()
-            except OSError:
-                pass
-        action = "reencode_v_async_a"
-        try:
-            _run_align_ffmpeg(src, work_out, reencode_video=True)
-        except Exception as e2:
-            logger.warning("av align reencode failed %s: %s", src.name, e2)
+                _run_align_ffmpeg(
+                    src,
+                    work_out,
+                    reencode_video=False,
+                    hard=False,
+                    has_audio=has_a,
+                    has_video=has_v,
+                )
+            except Exception as e1:
+                logger.warning(
+                    "av align (copy video) failed %s: %s — reencode", src.name, e1
+                )
+                if work_out.exists():
+                    try:
+                        work_out.unlink()
+                    except OSError:
+                        pass
+                action = "reencode_v_async_a"
+                _run_align_ffmpeg(
+                    src,
+                    work_out,
+                    reencode_video=True,
+                    hard=False,
+                    has_audio=has_a,
+                    has_video=has_v,
+                )
+    except Exception as e2:
+        # Last resort: hard path even if we already tried soft reencode
+        if not hard:
+            logger.warning("av align soft failed %s: %s — hard", src.name, e2)
+            if work_out.exists():
+                try:
+                    work_out.unlink()
+                except OSError:
+                    pass
+            action = "hard_reencode_v_async_a"
+            try:
+                _run_align_ffmpeg(
+                    src,
+                    work_out,
+                    reencode_video=True,
+                    hard=True,
+                    has_audio=has_a,
+                    has_video=has_v,
+                )
+            except Exception as e3:
+                logger.warning("av align hard failed %s: %s", src.name, e3)
+                report["action"] = "failed"
+                report["note"] = f"align_failed:{e3}"[:300]
+                report["ok"] = False
+                report["after"] = bd
+                return src, report
+        else:
+            logger.warning("av align hard failed %s: %s", src.name, e2)
             report["action"] = "failed"
             report["note"] = f"align_failed:{e2}"[:300]
             report["ok"] = False
-            report["after"] = before.as_dict()
+            report["after"] = bd
             return src, report
 
     if not work_out.is_file() or work_out.stat().st_size < 64:
         report["action"] = "failed"
         report["note"] = "align_empty_output"
         report["ok"] = False
-        report["after"] = before.as_dict()
+        report["after"] = bd
         try:
             work_out.unlink(missing_ok=True)
         except OSError:
@@ -846,9 +1190,11 @@ def align_av_timeline(
         return src, report
 
     after = probe_av_timeline(work_out, threshold=threshold)
-    report["after"] = after.as_dict()
+    after_d = after.as_dict()
+    after_d["uncertain"] = _timeline_uncertain(after)
+    report["after"] = after_d
     report["action"] = action
-    report["ok"] = (not after.skew) and after.has_video
+    report["ok"] = (not after.skew) and after.has_video and not after.error
     logger.info(
         "av-timeline AFTER  %s | %s | action=%s ok=%s",
         work_out.name,
@@ -857,12 +1203,59 @@ def align_av_timeline(
         report["ok"],
     )
 
+    # Soft path still skew → escalate to hard re-encode on the soft output
+    if (
+        not hard
+        and before.has_audio
+        and after.has_video
+        and (after.skew or after.error)
+    ):
+        hard_out = src.with_name(src.stem + ".__avhard.mp4")
+        try:
+            _run_align_ffmpeg(
+                work_out,
+                hard_out,
+                reencode_video=True,
+                hard=True,
+                has_audio=has_a,
+                has_video=has_v,
+            )
+            if hard_out.is_file() and hard_out.stat().st_size > 64:
+                after2 = probe_av_timeline(hard_out, threshold=threshold)
+                after2_d = after2.as_dict()
+                after2_d["uncertain"] = _timeline_uncertain(after2)
+                # Prefer hard result if better or equal ok
+                hard_ok = (not after2.skew) and after2.has_video and not after2.error
+                if hard_ok or not report["ok"]:
+                    try:
+                        work_out.unlink(missing_ok=True)
+                    except OSError:
+                        pass
+                    work_out = hard_out
+                    after = after2
+                    after_d = after2_d
+                    report["after"] = after_d
+                    report["action"] = "hard_after_soft_skew"
+                    report["ok"] = hard_ok
+                    logger.info(
+                        "av-timeline HARD   %s | %s | ok=%s",
+                        hard_out.name,
+                        after2.summary(),
+                        hard_ok,
+                    )
+                else:
+                    hard_out.unlink(missing_ok=True)
+        except Exception as e_hard:
+            logger.warning("av hard escalate failed %s: %s", src.name, e_hard)
+            try:
+                hard_out.unlink(missing_ok=True)
+            except OSError:
+                pass
+
     # Prefer progressive .mp4 next to src (replace in place when src already mp4)
     final = src if src.suffix.lower() == ".mp4" else src.with_suffix(".mp4")
     try:
-        if final.resolve() == work_out.resolve():
-            pass
-        else:
+        if final.resolve() != work_out.resolve():
             if final.exists():
                 final.unlink()
             work_out.replace(final)
@@ -875,14 +1268,14 @@ def align_av_timeline(
     except OSError as e:
         logger.warning("av align replace failed: %s — keep temp %s", e, work_out)
         report["note"] = f"replace_failed keep={work_out.name}"
-        report["after"] = after.as_dict()
+        report["after"] = after.as_dict() if hasattr(after, "as_dict") else after_d
         return work_out, report
 
     # Compact note for job.warning UI
     bsum = before.summary()
     asum = after.summary()
     flag = "ok" if report["ok"] else "still_skew"
-    report["note"] = f"avfix:{action} {flag} before[{bsum}] after[{asum}]"
+    report["note"] = f"avfix:{report['action']} {flag} before[{bsum}] after[{asum}]"
     return final, report
 
 

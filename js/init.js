@@ -164,17 +164,19 @@ G.OptionLists = {
     send2localType: 0,
     send2localHeaders: "",
 
-    // LocalMediaWeb 本地媒体库
+    // LocalMediaWeb 本地媒体库（局域网服务端）
     lmwEnable: true,
-    lmwURL: "http://127.0.0.1:8790",
+    lmwURL: "http://192.168.10.84:8790",
     lmwToken: "",
     lmwDefaultCategory: "default",
     lmwAutoFallback: true,
     // 页面媒体浮动「入库」按钮（资源嗅探）
     lmwFloatIngest: true,
     lmwFloatMinPx: 72,
-    // 入库后使用 jasna 去马赛克（视频；服务端串行 GPU 队列）
+    // 勾选后「加入本地媒体库」走本机 JasnaBridge 去码入队（非 LMW 服务端）
     lmwUseJasna: false,
+    /** 本机 JasnaBridge 地址 */
+    jasnaBridgeURL: "http://127.0.0.1:8791",
     /** 加入本地媒体库：合并/入库成功后自动从列表移除对应项（默认开） */
     lmwAutoRemoveAfterProcess: true,
     // 入库时默认打上「限制级」标签（各入库 UI 可单独勾选，会写回此偏好）
@@ -332,7 +334,19 @@ function InitOptions() {
             return { url: wildcardToRegex(item.url), state: item.state }
         });
 
-        // 兼容旧配置
+        // 兼容旧配置：本机 LMW 默认地址 → 局域网服务端
+        {
+            const prev = String(items.lmwURL || "").replace(/\/+$/, "").toLowerCase();
+            const legacyLocal = new Set([
+                "http://127.0.0.1:8790",
+                "http://localhost:8790",
+                "http://[::1]:8790",
+            ]);
+            if (!prev || legacyLocal.has(prev)) {
+                items.lmwURL = G.OptionLists.lmwURL;
+                chrome.storage.sync.set({ lmwURL: items.lmwURL });
+            }
+        }
         if (items.copyM3U8.includes('$url$')) {
             items.copyM3U8 = items.copyM3U8.replaceAll('$url$', '${url}').replaceAll('$referer$', '${referer}').replaceAll('$title$', '${title}');
             chrome.storage.sync.set({ copyM3U8: items.copyM3U8 });

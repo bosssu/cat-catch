@@ -39,6 +39,12 @@ class MediaItem(Base):
     skip_count: Mapped[int] = mapped_column(Integer, default=0)
     view_count: Mapped[int] = mapped_column(Integer, default=0)
     dwell_ms_total: Mapped[int] = mapped_column(Integer, default=0)
+    # Known length (sec) for duration-aware feed ranking; filled by probe / client progress
+    duration_sec: Mapped[float | None] = mapped_column(Float, nullable=True, default=None)
+    # Best playback progress ratio 0..1 (from client progress/ended events)
+    max_progress: Mapped[float] = mapped_column(Float, default=0.0)
+    # Last playback clock (sec) for resume; 0 = start / finished
+    last_position_sec: Mapped[float] = mapped_column(Float, default=0.0)
     last_viewed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow)
     updated_at: Mapped[datetime] = mapped_column(

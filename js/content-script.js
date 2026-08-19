@@ -233,7 +233,7 @@
     };
     /** LocalMediaWeb settings cache for blob upload from page scripts */
     const LMW_DEFAULTS = {
-        lmwURL: "http://127.0.0.1:8790",
+        lmwURL: "http://192.168.10.84:8790",
         lmwToken: "",
         lmwDefaultCategory: "default",
         lmwUseJasna: false,
@@ -291,12 +291,7 @@
         }
         if (restricted && !cleaned.includes("限制级")) cleaned = cleaned.concat(["限制级"]);
         if (cleaned.length) fd.append("tags", JSON.stringify(cleaned));
-        const useJasna =
-            payload.use_jasna === true ||
-            payload.use_jasna === 1 ||
-            payload.use_jasna === "1" ||
-            s.lmwUseJasna === true;
-        if (useJasna) fd.append("use_jasna", "1");
+        // use_jasna not sent — demosaic via JasnaBridge / FFmpegBridge
         if (restricted) fd.append("restricted", "1");
         const name = filename || `${(title || document.title || "capture").slice(0, 40)}.bin`;
         fd.append("file", blob, name);
@@ -336,12 +331,7 @@
         }
         if (restricted && !cleaned.includes("限制级")) cleaned = cleaned.concat(["限制级"]);
         if (cleaned.length) fd.append("tags", JSON.stringify(cleaned));
-        const useJasna =
-            payload.use_jasna === true ||
-            payload.use_jasna === 1 ||
-            payload.use_jasna === "1" ||
-            s.lmwUseJasna === true;
-        if (useJasna) fd.append("use_jasna", "1");
+        // use_jasna not sent — demosaic via JasnaBridge / FFmpegBridge
         if (restricted) fd.append("restricted", "1");
         const baseName = (filename || title || document.title || "capture").replace(/\.[^.]+$/, "");
         fd.append("video", vBlob, `${baseName}_video.mp4`);

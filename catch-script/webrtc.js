@@ -32,7 +32,6 @@
         <label><input type="checkbox" id="autoSave1"} ${checkboxStyle} data-i18n="save1hour">1小时保存一次</label>
         <label><input type="checkbox" id="ingestLmw" checked ${checkboxStyle}><span>停止后入库到媒体库</span></label>
         <label><input type="checkbox" id="useRestricted" ${localStorage.getItem("CatCatchWebRTC_useRestricted") || ""} ${checkboxStyle}><span>限制级</span></label>
-        <label><input type="checkbox" id="useJasna" ${localStorage.getItem("CatCatchWebRTC_useJasna") || ""} ${checkboxStyle}><span>使用 jasna 去马赛克</span></label>
         <label><input type="checkbox" id="alsoDownload" ${checkboxStyle}><span>同时下载到浏览器</span></label>
         <label>
             <select id="videoBits">
@@ -356,7 +355,6 @@
                 else finish(() => reject(new Error(event.data.error || "ingest failed")));
             };
             window.addEventListener("message", onMsg);
-            const useJasna = !!CatCatch?.querySelector?.("#useJasna")?.checked || !!meta.use_jasna;
             const restricted = !!CatCatch?.querySelector?.("#useRestricted")?.checked || !!meta.restricted;
             window.postMessage({
                 action: "catCatchIngestBlob",
@@ -367,7 +365,7 @@
                 media_type: meta.media_type || "video",
                 source_url: location.href,
                 tags: meta.tags || [],
-                use_jasna: useJasna,
+                use_jasna: false,
                 restricted,
             }, location.origin);
             const timer = setTimeout(() => {

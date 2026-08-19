@@ -1,13 +1,19 @@
 from __future__ import annotations
 
+import logging
+import math
 import mimetypes
 import random
 import shutil
+import tempfile
+import time
 from pathlib import Path
 
-from fastapi import APIRouter, Depends, File, Form, HTTPException, Query, UploadFile
+from fastapi import APIRouter, Depends, File, Form, HTTPException, Query, Request, UploadFile
 from fastapi.responses import FileResponse
-from sqlalchemy import desc, func, select
+from sqlalchemy import asc, desc, func, select
+
+logger = logging.getLogger("lmw.api")
 
 from app.api.deps import require_token
 from datetime import datetime, timezone
@@ -16,10 +22,14 @@ from app.api.schemas import (
     AvMatchRequest,
     AvMergeRequest,
     CategoryCreate,
+    DlnaControlRequest,
+    DlnaPlayRequest,
+    DlnaSeekRequest,
     IngestRequest,
     InteractEvent,
     JasnaJobOut,
     JobOut,
+    MediaConcatRequest,
     MediaDeleteBatch,
     MediaDedupeRequest,
     MediaJasnaBatch,
@@ -51,12 +61,14 @@ from app.services.feed_rank import (
 )
 from app.services.media_process import (
     classify_media_file,
+    concat_videos_to_mp4,
     match_av_by_duration,
     merge_av_to_mp4,
     probe_single_file_role,
     remux_to_playable,
     write_temp_bytes,
 )
+from app.services.reencode import ReencodeError, reencode_replace_h264
 from app.services.scan import ensure_category, list_categories, purge_missing_media, rescan_medias
 from app.services.tags import (
     RESTRICTED_TAG,
@@ -72,7 +84,7 @@ from app.services.tags import (
     tags_to_json,
 )
 from app.services.thumb import generate_thumb, thumb_path_for
-from app.services.util import detect_media_type, safe_filename
+from app.services.util import detect_media_type, ensure_unique_path, safe_filename
 
 router = APIRouter(prefix="/api")
 public_router = APIRouter(prefix="/api")
@@ -105,6 +117,13 @@ def _media_out(m: MediaItem) -> MediaOut:
         like_count=int(getattr(m, "like_count", 0) or 0),
         skip_count=int(getattr(m, "skip_count", 0) or 0),
         view_count=int(getattr(m, "view_count", 0) or 0),
+        duration_sec=(
+            float(m.duration_sec)
+            if getattr(m, "duration_sec", None) is not None
+            else None
+        ),
+        max_progress=float(getattr(m, "max_progress", 0) or 0),
+        last_position_sec=float(getattr(m, "last_position_sec", 0) or 0),
         tags=tags_from_json(getattr(m, "tags_json", None)),
         review=getattr(m, "review", None) or "",
         created_at=m.created_at,
@@ -305,6 +324,36 @@ def _exclude_restricted_sql():
     return ~MediaItem.tags_json.like(needle)
 
 
+def _exclude_static_images_sql():
+    """SQL filter: hide static images (media_type=image). GIFs stay."""
+    return MediaItem.media_type != "image"
+
+
+def _media_list_order(sort: str, order: str):
+    """sort: name | created | new | old. order: asc | desc (new/old keep legacy if order omitted)."""
+    key = (sort or "new").strip().lower()
+    if key in ("imported", "import", "time"):
+        key = "created"
+    dir_raw = (order or "").strip().lower()
+    if dir_raw in ("asc", "desc"):
+        descending = dir_raw == "desc"
+    else:
+        descending = key != "old"
+
+    if key == "name":
+        title_col = func.lower(func.coalesce(MediaItem.title, ""))
+        if descending:
+            return title_col.desc(), MediaItem.id.desc()
+        return title_col.asc(), MediaItem.id.asc()
+    if key == "created":
+        if descending:
+            return desc(MediaItem.created_at), desc(MediaItem.id)
+        return asc(MediaItem.created_at), asc(MediaItem.id)
+    if key == "old" or (key == "new" and not descending):
+        return (asc(MediaItem.id),)
+    return (desc(MediaItem.id),)
+
+
 @router.get("/media", dependencies=[Depends(require_token)])
 def list_media(
     type: str | None = None,
@@ -312,8 +361,11 @@ def list_media(
     tag: str | None = None,
     liked: bool | None = None,
     sort: str = "new",
+    order: str = "",
     # True: include 限制级; False: hide them. Default True for manage UIs.
     include_restricted: bool = True,
+    # True: include static images; False: hide media_type=image. Default True for manage UIs.
+    include_images: bool = True,
     offset: int = Query(default=0, ge=0),
     limit: int = Query(default=48, ge=1, le=100),
     db=Depends(get_db),
@@ -322,6 +374,7 @@ def list_media(
     Paginated media list with server-side filters (no full-table materialization).
     tag: matches tags_json containing the canonical tag string (JSON array storage).
     include_restricted: when False, hide items tagged 限制级.
+    include_images: when False, hide static images (media_type=image).
     """
     filters = []
     if type:
@@ -352,6 +405,8 @@ def list_media(
             filters.append(MediaItem.tags_json.like(f'%"{t}"%'))
     if not include_restricted:
         filters.append(_exclude_restricted_sql())
+    if not include_images:
+        filters.append(_exclude_static_images_sql())
 
     count_stmt = select(func.count()).select_from(MediaItem)
     list_stmt = select(MediaItem)
@@ -359,10 +414,7 @@ def list_media(
         count_stmt = count_stmt.where(f)
         list_stmt = list_stmt.where(f)
 
-    if sort == "old":
-        list_stmt = list_stmt.order_by(MediaItem.id.asc())
-    else:
-        list_stmt = list_stmt.order_by(MediaItem.id.desc())
+    list_stmt = list_stmt.order_by(*_media_list_order(sort, order))
 
     total = int(db.scalar(count_stmt) or 0)
     page = list(db.scalars(list_stmt.offset(offset).limit(limit)).all())
@@ -394,12 +446,14 @@ def feed(
     include_seed: bool = True,
     # Default False: do not push 限制级 content unless client opts in
     include_restricted: bool = False,
+    # Default False: do not push static images unless client opts in
+    include_images: bool = False,
     db=Depends(get_db),
 ):
     """
     mode:
       - recommend: multi-channel (interest/fresh/explore/revisit) + fatigue + diversity
-      - similar: similar_to media_id (tag overlap), or tag= focus tag
+      - similar: same recommend ranking, constrained to focus tag= or seed-related items
       - recent: created_at then id desc (true ingest order)
       - random: full-library SQL RANDOM sample + light anti-clump
       - liked
@@ -407,8 +461,9 @@ def feed(
     exclude_ids: comma-separated media ids already in the client playlist
     (for on-demand next batches without repeating).
     include_seed: when similar by media, put seed first (false for tail prefetch).
-    tag: when mode=similar (or alone with similar), rank by that tag.
+    tag: when mode=similar, only items carrying this tag (recommend-ranked within).
     include_restricted: when False (default), hide items tagged 限制级.
+    include_images: when False (default), hide static images (media_type=image).
     """
     exclude = _parse_id_set(exclude_ids)
     # over-fetch then filter so exclude does not shrink the page too much
@@ -419,6 +474,8 @@ def feed(
     stmt = select(MediaItem)
     if not include_restricted:
         stmt = stmt.where(_exclude_restricted_sql())
+    if not include_images:
+        stmt = stmt.where(_exclude_static_images_sql())
     if mode == "liked":
         stmt = stmt.where(MediaItem.liked.is_(True))
         rows = list(
@@ -457,31 +514,8 @@ def feed(
             "items": [_media_out(m) for m in rows[:limit]],
         }
     elif mode == "similar" or similar_to:
-        pool = list(
-            db.scalars(stmt.order_by(desc(MediaItem.id)).limit(800)).all()
-        )
-        if focus_tag:
-            # Tag-focused similar: must carry this tag
-            ranked = rank_by_tag(
-                pool,
-                focus_tag,
-                limit=min(200, fetch_n),
-            )
-            rows = ranked
-        else:
-            seed = db.get(MediaItem, similar_to) if similar_to else None
-            if seed is None and pool:
-                seed = pool[0]
-            if seed is None:
-                rows = []
-            else:
-                ranked = rank_similar(pool, seed, limit=min(200, fetch_n))
-                if not include_seed:
-                    ranked = [m for m in ranked if m.id != seed.id]
-                rows = ranked
-        mode = "similar"
-    else:
-        # Mixed candidate pool: recent + random long-tail (mainstream multi-channel input)
+        # Same mixed pool as recommend (recent + random), not "latest N only"
+        # — old path ordered by id and felt like sequential playback.
         n_recent = max(
             50,
             int(getattr(settings, "feed_recommend_candidate_recent", 250) or 250),
@@ -490,14 +524,92 @@ def feed(
             50,
             int(getattr(settings, "feed_recommend_candidate_random", 250) or 250),
         )
+        params = FeedRankParams.from_settings(settings)
+
+        def _mixed_pool(base_stmt, *, recent_n: int, rand_n: int) -> list:
+            recent_rows = list(
+                db.scalars(
+                    base_stmt.order_by(desc(MediaItem.id)).limit(recent_n)
+                ).all()
+            )
+            rand_rows = list(
+                db.scalars(base_stmt.order_by(func.random()).limit(rand_n)).all()
+            )
+            by_id: dict[int, MediaItem] = {}
+            for m in recent_rows + rand_rows:
+                by_id[int(m.id)] = m
+            return list(by_id.values())
+
+        if focus_tag:
+            # Prefer SQL prefilter so random sample is within the tag, not
+            # diluted by unrelated latest items.
+            tag_token = focus_tag.replace('"', "").replace("\\", "")
+            tag_stmt = stmt
+            if tag_token:
+                # tags_json is a JSON string array, e.g. ["foo","bar"]
+                tag_stmt = stmt.where(MediaItem.tags_json.contains(f'"{tag_token}"'))
+            pool = _mixed_pool(
+                tag_stmt,
+                recent_n=min(400, n_recent + 80),
+                rand_n=min(400, n_rand + 80),
+            )
+            if len(pool) < max(12, limit):
+                # Fallback: broader mixed pool then filter in rank_by_tag
+                pool = _mixed_pool(stmt, recent_n=n_recent + 100, rand_n=n_rand + 100)
+            rows = rank_by_tag(
+                pool,
+                focus_tag,
+                limit=min(200, fetch_n),
+                params=params,
+            )
+        else:
+            pool = _mixed_pool(stmt, recent_n=n_recent + 50, rand_n=n_rand + 50)
+            seed = db.get(MediaItem, similar_to) if similar_to else None
+            if seed is None and pool:
+                seed = pool[0]
+            if seed is None:
+                rows = []
+            else:
+                ranked = rank_similar(
+                    pool, seed, limit=min(200, fetch_n), params=params
+                )
+                if not include_seed:
+                    ranked = [m for m in ranked if m.id != seed.id]
+                rows = ranked
+        mode = "similar"
+    else:
+        # Mixed candidate pool: recent + random long-tail + never-played slice
+        # so newly ingested unplayed items are not missing from the rank set.
+        n_recent = max(
+            50,
+            int(getattr(settings, "feed_recommend_candidate_recent", 250) or 250),
+        )
+        n_rand = max(
+            50,
+            int(getattr(settings, "feed_recommend_candidate_random", 250) or 250),
+        )
+        n_unplayed = max(
+            0,
+            int(getattr(settings, "feed_recommend_candidate_unplayed", 80) or 0),
+        )
         recent_rows = list(
             db.scalars(stmt.order_by(desc(MediaItem.id)).limit(n_recent)).all()
         )
         rand_rows = list(
             db.scalars(stmt.order_by(func.random()).limit(n_rand)).all()
         )
+        unplayed_rows: list = []
+        if n_unplayed > 0:
+            unplayed_stmt = stmt.where(MediaItem.view_count == 0).where(
+                MediaItem.last_viewed_at.is_(None)
+            )
+            unplayed_rows = list(
+                db.scalars(
+                    unplayed_stmt.order_by(desc(MediaItem.id)).limit(n_unplayed)
+                ).all()
+            )
         by_id: dict[int, MediaItem] = {}
-        for m in recent_rows + rand_rows:
+        for m in recent_rows + rand_rows + unplayed_rows:
             by_id[int(m.id)] = m
         pool = list(by_id.values())
         params = FeedRankParams.from_settings(settings)
@@ -523,20 +635,33 @@ def get_media(media_id: int, db=Depends(get_db)):
 
 
 @router.get("/media/{media_id}/file", dependencies=[Depends(require_token)])
-def media_file(media_id: int, db=Depends(get_db)):
+def media_file(media_id: int):
     """
     Stream media with Range support (native <video> on mobile).
     Auth: header or ?token= (see require_token).
+
+    DB session is closed before FileResponse so concurrent video streams do not
+    pin SQLite connections for the entire transfer (was exhausting QueuePool).
     """
-    m = db.get(MediaItem, media_id)
-    if not m:
-        raise HTTPException(404, "Not found")
-    path = get_settings().medias_path() / m.rel_path
+    from app.core.db import SessionLocal, init_db
+
+    if SessionLocal is None:
+        init_db()
+    assert SessionLocal is not None
+    with SessionLocal() as db:
+        m = db.get(MediaItem, media_id)
+        if not m:
+            raise HTTPException(404, "Not found")
+        rel_path = m.rel_path
+        mime = m.mime
+        mtype = (m.media_type or "").lower()
+        mid = m.id
+        file_size = m.file_size or 0
+    path = get_settings().medias_path() / rel_path
     if not path.is_file():
         raise HTTPException(404, "File missing on disk")
-    media = m.mime or mimetypes.guess_type(path.name)[0] or "application/octet-stream"
+    media = mime or mimetypes.guess_type(path.name)[0] or "application/octet-stream"
     # webm leftovers: still serve, but prefer correct type for mp4 after remux
-    mtype = (m.media_type or "").lower()
     suf = path.suffix.lower()
     if mtype == "audio":
         if not media or media == "application/octet-stream":
@@ -551,7 +676,7 @@ def media_file(media_id: int, db=Depends(get_db)):
         st = path.stat()
         etag = f'"{st.st_mtime_ns}-{st.st_size}"'
     except OSError:
-        etag = f'"{m.id}-{m.file_size or 0}"'
+        etag = f'"{mid}-{file_size}"'
     return FileResponse(
         path,
         media_type=media,
@@ -565,18 +690,25 @@ def media_file(media_id: int, db=Depends(get_db)):
 
 
 @router.get("/media/{media_id}/thumb", dependencies=[Depends(require_token)])
-def media_thumb(media_id: int, db=Depends(get_db)):
-    m = db.get(MediaItem, media_id)
-    if not m:
-        raise HTTPException(404, "Not found")
+def media_thumb(media_id: int):
+    """Serve thumb; close DB before FileResponse (same pool reason as /file)."""
+    from app.core.db import SessionLocal, init_db
+
+    if SessionLocal is None:
+        init_db()
+    assert SessionLocal is not None
     tpath = thumb_path_for(media_id)
-    if not tpath.is_file():
-        src = get_settings().medias_path() / m.rel_path
-        if src.is_file():
-            rel = generate_thumb(src, media_id, m.media_type)
-            if rel:
-                m.thumb_rel = rel
-                db.commit()
+    with SessionLocal() as db:
+        m = db.get(MediaItem, media_id)
+        if not m:
+            raise HTTPException(404, "Not found")
+        if not tpath.is_file():
+            src = get_settings().medias_path() / m.rel_path
+            if src.is_file():
+                rel = generate_thumb(src, media_id, m.media_type)
+                if rel:
+                    m.thumb_rel = rel
+                    db.commit()
     if tpath.is_file():
         try:
             st = tpath.stat()
@@ -682,6 +814,51 @@ def toggle_like(media_id: int, db=Depends(get_db)):
     return _media_out(m)
 
 
+def _apply_duration_sec(m: MediaItem, duration_sec: float | None) -> None:
+    """Store duration when missing or when a clearly better value arrives."""
+    if duration_sec is None:
+        return
+    try:
+        d = float(duration_sec)
+    except (TypeError, ValueError):
+        return
+    if not math.isfinite(d) or d <= 0 or d > 86400 * 12:
+        return
+    prev = getattr(m, "duration_sec", None)
+    if prev is None or float(prev or 0) <= 0:
+        m.duration_sec = d
+    elif abs(float(prev) - d) / max(float(prev), 1.0) > 0.15 and d > float(prev):
+        # Prefer longer credible duration (e.g. full file vs partial probe)
+        m.duration_sec = d
+
+
+def _apply_progress(m: MediaItem, progress: float | None) -> None:
+    if progress is None:
+        return
+    try:
+        p = float(progress)
+    except (TypeError, ValueError):
+        return
+    if not math.isfinite(p):
+        return
+    p = max(0.0, min(1.0, p))
+    cur = float(getattr(m, "max_progress", 0) or 0)
+    if p > cur:
+        m.max_progress = p
+
+
+def _apply_last_position(m: MediaItem, position_sec: float | None) -> None:
+    if position_sec is None:
+        return
+    try:
+        t = float(position_sec)
+    except (TypeError, ValueError):
+        return
+    if not math.isfinite(t):
+        return
+    m.last_position_sec = max(0.0, min(t, 86400 * 12))
+
+
 @router.post("/media/{media_id}/interact", dependencies=[Depends(require_token)])
 def interact(media_id: int, body: InteractEvent, db=Depends(get_db)):
     m = db.get(MediaItem, media_id)
@@ -689,6 +866,8 @@ def interact(media_id: int, body: InteractEvent, db=Depends(get_db)):
         raise HTTPException(404, "Not found")
     ev = (body.event or "view").lower()
     now = datetime.now(timezone.utc)
+    _apply_duration_sec(m, body.duration_sec)
+    _apply_last_position(m, body.position_sec)
     if ev == "view":
         m.view_count = int(m.view_count or 0) + 1
         m.last_viewed_at = now
@@ -701,11 +880,28 @@ def interact(media_id: int, body: InteractEvent, db=Depends(get_db)):
     elif ev == "skip":
         m.skip_count = int(m.skip_count or 0) + 1
         m.last_viewed_at = now
+    elif ev == "progress":
+        _apply_progress(m, body.progress)
+        m.last_viewed_at = now
+        if int(m.view_count or 0) == 0:
+            m.view_count = 1
+    elif ev == "ended":
+        _apply_progress(m, body.progress if body.progress is not None else 1.0)
+        m.last_viewed_at = now
+        if int(m.view_count or 0) == 0:
+            m.view_count = 1
+        if body.position_sec is None:
+            m.last_position_sec = 0.0
     else:
-        raise HTTPException(400, "event must be view|dwell|skip")
+        raise HTTPException(400, "event must be view|dwell|skip|progress|ended")
     db.commit()
     db.refresh(m)
     return _media_out(m)
+
+
+def _short(s: str | None, n: int = 120) -> str:
+    t = (s or "").replace("\n", " ").strip()
+    return t if len(t) <= n else t[: n - 1] + "…"
 
 
 @router.post("/ingest", dependencies=[Depends(require_token)])
@@ -720,11 +916,30 @@ async def ingest(body: IngestRequest):
         raw = d.get("tags") or body.tags or []
         d["tags"] = apply_restricted_flag(raw, item_restricted)
         items.append(d)
+    t0 = time.perf_counter()
+    logger.info(
+        "ingest start items=%s tags=%s jasna=%s",
+        len(items),
+        len(default_tags or []),
+        bool(body.use_jasna),
+    )
     result = await enqueue_jobs(
         "default",
         items,
         default_tags=default_tags,
     )
+    ms = (time.perf_counter() - t0) * 1000
+    logger.info(
+        "ingest done accepted=%s dup=%s rejected_live=%s jobs=%s %.0fms",
+        result.get("accepted"),
+        result.get("duplicates"),
+        result.get("rejected_live"),
+        result.get("job_ids"),
+        ms,
+    )
+    if result.get("rejected_live_samples"):
+        for sample in result.get("rejected_live_samples") or []:
+            logger.info("ingest rejected_live sample: %s", sample)
     return result
 
 
@@ -758,8 +973,26 @@ async def upload(
     if mtype_hint not in ("image", "gif", "video", "audio"):
         ct0 = (file.content_type or "").lower()
         mtype_hint = "audio" if ct0.startswith("audio/") else "video"
-    fname = safe_filename(title or Path(raw_name).stem, source_url or raw_name, ext)
+    # Disambiguate dest name: same display title + same client filename (e.g. two
+    # JasnaBridge jobs both sending "out.mp4") must not share one rel_path, or
+    # the second upload overwrites the first and both report the same media_id.
+    t0 = time.perf_counter()
+    logger.info(
+        "upload start name=%s title=%s hint=%s src=%s",
+        _short(raw_name, 80),
+        _short(title, 80),
+        mtype_hint,
+        _short(source_url, 140),
+    )
+
+    fname = safe_filename(
+        title or Path(raw_name).stem,
+        source_url or raw_name,
+        ext,
+        disambiguator=f"up|{raw_name}|{time.time_ns()}",
+    )
     dest = settings.medias_path() / fname
+    dest = ensure_unique_path(dest)
     dest.parent.mkdir(parents=True, exist_ok=True)
     max_bytes = int(settings.max_file_bytes or 0)
     written = 0
@@ -774,14 +1007,24 @@ async def upload(
                 if max_bytes and written > max_bytes:
                     raise HTTPException(400, "File too large")
                 out.write(chunk)
-    except HTTPException:
+    except HTTPException as e:
         dest.unlink(missing_ok=True)
+        logger.warning(
+            "upload reject name=%s bytes=%s detail=%s",
+            _short(raw_name, 80),
+            written,
+            getattr(e, "detail", e),
+        )
         raise
     except Exception:
         dest.unlink(missing_ok=True)
+        logger.exception(
+            "upload write failed name=%s bytes=%s", _short(raw_name, 80), written
+        )
         raise
     if written < 1:
         dest.unlink(missing_ok=True)
+        logger.warning("upload empty name=%s", _short(raw_name, 80))
         raise HTTPException(400, "Empty file")
     mime = file.content_type or ""
     note = ""
@@ -826,8 +1069,30 @@ async def upload(
     if reg.duplicate:
         note = (note + ";content_duplicate") if note else "content_duplicate"
     jasna_job_id = None
+    jasna_skipped = False
+    jasna_skip_reason = ""
     if not reg.duplicate and _flag_true(use_jasna) and mtype == "video":
-        jasna_job_id = enqueue_jasna_for_media(item.id)
+        if not bool(getattr(settings, "jasna_enabled", False)):
+            jasna_skipped = True
+            jasna_skip_reason = (
+                "server jasna disabled; demosaic via local JasnaBridge then re-upload"
+            )
+        else:
+            jasna_job_id = enqueue_jasna_for_media(item.id)
+            if jasna_job_id is None:
+                jasna_skipped = True
+                jasna_skip_reason = "jasna unavailable or enqueue skipped"
+    ms = (time.perf_counter() - t0) * 1000
+    logger.info(
+        "upload ok media_id=%s type=%s role=%s bytes=%s dup=%s note=%s %.0fms",
+        item.id,
+        mtype,
+        cls.get("role"),
+        written,
+        bool(reg.duplicate),
+        _short(note, 160),
+        ms,
+    )
     return {
         "media_id": item.id,
         "item": _media_out(item),
@@ -840,6 +1105,8 @@ async def upload(
             "duration_sec": cls.get("duration_sec"),
         },
         "jasna_job_id": jasna_job_id,
+        "jasna_skipped": jasna_skipped,
+        "jasna_skip_reason": jasna_skip_reason,
     }
 
 
@@ -1188,21 +1455,30 @@ def media_merge_av_library(body: AvMergeRequest, db=Depends(get_db)):
     tag_list = normalize_tags(body.tags or [])
     results: list[dict] = []
     errors: list[dict] = []
+    t0 = time.perf_counter()
+    logger.info(
+        "merge-av library start pairs=%s delete_sources=%s",
+        len(body.pairs),
+        bool(body.delete_sources),
+    )
     for pair in body.pairs:
         vid = int(pair.video_id)
         aid = int(pair.audio_id)
         if vid <= 0 or aid <= 0 or vid == aid:
             errors.append({"video_id": vid, "audio_id": aid, "error": "invalid ids"})
+            logger.warning("merge-av skip invalid ids v=%s a=%s", vid, aid)
             continue
         mv = db.get(MediaItem, vid)
         ma = db.get(MediaItem, aid)
         if not mv or not ma:
             errors.append({"video_id": vid, "audio_id": aid, "error": "not found"})
+            logger.warning("merge-av not found v=%s a=%s", vid, aid)
             continue
         vpath = medias / mv.rel_path
         apath = medias / ma.rel_path
         if not vpath.is_file() or not apath.is_file():
             errors.append({"video_id": vid, "audio_id": aid, "error": "file missing"})
+            logger.warning("merge-av file missing v=%s a=%s", vid, aid)
             continue
         title_tpl = (body.title or "").strip()
         if title_tpl:
@@ -1257,6 +1533,14 @@ def media_merge_av_library(body: AvMergeRequest, db=Depends(get_db)):
                     "duplicate": bool(reg.duplicate),
                 }
             )
+            logger.info(
+                "merge-av ok media_id=%s v=%s a=%s dup=%s size=%s",
+                item.id,
+                vid,
+                aid,
+                bool(reg.duplicate),
+                getattr(item, "file_size", None),
+            )
         except Exception as e:
             if dest.exists():
                 try:
@@ -1270,12 +1554,266 @@ def media_merge_av_library(body: AvMergeRequest, db=Depends(get_db)):
                     "error": str(e)[:400],
                 }
             )
+            logger.exception("merge-av failed v=%s a=%s: %s", vid, aid, e)
+    ms = (time.perf_counter() - t0) * 1000
+    logger.info(
+        "merge-av library done merged=%s failed=%s %.0fms",
+        len(results),
+        len(errors),
+        ms,
+    )
     return {
         "merged": len(results),
         "failed": len(errors),
         "items": results,
         "errors": errors,
     }
+
+
+@router.post("/media/concat", dependencies=[Depends(require_token)])
+def media_concat_library(body: MediaConcatRequest, db=Depends(get_db)):
+    """
+    Concatenate complete library video files in the given id order (ffmpeg).
+    Produces one new media item. Optionally delete source rows.
+    """
+    ids = [int(x) for x in (body.ids or []) if int(x) > 0]
+    # preserve order, drop dup ids
+    seen: set[int] = set()
+    ordered: list[int] = []
+    for i in ids:
+        if i in seen:
+            continue
+        seen.add(i)
+        ordered.append(i)
+    if len(ordered) < 1:
+        raise HTTPException(400, "ids required")
+    if not ffmpeg_available():
+        raise HTTPException(400, "ffmpeg 不可用，无法拼接")
+    settings = get_settings()
+    medias = settings.medias_path()
+    paths: list[Path] = []
+    sources: list[MediaItem] = []
+    for mid in ordered:
+        m = db.get(MediaItem, mid)
+        if not m:
+            raise HTTPException(404, f"media {mid} not found")
+        if getattr(m, "partial", False):
+            raise HTTPException(400, f"media {mid} is partial, cannot concat")
+        p = medias / m.rel_path
+        if not p.is_file() or p.stat().st_size < 32:
+            raise HTTPException(400, f"media {mid} file missing")
+        paths.append(p)
+        sources.append(m)
+    titles = [((m.title or "").strip() or f"id{m.id}") for m in sources]
+    title = (body.title or "").strip()
+    if not title:
+        title = titles[0] + (f"+{len(titles) - 1}段" if len(titles) > 1 else "")
+    title = title[:512]
+    tag_list = apply_restricted_flag(
+        normalize_tags(body.tags or []),
+        bool(body.restricted),
+    )
+    if not tag_list:
+        # merge tags from sources
+        acc: list[str] = []
+        for m in sources:
+            acc.extend(tags_from_json(getattr(m, "tags_json", None)))
+        tag_list = apply_restricted_flag(normalize_tags(acc), bool(body.restricted))
+    import time as _time
+
+    fname = safe_filename(
+        title,
+        "concat|" + "+".join(str(i) for i in ordered),
+        "mp4",
+        disambiguator=f"concat|{_time.time_ns()}",
+    )
+    dest = ensure_unique_path(medias / fname)
+    try:
+        concat_videos_to_mp4(paths, dest)
+        reg = register_uploaded_file(
+            category="default",
+            dest=dest,
+            title=title,
+            source_url="concat://" + "+".join(str(i) for i in ordered),
+            media_type="video",
+            mime="video/mp4",
+            dedupe=False,
+            tags=tag_list,
+        )
+        item = reg.item
+        if body.delete_sources:
+            for m in sources:
+                if reg.duplicate and int(m.id) == int(item.id):
+                    continue
+                try:
+                    _delete_media_row(db, m)
+                except Exception:
+                    pass
+            try:
+                db.commit()
+            except Exception:
+                db.rollback()
+        jasna_job_id = None
+        jasna_skipped = False
+        jasna_skip_reason = ""
+        if not reg.duplicate and body.use_jasna:
+            if not bool(getattr(settings, "jasna_enabled", False)):
+                jasna_skipped = True
+                jasna_skip_reason = (
+                    "server jasna disabled; demosaic via local JasnaBridge then re-upload"
+                )
+            else:
+                jasna_job_id = enqueue_jasna_for_media(item.id)
+                if jasna_job_id is None:
+                    jasna_skipped = True
+                    jasna_skip_reason = "jasna unavailable or enqueue skipped"
+        return {
+            "media_id": item.id,
+            "item": _media_out(item),
+            "duplicate": bool(reg.duplicate),
+            "segments": ordered,
+            "note": "content_duplicate" if reg.duplicate else f"concat:{len(ordered)}",
+            "jasna_job_id": jasna_job_id,
+            "jasna_skipped": jasna_skipped,
+            "jasna_skip_reason": jasna_skip_reason,
+        }
+    except HTTPException:
+        if dest.exists():
+            try:
+                dest.unlink()
+            except OSError:
+                pass
+        raise
+    except Exception as e:
+        if dest.exists():
+            try:
+                dest.unlink()
+            except OSError:
+                pass
+        raise HTTPException(400, f"concat failed: {e}") from e
+
+
+@router.post("/upload-concat", dependencies=[Depends(require_token)])
+async def upload_concat(
+    category: str = Form("default"),
+    title: str = Form(""),
+    source_url: str = Form(""),
+    tags: str = Form(""),
+    use_jasna: str = Form("0"),
+    restricted: str = Form("0"),
+    files: list[UploadFile] = File(...),
+):
+    """
+    Upload multiple progressive video parts in order; ffmpeg-concat into one library video.
+    Field name: ``files`` (repeat) — order of parts is request order.
+    """
+    ensure_category(category)
+    if not ffmpeg_available():
+        raise HTTPException(400, "ffmpeg 不可用，无法拼接")
+    parts = [f for f in (files or []) if f is not None]
+    if len(parts) < 1:
+        raise HTTPException(400, "files required")
+    settings = get_settings()
+    max_bytes = int(settings.max_file_bytes or 0)
+    tmp_paths: list[Path] = []
+    total = 0
+    chunk_size = 1024 * 1024
+    try:
+        for idx, f in enumerate(parts):
+            raw_name = f.filename or f"part{idx}.mp4"
+            ext = Path(raw_name).suffix or ".mp4"
+            if not ext.startswith("."):
+                ext = "." + ext
+            fd, tmp_name = tempfile.mkstemp(suffix=ext, prefix=f"lmw_c{idx}_")
+            try:
+                import os as _os
+
+                _os.close(fd)
+            except OSError:
+                pass
+            fd_path = Path(tmp_name)
+            written = 0
+            try:
+                with fd_path.open("wb") as out:
+                    while True:
+                        chunk = await f.read(chunk_size)
+                        if not chunk:
+                            break
+                        written += len(chunk)
+                        total += len(chunk)
+                        if max_bytes and total > max_bytes:
+                            raise HTTPException(400, "File too large")
+                        out.write(chunk)
+            except HTTPException:
+                fd_path.unlink(missing_ok=True)
+                raise
+            if written < 32:
+                fd_path.unlink(missing_ok=True)
+                raise HTTPException(400, f"Empty part #{idx + 1}")
+            tmp_paths.append(fd_path)
+
+        title_s = (title or "").strip() or "concat"
+        import time as _time
+
+        fname = safe_filename(
+            title_s,
+            source_url or "upload-concat",
+            "mp4",
+            disambiguator=f"upcat|{_time.time_ns()}",
+        )
+        dest = ensure_unique_path(settings.medias_path() / fname)
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        try:
+            concat_videos_to_mp4(tmp_paths, dest)
+        except Exception as e:
+            if dest.exists():
+                try:
+                    dest.unlink()
+                except OSError:
+                    pass
+            raise HTTPException(400, f"concat failed: {e}") from e
+
+        reg = register_uploaded_file(
+            category="default",
+            dest=dest,
+            title=title_s[:512],
+            source_url=source_url or "upload-concat://",
+            media_type="video",
+            mime="video/mp4",
+            dedupe=False,
+            tags=apply_restricted_flag(tags, _flag_true(restricted)),
+        )
+        item = reg.item
+        jasna_job_id = None
+        jasna_skipped = False
+        jasna_skip_reason = ""
+        if not reg.duplicate and _flag_true(use_jasna):
+            if not bool(getattr(settings, "jasna_enabled", False)):
+                jasna_skipped = True
+                jasna_skip_reason = (
+                    "server jasna disabled; demosaic via local JasnaBridge then re-upload"
+                )
+            else:
+                jasna_job_id = enqueue_jasna_for_media(item.id)
+                if jasna_job_id is None:
+                    jasna_skipped = True
+                    jasna_skip_reason = "jasna unavailable or enqueue skipped"
+        return {
+            "media_id": item.id,
+            "item": _media_out(item),
+            "duplicate": bool(reg.duplicate),
+            "segments": len(tmp_paths),
+            "note": "content_duplicate" if reg.duplicate else f"concat:{len(tmp_paths)}",
+            "jasna_job_id": jasna_job_id,
+            "jasna_skipped": jasna_skipped,
+            "jasna_skip_reason": jasna_skip_reason,
+        }
+    finally:
+        for p in tmp_paths:
+            try:
+                p.unlink(missing_ok=True)
+            except OSError:
+                pass
 
 
 @router.post("/upload-av", dependencies=[Depends(require_token)])
@@ -1294,23 +1832,63 @@ async def upload_av(
     """
     ensure_category(category)
     settings = get_settings()
-    vdata = await video.read()
-    adata = await audio.read() if audio is not None else b""
-    if settings.max_file_bytes and (len(vdata) + len(adata)) > settings.max_file_bytes:
+    t0 = time.perf_counter()
+    vname = getattr(video, "filename", None) or "video"
+    aname = getattr(audio, "filename", None) if audio is not None else None
+    logger.info(
+        "upload-av start title=%s src=%s v_name=%s has_audio=%s",
+        _short(title, 80),
+        _short(source_url, 140),
+        _short(str(vname), 60),
+        audio is not None,
+    )
+    try:
+        vdata = await video.read()
+        adata = await audio.read() if audio is not None else b""
+    except Exception:
+        logger.exception("upload-av read body failed title=%s", _short(title, 80))
+        raise
+    v_bytes, a_bytes = len(vdata), len(adata)
+    logger.info(
+        "upload-av received v_bytes=%s a_bytes=%s total=%s",
+        v_bytes,
+        a_bytes,
+        v_bytes + a_bytes,
+    )
+    if settings.max_file_bytes and (v_bytes + a_bytes) > settings.max_file_bytes:
+        logger.warning(
+            "upload-av too large total=%s max=%s",
+            v_bytes + a_bytes,
+            settings.max_file_bytes,
+        )
         raise HTTPException(400, "File too large")
-    if len(vdata) < 32:
+    if v_bytes < 32:
+        logger.warning("upload-av empty video title=%s", _short(title, 80))
         raise HTTPException(400, "Empty video track")
 
-    v_tmp = write_temp_bytes(vdata, ".mp4")
-    a_tmp = write_temp_bytes(adata, ".mp4") if adata and len(adata) > 32 else None
+    v_tmp = None
+    a_tmp = None
     try:
+        v_tmp = write_temp_bytes(vdata, ".mp4")
+        a_tmp = write_temp_bytes(adata, ".mp4") if adata and a_bytes > 32 else None
         fname = safe_filename(title or "capture", source_url or "capture", "mp4")
         dest = settings.medias_path() / fname
         dest.parent.mkdir(parents=True, exist_ok=True)
+        t_merge = time.perf_counter()
         try:
             merge_av_to_mp4(v_tmp, a_tmp, dest)
             note = "merged"
+            logger.info(
+                "upload-av ffmpeg merge ok out_bytes=%s %.0fms",
+                dest.stat().st_size if dest.is_file() else 0,
+                (time.perf_counter() - t_merge) * 1000,
+            )
         except Exception as e:
+            logger.warning(
+                "upload-av merge failed, fallback video_only: %s",
+                e,
+                exc_info=True,
+            )
             dest.write_bytes(vdata)
             dest = remux_to_playable(dest, prefer_ext="mp4")
             note = f"video_only:{e}"
@@ -1328,15 +1906,49 @@ async def upload_av(
         if reg.duplicate:
             note = (note + ";content_duplicate") if note else "content_duplicate"
         jasna_job_id = None
+        jasna_skipped = False
+        jasna_skip_reason = ""
         if not reg.duplicate and _flag_true(use_jasna):
-            jasna_job_id = enqueue_jasna_for_media(item.id)
+            if not bool(getattr(settings, "jasna_enabled", False)):
+                jasna_skipped = True
+                jasna_skip_reason = (
+                    "server jasna disabled; demosaic via local JasnaBridge then re-upload"
+                )
+            else:
+                jasna_job_id = enqueue_jasna_for_media(item.id)
+                if jasna_job_id is None:
+                    jasna_skipped = True
+                    jasna_skip_reason = "jasna unavailable or enqueue skipped"
+        ms = (time.perf_counter() - t0) * 1000
+        logger.info(
+            "upload-av ok media_id=%s note=%s dup=%s v=%s a=%s out=%s %.0fms",
+            item.id,
+            _short(note, 120),
+            bool(reg.duplicate),
+            v_bytes,
+            a_bytes,
+            getattr(item, "file_size", None),
+            ms,
+        )
         return {
             "media_id": item.id,
             "item": _media_out(item),
             "duplicate": bool(reg.duplicate),
             "note": note,
             "jasna_job_id": jasna_job_id,
+            "jasna_skipped": jasna_skipped,
+            "jasna_skip_reason": jasna_skip_reason,
         }
+    except HTTPException:
+        raise
+    except Exception:
+        logger.exception(
+            "upload-av failed title=%s v_bytes=%s a_bytes=%s",
+            _short(title, 80),
+            v_bytes,
+            a_bytes,
+        )
+        raise
     finally:
         for p in (v_tmp, a_tmp):
             if p and p.exists():
@@ -1403,11 +2015,29 @@ def cancel_jasna_job(job_id: int, db=Depends(get_db)):
     return _jasna_job_out(j)
 
 
+@router.post("/media/{media_id}/reencode", dependencies=[Depends(require_token)])
+def media_reencode_h264(media_id: int):
+    """
+    Force H.264/AAC progressive MP4 re-encode for one library video, then replace
+    the on-disk file (same media id). Used by manage-page「修复」button.
+    """
+    try:
+        item = reencode_replace_h264(int(media_id))
+    except ReencodeError as e:
+        raise HTTPException(e.status_code, str(e)) from e
+    return {"ok": True, "item": _media_out(item)}
+
+
 @router.post("/media/{media_id}/jasna", dependencies=[Depends(require_token)])
 def media_enqueue_jasna(media_id: int, db=Depends(get_db)):
     m = db.get(MediaItem, media_id)
     if not m:
         raise HTTPException(404, "Not found")
+    if not bool(getattr(get_settings(), "jasna_enabled", False)):
+        raise HTTPException(
+            400,
+            "Server jasna disabled. Use local JasnaBridge middleware for demosaic.",
+        )
     jid = enqueue_jasna_for_media(media_id, force=False)
     if jid is None:
         raise HTTPException(400, "Cannot enqueue jasna (not video, missing file, or jasna unavailable)")
@@ -1513,3 +2143,175 @@ def refresh_library():
 @router.post("/purge-missing", dependencies=[Depends(require_token)])
 def purge_missing():
     return purge_missing_media()
+
+
+# —— DLNA cast (discover + push file URL to MediaRenderer) ——
+
+
+@router.get("/dlna/devices", dependencies=[Depends(require_token)])
+def dlna_devices(
+    refresh: bool = Query(
+        default=False,
+        description="Force SSDP rescan; default uses last scan (instant after first)",
+    ),
+    timeout: float = Query(default=2.5, ge=1.0, le=8.0),
+):
+    """List LAN DLNA / UPnP MediaRenderer devices (AVTransport)."""
+    from app.services import dlna as dlna_svc
+
+    try:
+        return dlna_svc.list_devices(timeout_sec=float(timeout), force=bool(refresh))
+    except Exception as e:
+        logger.exception("dlna discover failed")
+        raise HTTPException(500, f"DLNA discover failed: {e}") from e
+
+
+@router.post("/dlna/play", dependencies=[Depends(require_token)])
+def dlna_play(body: DlnaPlayRequest, request: Request, db=Depends(get_db)):
+    """
+    Push library media file URL to a DLNA renderer (SetAVTransportURI + Play).
+    Box fetches /api/media/{id}/file?token=… over LAN — no webpage on the TV.
+    """
+    from app.services import dlna as dlna_svc
+    from urllib.parse import quote
+
+    m = db.get(MediaItem, int(body.media_id))
+    if not m:
+        raise HTTPException(404, "Media not found")
+    path = get_settings().medias_path() / m.rel_path
+    if not path.is_file():
+        raise HTTPException(404, "File missing on disk")
+
+    device = dlna_svc.find_device(body.device_id, rescan=True)
+    if not device:
+        raise HTTPException(404, "DLNA device not found; refresh the list")
+
+    s = get_settings()
+    base = dlna_svc.public_base_url_from_request(
+        host_header=request.headers.get("host"),
+        scheme=request.url.scheme or "http",
+        server_port=int(s.port),
+    )
+    ver = _media_cache_ver(m)
+    file_path = f"/api/media/{m.id}/file?v={ver}"
+    token = (s.access_token or "").strip()
+    if token:
+        file_path += f"&token={quote(token, safe='')}"
+    uri = f"{base}{file_path}"
+
+    mime = m.mime or ""
+    if not mime:
+        import mimetypes as _mt
+
+        mime = _mt.guess_type(path.name)[0] or "video/mp4"
+    mtype = (m.media_type or "video").lower()
+    title = (m.title or path.name or f"media-{m.id}").strip()
+
+    mode = dlna_svc.normalize_play_mode(getattr(body, "mode", None))
+
+    try:
+        dlna_svc.cast_uri(
+            device,
+            uri=uri,
+            title=title,
+            mime=mime,
+            media_type=mtype,
+        )
+    except Exception as e:
+        logger.exception("dlna play failed device=%s media=%s", body.device_id, body.media_id)
+        raise HTTPException(502, f"Cast failed: {e}") from e
+
+    sess = dlna_svc.start_cast_session(
+        device,
+        media_id=int(m.id),
+        mode=mode,
+        uri=uri,
+        title=title,
+        mime=mime,
+        media_type=mtype,
+    )
+
+    return {
+        "ok": True,
+        "device": device.to_dict(),
+        "media_id": m.id,
+        "uri": uri,
+        "title": title,
+        "mode": sess.mode,
+    }
+
+
+@router.post("/dlna/seek", dependencies=[Depends(require_token)])
+def dlna_seek(body: DlnaSeekRequest):
+    """
+    Seek the active AVTransport on a DLNA renderer (phone scrub → TV sync).
+    Requires the box to still be playing the cast URI from /dlna/play.
+    """
+    from app.services import dlna as dlna_svc
+
+    pos = float(body.position_sec)
+    if pos < 0:
+        pos = 0.0
+    if pos > 3600 * 99:
+        raise HTTPException(400, "position_sec out of range")
+
+    device = dlna_svc.resolve_device(body.device_id)
+    if not device:
+        raise HTTPException(404, "DLNA device not found; open cast list and refresh")
+
+    try:
+        target = dlna_svc.seek_position(device, pos)
+    except Exception as e:
+        logger.exception("dlna seek failed device=%s pos=%s", body.device_id, pos)
+        raise HTTPException(502, f"Seek failed: {e}") from e
+
+    dlna_svc.touch_cast_session_grace(device.id)
+
+    return {
+        "ok": True,
+        "device_id": device.id,
+        "position_sec": pos,
+        "target": target,
+    }
+
+
+@router.post("/dlna/control", dependencies=[Depends(require_token)])
+def dlna_control(body: DlnaControlRequest):
+    """
+    Pause / resume / stop the active cast on a DLNA renderer.
+    Stop ends the session on most boxes (back to idle / home).
+    """
+    from app.services import dlna as dlna_svc
+
+    action = (body.action or "").strip().lower()
+    if action not in ("pause", "play", "stop"):
+        raise HTTPException(400, "action must be pause, play, or stop")
+
+    device = dlna_svc.resolve_device(body.device_id)
+    if not device:
+        raise HTTPException(404, "DLNA device not found; open cast list and refresh")
+
+    try:
+        if action == "pause":
+            dlna_svc.pause_device(device)
+            dlna_svc.set_cast_session_paused(device.id, True)
+        elif action == "play":
+            dlna_svc.play_device(device)
+            dlna_svc.set_cast_session_paused(device.id, False)
+        else:
+            # Clear loop session before Stop so watcher does not re-cast
+            dlna_svc.clear_cast_session(device.id)
+            dlna_svc.stop_device(device)
+    except Exception as e:
+        logger.exception("dlna control failed device=%s action=%s", body.device_id, action)
+        if action == "stop":
+            # Still drop session if Stop SOAP failed after clear, or clear if before
+            dlna_svc.clear_cast_session(device.id)
+        raise HTTPException(502, f"Control {action} failed: {e}") from e
+
+    return {
+        "ok": True,
+        "device_id": device.id,
+        "action": action,
+        "device": device.to_dict(),
+    }

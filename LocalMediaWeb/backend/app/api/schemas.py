@@ -55,6 +55,9 @@ class MediaOut(BaseModel):
     like_count: int = 0
     skip_count: int = 0
     view_count: int = 0
+    duration_sec: float | None = None
+    max_progress: float = 0.0
+    last_position_sec: float = 0.0
     tags: list[str] = Field(default_factory=list)
     review: str = ""
     created_at: datetime | None = None
@@ -65,9 +68,15 @@ class MediaOut(BaseModel):
 
 
 class InteractEvent(BaseModel):
-    """view | dwell | skip — lightweight signals for recommend mode."""
-    event: str = "view"  # view | dwell | skip
+    """view | dwell | skip | progress | ended — lightweight signals for recommend mode."""
+    event: str = "view"  # view | dwell | skip | progress | ended
     dwell_ms: int = 0
+    # Playback progress ratio 0..1 (progress/ended)
+    progress: float | None = None
+    # Media duration in seconds (client or probe); stored when missing/better
+    duration_sec: float | None = None
+    # Absolute playback clock (sec) for resume; independent of max_progress
+    position_sec: float | None = None
 
 
 class JobOut(BaseModel):
@@ -165,6 +174,17 @@ class AvMergeRequest(BaseModel):
     delete_sources: bool = False
 
 
+class MediaConcatRequest(BaseModel):
+    """Concatenate library video items in order into one new video (ffmpeg)."""
+    ids: list[int] = Field(default_factory=list)
+    title: str = ""
+    tags: list[str] = Field(default_factory=list)
+    # Delete source media rows after successful concat
+    delete_sources: bool = False
+    use_jasna: bool = False
+    restricted: bool = False
+
+
 class MediaReclassifyRequest(BaseModel):
     """Re-probe on-disk files and fix media_type (ignore extension). Empty ids = all video/audio."""
     ids: list[int] = Field(default_factory=list)
@@ -192,3 +212,23 @@ class TagSuggestRequest(BaseModel):
     # optional autocomplete query (when set, also returns `matches`)
     query: str = ""
     limit: int = 12
+
+
+class DlnaPlayRequest(BaseModel):
+    """Cast current library item to a discovered DLNA renderer."""
+    device_id: str
+    media_id: int
+    # Server-side playback after end: once (default) | loop. No auto-next / no TV playlist.
+    mode: str = "once"
+
+
+class DlnaSeekRequest(BaseModel):
+    """Seek currently playing media on a DLNA renderer (scrub sync from phone)."""
+    device_id: str
+    position_sec: float
+
+
+class DlnaControlRequest(BaseModel):
+    """Transport control on an active cast: pause / play / stop."""
+    device_id: str
+    action: str  # pause | play | stop

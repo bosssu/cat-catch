@@ -1,0 +1,54 @@
+lmw:
+  base_url: "http://127.0.0.1:8790"
+  token: ""
+
+ui:
+  show_hover_button: true
+  allow_screenshot_fallback: true
+  one_click_when_single: false
+  multi_open_grid: always_when_ge_2
+  hover_dwell_ms: 350
+  start_with_windows: false
+  grid_remember_geometry: true
+
+capture:
+  network_enabled: true
+  cache_enabled: true
+  min_edge_px: 200
+  min_bytes: 10240
+  skip_avatar_like: true
+  # Discord Cache_Data 等浏览器缓存常是截断 MP4（只能播约 1 秒），默认丢弃
+  skip_incomplete_video: true
+  types:
+    - image
+    - gif
+    - video
+  ignore_processes:
+    - AppCatch
+    - explorer
+    - SearchHost
+    - ShellExperienceHost
+    - ApplicationFrameHost
+    - SystemSettings
+    - TextInputHost
+
+ingest:
+  default_tags:
+    - 桌面抓取
+  auto_tag_app: true
+  restricted: false
+  # use_jasna removed: demosaic via JasnaBridge / FFmpegBridge, not LMW server
+  use_jasna: false
+
+extensions:
+  directory: "extensions"
+  disabled_ids: []
+  auto_reload_on_focus: false
+
+download:
+  enabled: true
+  prefer_ytdlp: true
+  timeout_sec: 180
+  max_bytes: 524288000
+
+watch_dirs: []

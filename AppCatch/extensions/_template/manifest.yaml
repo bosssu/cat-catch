@@ -1,0 +1,26 @@
+id: myapp.cdn
+name: MyApp CDN（模板）
+version: "1.0.0"
+author: local
+# Template only — never active while living under extensions/_template
+is_template: true
+enabled: false
+
+match:
+  process_names:
+    - MyApp.exe
+
+provides:
+  - candidates_from_network
+
+network:
+  url_include_regex:
+    - "cdn\\.example\\.com/"
+  url_exclude_regex:
+    - "/avatar"
+    - "/emoji"
+
+watch_paths: []
+
+suggested_tags:
+  - myapp

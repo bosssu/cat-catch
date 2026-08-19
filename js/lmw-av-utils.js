@@ -42,12 +42,281 @@
         done && done();
     }
 
-    function durationMatchScore(d1, d2, absTol = 0.45, relTol = 0.02) {
+    /**
+     * Layered duration match (short clips: tight abs; long: tight rel + abs cap).
+     * Optional absTol/relTol override the layered defaults (for callers/tests).
+     * @returns {number|null} score in (0,1], higher = closer; null = no match
+     */
+    function durationMatchScore(d1, d2, absTol, relTol) {
         if (!(d1 > 0.05) || !(d2 > 0.05)) return null;
         const delta = Math.abs(d1 - d2);
         const base = Math.max(d1, d2);
-        if (delta > absTol && delta / base > relTol) return null;
+        let aTol = absTol;
+        let rTol = relTol;
+        if (aTol == null || rTol == null) {
+            if (base < 60) {
+                aTol = aTol != null ? aTol : 0.3;
+                rTol = rTol != null ? rTol : 0.008;
+            } else if (base < 300) {
+                aTol = aTol != null ? aTol : 0.4;
+                rTol = rTol != null ? rTol : 0.01;
+            } else {
+                aTol = aTol != null ? aTol : 0.75;
+                rTol = rTol != null ? rTol : 0.008;
+            }
+        }
+        if (delta > aTol && delta / base > rTol) return null;
         return 1 - Math.min(1, delta / base);
+    }
+
+    function itemByteSizeHint(it) {
+        if (!it) return 0;
+        const n = Number(it._size != null ? it._size : typeof it.size === "number" ? it.size : 0);
+        return Number.isFinite(n) && n > 0 ? n : 0;
+    }
+
+    /**
+     * Soft URL relatedness for same-CDN split A/V (0..1).
+     */
+    function urlAffinityScore(urlA, urlB) {
+        if (!urlA || !urlB) return 0;
+        try {
+            const a = new URL(urlA);
+            const b = new URL(urlB);
+            let s = 0;
+            if (a.hostname === b.hostname) s += 0.35;
+            else if (
+                a.hostname.replace(/^www\./, "") === b.hostname.replace(/^www\./, "")
+            ) {
+                s += 0.25;
+            } else {
+                // Different hosts: only weak path-token overlap counts later
+                s += 0;
+            }
+
+            const pa = a.pathname.split("/").filter(Boolean);
+            const pb = b.pathname.split("/").filter(Boolean);
+            let prefix = 0;
+            const n = Math.min(pa.length, pb.length);
+            for (let i = 0; i < n; i++) {
+                if (pa[i] === pb[i]) prefix++;
+                else break;
+            }
+            if (prefix > 0) s += Math.min(0.3, prefix * 0.08);
+
+            const stripExt = (seg) => String(seg || "").replace(/\.[a-z0-9]{1,5}$/i, "");
+            const ta = new Set(pa.map(stripExt).filter((x) => x.length >= 4));
+            const tb = new Set(pb.map(stripExt).filter((x) => x.length >= 4));
+            let sharedTok = 0;
+            for (const t of ta) {
+                if (tb.has(t)) sharedTok++;
+            }
+            if (sharedTok > 0) s += Math.min(0.25, sharedTok * 0.12);
+
+            const interesting = /^(id|vid|aid|mid|media|period|group|cid|fid|file|item|content|asset|track|stream)$/i;
+            const qa = [...a.searchParams.entries()];
+            const qb = [...b.searchParams.entries()];
+            let sharedQ = 0;
+            for (const [k, va] of qa) {
+                if (!interesting.test(k) || !va) continue;
+                for (const [k2, vb] of qb) {
+                    if (k2.toLowerCase() === k.toLowerCase() && vb === va) {
+                        sharedQ++;
+                        break;
+                    }
+                }
+            }
+            if (sharedQ > 0) s += Math.min(0.35, sharedQ * 0.15);
+
+            return Math.max(0, Math.min(1, s));
+        } catch (_) {
+            return 0;
+        }
+    }
+
+    /** Capture order / requestId proximity (0..1). */
+    function requestAffinityScore(v, a) {
+        const rv = v && v.requestId != null ? parseInt(v.requestId, 10) : NaN;
+        const ra = a && a.requestId != null ? parseInt(a.requestId, 10) : NaN;
+        if (Number.isFinite(rv) && Number.isFinite(ra)) {
+            const d = Math.abs(rv - ra);
+            if (d === 0) return 0.5;
+            if (d <= 3) return 0.4;
+            if (d <= 10) return 0.28;
+            if (d <= 30) return 0.15;
+            if (d <= 80) return 0.06;
+        }
+        // _key often ends with "#index"
+        const idxOf = (it) => {
+            const k = String((it && it._key) || "");
+            const m = k.match(/#(\d+)$/);
+            return m ? parseInt(m[1], 10) : NaN;
+        };
+        const iv = idxOf(v);
+        const ia = idxOf(a);
+        if (Number.isFinite(iv) && Number.isFinite(ia)) {
+            const d = Math.abs(iv - ia);
+            if (d <= 1) return 0.2;
+            if (d <= 3) return 0.1;
+        }
+        return 0;
+    }
+
+    function sizeAffinityScore(v, a) {
+        const sv = itemByteSizeHint(v);
+        const sa = itemByteSizeHint(a);
+        if (!(sv > 0 && sa > 0)) return 0;
+        // Same-duration split: video track usually larger
+        if (sv >= sa * 1.15) return 0.2;
+        if (sa > sv * 2.5) return -0.25;
+        if (sa > sv * 1.5) return -0.1;
+        return 0.05;
+    }
+
+    /**
+     * Composite edge score for one video+audio pair.
+     * @returns {{ score: number, durationScore: number, soft: number, delta: number }|null}
+     */
+    function scoreAvEdge(v, a) {
+        const d1 = Number(v && v._durationSec);
+        const d2 = Number(a && a._durationSec);
+        const durationScore = durationMatchScore(d1, d2);
+        if (durationScore == null) return null;
+
+        const urlA = urlAffinityScore(v.url, a.url);
+        const reqA = requestAffinityScore(v, a);
+        const szA = sizeAffinityScore(v, a);
+        const soft = Math.max(0, Math.min(1, urlA * 0.55 + reqA * 0.3 + Math.max(0, szA) * 0.15 + Math.min(0, szA)));
+
+        // Auto gate: strict duration alone, or slightly looser duration + relatedness
+        const AUTO_STRICT = 0.99;
+        const AUTO_SOFT = 0.975;
+        if (durationScore < AUTO_STRICT && !(durationScore >= AUTO_SOFT && soft >= 0.22)) {
+            return null;
+        }
+
+        const score = durationScore * 0.82 + soft * 0.18;
+        return {
+            score,
+            durationScore,
+            soft,
+            delta: d1 - d2,
+        };
+    }
+
+    /**
+     * Match videos/audios with duration+soft signals; skip ambiguous near-ties.
+     * @param {object[]} videos items with _durationSec and _key
+     * @param {object[]} audios
+     * @returns {{ pairs: object[], ambiguous: number, candidateCount: number, blockedVideos: number, blockedAudios: number }}
+     */
+    function matchVideoAudioPairs(videos, audios) {
+        const vOk = (videos || []).filter((v) => v && v._key && Number(v._durationSec) > 0.05);
+        const aOk = (audios || []).filter((a) => a && a._key && Number(a._durationSec) > 0.05);
+        const AMBIG_MARGIN = 0.0045;
+
+        /** @type {{ v: object, a: object, score: number, durationScore: number, soft: number, delta: number }[]} */
+        const candidates = [];
+        for (const v of vOk) {
+            for (const a of aOk) {
+                const sc = scoreAvEdge(v, a);
+                if (!sc) continue;
+                candidates.push({
+                    v,
+                    a,
+                    score: sc.score,
+                    durationScore: sc.durationScore,
+                    soft: sc.soft,
+                    delta: sc.delta,
+                });
+            }
+        }
+        candidates.sort(
+            (x, y) =>
+                y.score - x.score ||
+                y.durationScore - x.durationScore ||
+                Math.abs(x.delta) - Math.abs(y.delta)
+        );
+
+        /** @type {Map<string, typeof candidates>} */
+        const byV = new Map();
+        /** @type {Map<string, typeof candidates>} */
+        const byA = new Map();
+        for (const c of candidates) {
+            if (!byV.has(c.v._key)) byV.set(c.v._key, []);
+            if (!byA.has(c.a._key)) byA.set(c.a._key, []);
+            byV.get(c.v._key).push(c);
+            byA.get(c.a._key).push(c);
+        }
+
+        const blockedV = new Set();
+        const blockedA = new Set();
+        for (const [vk, list] of byV) {
+            if (list.length >= 2 && list[0].score - list[1].score < AMBIG_MARGIN) {
+                blockedV.add(vk);
+            }
+        }
+        for (const [ak, list] of byA) {
+            if (list.length >= 2 && list[0].score - list[1].score < AMBIG_MARGIN) {
+                blockedA.add(ak);
+            }
+        }
+
+        const usedV = new Set();
+        const usedA = new Set();
+        const pairs = [];
+        let ambiguous = blockedV.size + blockedA.size;
+
+        for (const c of candidates) {
+            const vk = c.v._key;
+            const ak = c.a._key;
+            if (usedV.has(vk) || usedA.has(ak)) continue;
+            if (blockedV.has(vk) || blockedA.has(ak)) continue;
+
+            // Mutual near-best: reject if the other side clearly prefers someone else free
+            const aList = (byA.get(ak) || []).filter((x) => !usedV.has(x.v._key) && !blockedV.has(x.v._key));
+            if (aList.length && aList[0].v._key !== vk) {
+                if (aList[0].score - c.score >= AMBIG_MARGIN) continue;
+            }
+            const vList = (byV.get(vk) || []).filter((x) => !usedA.has(x.a._key) && !blockedA.has(x.a._key));
+            if (vList.length && vList[0].a._key !== ak) {
+                if (vList[0].score - c.score >= AMBIG_MARGIN) continue;
+            }
+
+            usedV.add(vk);
+            usedA.add(ak);
+            pairs.push({
+                source: "page",
+                video_key: vk,
+                audio_key: ak,
+                video_item: c.v,
+                audio_item: c.a,
+                pair_index: pairs.length,
+                score: +c.score.toFixed(5),
+                duration_score: +c.durationScore.toFixed(5),
+                soft_score: +c.soft.toFixed(5),
+                delta_sec: c.delta,
+                video_duration: c.v._durationSec,
+                audio_duration: c.a._durationSec,
+            });
+        }
+
+        // Count unresolved blocked items that never paired (informational)
+        ambiguous = 0;
+        for (const vk of blockedV) {
+            if (!usedV.has(vk)) ambiguous++;
+        }
+        for (const ak of blockedA) {
+            if (!usedA.has(ak)) ambiguous++;
+        }
+
+        return {
+            pairs,
+            ambiguous,
+            candidateCount: candidates.length,
+            blockedVideos: blockedV.size,
+            blockedAudios: blockedA.size,
+        };
     }
 
     function probeItemWithElement(it, timeoutMs = 12000) {
@@ -243,47 +512,18 @@
         }
         const vOk = videos.filter((v) => v._durationSec > 0.05);
         const aOk = audios.filter((a) => a._durationSec > 0.05);
-        const candidates = [];
-        for (const v of vOk) {
-            for (const a of aOk) {
-                const sc = durationMatchScore(v._durationSec, a._durationSec);
-                if (sc == null || sc < 0.97) continue;
-                candidates.push({
-                    score: sc,
-                    delta: v._durationSec - a._durationSec,
-                    v,
-                    a,
-                });
-            }
-        }
-        candidates.sort((x, y) => y.score - x.score || Math.abs(x.delta) - Math.abs(y.delta));
-        const usedV = new Set();
-        const usedA = new Set();
-        const pairs = [];
-        for (const c of candidates) {
-            if (usedV.has(c.v._key) || usedA.has(c.a._key)) continue;
-            usedV.add(c.v._key);
-            usedA.add(c.a._key);
-            pairs.push({
-                source: "page",
-                video_key: c.v._key,
-                audio_key: c.a._key,
-                video_item: c.v,
-                audio_item: c.a,
-                pair_index: pairs.length,
-                score: +c.score.toFixed(5),
-                delta_sec: c.delta,
-                video_duration: c.v._durationSec,
-                audio_duration: c.a._durationSec,
-            });
-        }
+        const matched = matchVideoAudioPairs(vOk, aOk);
         return {
-            pairs,
+            pairs: matched.pairs,
             videos: videos.length,
             audios: audios.length,
             probed: classified,
             vOk: vOk.length,
             aOk: aOk.length,
+            ambiguous: matched.ambiguous,
+            candidateCount: matched.candidateCount,
+            blockedVideos: matched.blockedVideos,
+            blockedAudios: matched.blockedAudios,
         };
     }
 
@@ -397,10 +637,97 @@
         return { ok, fail };
     }
 
+    /** Bytes from cat-catch item (Content-Length / size). 0 if unknown. */
+    function itemSizeBytes(it) {
+        if (!it) return 0;
+        const candidates = [
+            it.size,
+            it.fileSize,
+            it.contentLength,
+            it.content_length,
+            it._size,
+            it.header && it.header.size,
+        ];
+        for (const c of candidates) {
+            const n = Number(c);
+            if (Number.isFinite(n) && n > 0) return n;
+        }
+        const h = it._headers || it.requestHeaders || {};
+        for (const [k, v] of Object.entries(h)) {
+            if (/^content-length$/i.test(k) && v != null && v !== "") {
+                const n = parseInt(String(v), 10);
+                if (Number.isFinite(n) && n > 0) return n;
+            }
+        }
+        return 0;
+    }
+
+    function itemDurationSec(it) {
+        if (!it) return 0;
+        const d = Number(it._durationSec ?? it.duration_sec ?? it.duration);
+        return Number.isFinite(d) && d > 0 ? d : 0;
+    }
+
+    /**
+     * Reject when size/duration is known and over limit. Unknown → keep.
+     */
+    function filterBySizeDuration(items, { maxSizeBytes = 0, maxDurationSec = 0 } = {}) {
+        const kept = [];
+        const skipped = [];
+        let skipSize = 0;
+        let skipDur = 0;
+        for (const it of items || []) {
+            const sz = itemSizeBytes(it);
+            const dur = itemDurationSec(it);
+            if (maxSizeBytes > 0 && sz > 0 && sz > maxSizeBytes) {
+                skipSize++;
+                skipped.push({
+                    it,
+                    reason:
+                        `过大 ${(sz / (1024 * 1024)).toFixed(1)}MB > ` +
+                        `${(maxSizeBytes / (1024 * 1024)).toFixed(0)}MB`,
+                });
+                continue;
+            }
+            if (maxDurationSec > 0 && dur > 0 && dur > maxDurationSec) {
+                skipDur++;
+                skipped.push({
+                    it,
+                    reason:
+                        `过长 ${(dur / 60).toFixed(1)}分钟 > ` +
+                        `${(maxDurationSec / 60).toFixed(0)}分钟`,
+                });
+                continue;
+            }
+            kept.push(it);
+        }
+        return {
+            kept,
+            skipped,
+            stats: {
+                in: (items || []).length,
+                kept: kept.length,
+                skipSize,
+                skipDur,
+                skipped: skipped.length,
+            },
+        };
+    }
+
+    function itemOverLimit(it, maxSizeBytes, maxDurationSec) {
+        if (!it) return false;
+        const sz = itemSizeBytes(it);
+        const dur = itemDurationSec(it);
+        if (maxSizeBytes > 0 && sz > 0 && sz > maxSizeBytes) return true;
+        if (maxDurationSec > 0 && dur > 0 && dur > maxDurationSec) return true;
+        return false;
+    }
+
     /**
      * Convention-scraper analyze + ingest pipeline.
      * avSeparated true  → complete AV direct; rest pair-merge
      * avSeparated false → all video-like direct
+     * opts.maxSizeBytes / maxDurationSec: skip when known and over limit
      */
     async function analyzeAndIngest(items, pageUrl, opts = {}) {
         const {
@@ -409,20 +736,60 @@
             useJasna = false,
             tags = [],
             onStatus = () => {},
+            maxSizeBytes = 0,
+            maxDurationSec = 0,
         } = opts;
 
-        const list = normalizeCaughtList(items, pageUrl);
+        const rawTotal = Array.isArray(items) ? items.length : 0;
+        let list = normalizeCaughtList(items, pageUrl);
         await enrichHeaders(list, pageUrl);
         onStatus(`分析 ${list.length} 条嗅探资源…`);
+
+        const limitsOn = maxSizeBytes > 0 || maxDurationSec > 0;
+        if (limitsOn) {
+            // Duration often needs content probe
+            if (maxDurationSec > 0) {
+                onStatus("识别时长以便过滤过长视频…");
+                await classifyPool(list, { onStatus });
+            }
+            const fr = filterBySizeDuration(list, { maxSizeBytes, maxDurationSec });
+            if (fr.skipped.length) {
+                onStatus(
+                    `过滤：保留 ${fr.stats.kept}/${fr.stats.in}` +
+                        (fr.stats.skipSize ? ` · 过大 ${fr.stats.skipSize}` : "") +
+                        (fr.stats.skipDur ? ` · 过长 ${fr.stats.skipDur}` : "")
+                );
+                fr.skipped.slice(0, 5).forEach((s) => {
+                    const u = (s.it && s.it.url) || "";
+                    onStatus(`  跳过 ${s.reason} · ${String(u).slice(0, 60)}`);
+                });
+            }
+            list = fr.kept;
+            if (!list.length) {
+                return {
+                    mode: avSeparated ? "av_separated" : "direct_all_video",
+                    total: rawTotal,
+                    direct: 0,
+                    merged: 0,
+                    unpaired: 0,
+                    filtered: fr.stats.skipped,
+                    filterStats: fr.stats,
+                    result: { success: 0, failed: 0, duplicates: 0 },
+                };
+            }
+        }
 
         if (!avSeparated) {
             const videos = list.filter(isVideoLike);
             const skipped = list.length - videos.length;
-            onStatus(`分离关：直接入库视频 ${videos.length}` + (skipped ? `（跳过非视频 ${skipped}）` : ""));
+            onStatus(
+                `分离关：直接入库视频 ${videos.length}` +
+                    (skipped ? `（跳过非视频 ${skipped}）` : "")
+            );
             const r = await ingestItems(videos, pageUrl, { tags, restricted, useJasna, onStatus });
             return {
                 mode: "direct_all_video",
-                total: list.length,
+                total: rawTotal,
                 direct: videos.length,
                 merged: 0,
                 unpaired: 0,
@@ -430,8 +797,19 @@
             };
         }
 
-        // avSeparated: classify then split (server probe for video has_audio)
+        // avSeparated: classify then split
         await classifyPool(list, { onStatus });
+        if (limitsOn) {
+            const fr2 = filterBySizeDuration(list, { maxSizeBytes, maxDurationSec });
+            if (fr2.stats.skipped) {
+                onStatus(
+                    `二次过滤：保留 ${fr2.stats.kept}` +
+                        (fr2.stats.skipDur ? ` · 过长 ${fr2.stats.skipDur}` : "") +
+                        (fr2.stats.skipSize ? ` · 过大 ${fr2.stats.skipSize}` : "")
+                );
+            }
+            list = fr2.kept;
+        }
 
         const direct = [];
         const remainder = [];
@@ -456,13 +834,25 @@
         if (remainder.length >= 2) {
             onStatus("检测可合并项…");
             const det = await detectPageAvPairs(remainder, { onStatus });
+            let pairs = det.pairs || [];
+            if (limitsOn) {
+                const before = pairs.length;
+                pairs = pairs.filter(
+                    (p) =>
+                        !itemOverLimit(p.video_item, maxSizeBytes, maxDurationSec) &&
+                        !itemOverLimit(p.audio_item, maxSizeBytes, maxDurationSec)
+                );
+                if (pairs.length < before) {
+                    onStatus(`可合并对过滤：${before} → ${pairs.length}（剔除超限）`);
+                }
+            }
             onStatus(
-                `可合并 ${det.pairs.length} 对（视频 ${det.videos} · 音频 ${det.audios}）`
+                `可合并 ${pairs.length} 对（视频 ${det.videos} · 音频 ${det.audios}）`
             );
-            if (det.pairs.length) {
-                mergeResult = await mergePagePairs(det.pairs, { restricted, useJasna, onStatus });
+            if (pairs.length) {
+                mergeResult = await mergePagePairs(pairs, { restricted, useJasna, onStatus });
                 const used = new Set();
-                for (const p of det.pairs) {
+                for (const p of pairs) {
                     if (p.video_key) used.add(p.video_key);
                     if (p.audio_key) used.add(p.audio_key);
                 }
@@ -476,7 +866,7 @@
 
         return {
             mode: "av_separated",
-            total: list.length,
+            total: rawTotal,
             direct: direct.length,
             merged: mergeResult.ok,
             mergeFail: mergeResult.fail,
@@ -490,6 +880,11 @@
         mediaTypeOf,
         isStreamUrl,
         durationMatchScore,
+        urlAffinityScore,
+        requestAffinityScore,
+        sizeAffinityScore,
+        scoreAvEdge,
+        matchVideoAudioPairs,
         classifyItemContent,
         classifyPool,
         detectPageAvPairs,
@@ -499,6 +894,9 @@
         ingestItems,
         mergePagePairs,
         analyzeAndIngest,
+        filterBySizeDuration,
+        itemSizeBytes,
+        itemDurationSec,
         isCompleteAv,
         isVideoLike,
         applyPlayHeaders,

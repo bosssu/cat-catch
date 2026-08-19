@@ -1,0 +1,36 @@
+id: discord.cdn
+name: Discord CDN
+version: "1.0.0"
+author: local
+enabled: true
+
+match:
+  process_names:
+    - Discord.exe
+    - DiscordPTB.exe
+    - DiscordCanary.exe
+
+provides:
+  - candidates_from_network
+
+network:
+  url_include_regex:
+    - "cdn\\.discordapp\\.com/"
+    - "media\\.discordapp\\.net/"
+    - "discordapp\\.com/attachments/"
+    - "discord\\.com/attachments/"
+    - "images-ext-\\d+\\.discordapp\\.net/"
+    - "discordapp\\.net/attachments/"
+    - "/ephemeral-attachments/"
+  url_exclude_regex:
+    - "/avatars/"
+    - "/emojis/"
+    - "/emoji/"
+    - "/icons/"
+    - "/role-icons/"
+    - "/stickers/"
+    - "/badges/"
+
+# Prefer longer local scan via plugin.collect_candidates
+suggested_tags:
+  - discord

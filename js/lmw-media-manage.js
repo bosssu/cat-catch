@@ -15,6 +15,8 @@
         loading: false,
         listAbort: null,
         selected: new Set(),
+        /** Last clicked card id; Shift+click selects the contiguous range to this anchor. */
+        selAnchorId: null,
         pendingFiles: [],
         editId: null,
         filters: {
@@ -342,7 +344,7 @@
         const restricted = isRestricted(m);
         const mtype = m.media_type || "";
         return `<article class="mm-card${restricted ? " is-restricted" : ""}" data-id="${m.id}" data-type="${escapeHtml(mtype)}">
-  <input type="checkbox" class="mm-card-check" data-id="${m.id}" aria-label="选择 #${m.id}" />
+  <input type="checkbox" class="mm-card-check" data-id="${m.id}" aria-label="选择 #${m.id}" title="点击选择；Shift+点击连续多选" />
   <div class="mm-thumb-wrap" data-preview="${m.id}" title="预览">
     <div class="mm-thumb-ph" data-thumb-ph="${m.id}">${escapeHtml(typeLabel(mtype))}</div>
     <img alt="" data-thumb="${m.id}" data-src="${escapeHtml(m.thumb_url || "")}" hidden />
@@ -359,6 +361,11 @@
     <div class="mm-card-actions">
       <button type="button" data-act="edit" data-id="${m.id}">编辑</button>
       <button type="button" data-act="like" data-id="${m.id}">${m.liked ? "取消♥" : "喜欢"}</button>
+      ${
+          mtype === "video" || mtype === "m3u8"
+              ? `<button type="button" data-act="fix" data-id="${m.id}" title="服务端 H.264/AAC 标准化转码并自动替换">修复</button>`
+              : ""
+      }
       <button type="button" data-act="del" data-id="${m.id}">删除</button>
     </div>
   </div>
@@ -419,11 +426,28 @@
         img.dataset.loaded = "1";
         const id = img.dataset.thumb;
         try {
-            const blobUrl = await LMW.fetchAuthedBlobUrl(src);
-            img.src = blobUrl;
+            // Prefer ?token= direct URL (no full fetch into extension memory)
+            if (typeof LMW.mediaUrlWithToken === "function") {
+                img.src = LMW.mediaUrlWithToken(src);
+            } else {
+                img.src = await LMW.fetchAuthedBlobUrl(src);
+            }
             img.hidden = false;
             const ph = img.parentElement && img.parentElement.querySelector(`[data-thumb-ph="${id}"]`);
             if (ph) ph.hidden = true;
+            img.onerror = () => {
+                // fallback: header-auth blob
+                img.onerror = null;
+                LMW.fetchAuthedBlobUrl(src)
+                    .then((blobUrl) => {
+                        img.src = blobUrl;
+                        img.hidden = false;
+                        if (ph) ph.hidden = true;
+                    })
+                    .catch(() => {
+                        img.dataset.loaded = "0";
+                    });
+            };
         } catch (e) {
             img.dataset.loaded = "0";
             // leave placeholder
@@ -437,6 +461,7 @@
             state.offset = 0;
             state.items = [];
             state.selected.clear();
+            state.selAnchorId = null;
             if (state.listAbort) state.listAbort.abort();
             // Drop stale file/thumb blobs so jasna-replaced media re-fetches
             if (typeof LMW.revokeAllBlobUrls === "function") {
@@ -485,6 +510,50 @@
         return [...state.selected];
     }
 
+    /** Visible card ids in DOM order (current grid order). */
+    function visibleCardIds() {
+        return [...$("mmGrid").querySelectorAll(".mm-card")].map((c) => Number(c.dataset.id));
+    }
+
+    /**
+     * Select every card between fromId and toId (inclusive) in grid order.
+     * Used by Shift+click range selection. Does not clear existing selection outside the range.
+     */
+    function selectRangeInclusive(fromId, toId) {
+        const ids = visibleCardIds();
+        let i0 = ids.indexOf(Number(fromId));
+        let i1 = ids.indexOf(Number(toId));
+        if (i1 < 0) return;
+        if (i0 < 0) i0 = i1;
+        const lo = Math.min(i0, i1);
+        const hi = Math.max(i0, i1);
+        for (let i = lo; i <= hi; i++) {
+            state.selected.add(ids[i]);
+        }
+        updateSelUi();
+    }
+
+    /**
+     * Toggle or range-select one card. Shift+click selects from selAnchorId → id.
+     * @returns {boolean} true if handled as range select
+     */
+    function applyCardSelection(id, { shiftKey = false, checked = true } = {}) {
+        id = Number(id);
+        if (!id) return false;
+        if (shiftKey) {
+            const anchor = state.selAnchorId != null ? state.selAnchorId : id;
+            selectRangeInclusive(anchor, id);
+            // Keep original anchor (file-manager style) so further Shift+clicks extend from first point
+            if (state.selAnchorId == null) state.selAnchorId = id;
+            return true;
+        }
+        if (checked) state.selected.add(id);
+        else state.selected.delete(id);
+        state.selAnchorId = id;
+        updateSelUi();
+        return false;
+    }
+
     async function batchTags(mode) {
         const ids = selectedIds();
         if (!ids.length) {
@@ -522,6 +591,7 @@
             const r = await LMW.batchDelete(ids);
             setStatus(`已删除 ${r.deleted || 0} 项`);
             state.selected.clear();
+            state.selAnchorId = null;
             await loadList({ reset: true });
             await loadTagOptions();
             loadTagCombos();
@@ -729,9 +799,6 @@
                 const title = (file.name || "upload").replace(/\.[^.]+$/, "");
                 $("mmUploadProg").textContent = `上传中 ${done + failed + dups + 1}/${files.length} · ${file.name}`;
                 try {
-                    const useJasna = !!(
-                        $("mmUseJasna") && $("mmUseJasna").checked
-                    );
                     const restricted = !!(
                         $("mmRestricted") && $("mmRestricted").checked
                     );
@@ -741,18 +808,12 @@
                         media_type: guessMediaType(file),
                         tags,
                         remux: "1",
-                        use_jasna: useJasna,
                         restricted,
                     });
                     if (up && up.duplicate) {
                         dups++;
                     } else {
                         done++;
-                        if (up && up.jasna_job_id) {
-                            $("mmUploadProg").textContent =
-                                `上传中 ${done + failed + dups}/${files.length} · jasna #${up.jasna_job_id} 排队`;
-                            pollJasnaJob(up.jasna_job_id).catch(() => {});
-                        }
                     }
                 } catch (e) {
                     failed++;
@@ -815,26 +876,76 @@
         $("mmPreview").classList.remove("hide");
         $("mmPreview").setAttribute("aria-hidden", "false");
         try {
-            const url = await LMW.fetchAuthedBlobUrl(m.file_url);
+            const mtype = (m.media_type || "").toLowerCase();
+            // Video/audio: stream via ?token= (Range). Full fetch→blob often net::ERR_FAILED on large files.
+            const useStream =
+                mtype !== "image" &&
+                mtype !== "gif" &&
+                typeof LMW.mediaUrlWithToken === "function";
+            let url = "";
+            if (useStream) {
+                url = LMW.mediaUrlWithToken(m.file_url);
+            } else {
+                url = await LMW.fetchAuthedBlobUrl(m.file_url);
+            }
+            if (!url) throw new Error("empty media url");
             stage.innerHTML = "";
-            if (m.media_type === "image" || m.media_type === "gif") {
+            if (mtype === "image" || mtype === "gif") {
                 const img = document.createElement("img");
                 img.src = url;
                 img.alt = m.title || "";
+                img.onerror = () => {
+                    stage.innerHTML = `<div class="muted">图片预览失败</div>`;
+                };
                 stage.appendChild(img);
-            } else if (m.media_type === "audio") {
+            } else if (mtype === "audio") {
                 const a = document.createElement("audio");
-                a.src = url;
                 a.controls = true;
                 a.autoplay = true;
+                a.preload = "metadata";
                 a.style.width = "min(92vw, 480px)";
+                a.src = url;
+                a.addEventListener("error", () => {
+                    // fallback: download full file with auth headers
+                    LMW.fetchAuthedBlobUrl(m.file_url, { force: true })
+                        .then((blobUrl) => {
+                            a.src = blobUrl;
+                            a.play().catch(() => {});
+                        })
+                        .catch((err) => {
+                            stage.innerHTML = `<div class="muted">音频预览失败：${escapeHtml(
+                                (err && err.message) || err
+                            )}</div>`;
+                        });
+                });
                 stage.appendChild(a);
             } else {
                 const v = document.createElement("video");
-                v.src = url;
                 v.controls = true;
                 v.autoplay = true;
                 v.playsInline = true;
+                v.preload = "metadata";
+                v.src = url;
+                v.addEventListener("error", () => {
+                    stage.innerHTML = `<div class="muted">视频流式预览失败，尝试整文件加载…</div>`;
+                    LMW.fetchAuthedBlobUrl(m.file_url, { force: true })
+                        .then((blobUrl) => {
+                            stage.innerHTML = "";
+                            const v2 = document.createElement("video");
+                            v2.controls = true;
+                            v2.autoplay = true;
+                            v2.playsInline = true;
+                            v2.src = blobUrl;
+                            stage.appendChild(v2);
+                        })
+                        .catch((err) => {
+                            stage.innerHTML = `<div class="muted">预览失败：${escapeHtml(
+                                (err && err.message) || err
+                            )}<br/><span class="muted" style="font-size:12px">若已配置 Token，请确认 options 中 lmwToken 与服务端 access_token 一致；URL 需可从本机访问 ${escapeHtml(
+                                LMW.baseUrl()
+                            )}</span></div>`;
+                        });
+                });
                 stage.appendChild(v);
             }
         } catch (e) {
@@ -904,6 +1015,66 @@
             }
             return;
         }
+        if (act === "fix") {
+            const m = state.items.find((x) => x.id === id);
+            const mtype = (m && m.media_type) || "";
+            if (mtype && mtype !== "video" && mtype !== "m3u8") {
+                setStatus("仅视频可修复转码");
+                return;
+            }
+            if (
+                !confirm(
+                    `对 #${id} 执行 H.264/AAC 标准化转码？\n` +
+                        `服务端强制转码完成后会自动替换原文件（同一条目）。\n` +
+                        `大文件可能需要较长时间，请勿关闭页面。`
+                )
+            ) {
+                return;
+            }
+            const card = $("mmGrid").querySelector(`.mm-card[data-id="${id}"]`);
+            const btn = card && card.querySelector('[data-act="fix"]');
+            if (btn) {
+                btn.disabled = true;
+                btn.textContent = "转码中…";
+            }
+            setStatus(`#${id} H.264 转码中…（完成后自动替换）`);
+            try {
+                const r = await LMW.reencodeMedia(id);
+                const item = r && r.item ? r.item : r;
+                if (typeof LMW.invalidateBlobCacheForMedia === "function") {
+                    LMW.invalidateBlobCacheForMedia(id);
+                }
+                const idx = state.items.findIndex((x) => x.id === id);
+                if (idx >= 0 && item) {
+                    state.items[idx] = { ...state.items[idx], ...item };
+                }
+                if (card && item) {
+                    const wrap = document.createElement("div");
+                    wrap.innerHTML = cardHtml(state.items[idx] || item);
+                    const next = wrap.firstElementChild;
+                    if (next) {
+                        card.replaceWith(next);
+                        observeThumbs($("mmGrid"));
+                        updateSelUi();
+                    }
+                } else {
+                    await loadList({ reset: true });
+                }
+                setStatus(
+                    `已修复 #${id}` +
+                        (item && item.file_size
+                            ? ` · ${formatSize(item.file_size)} · H.264/mp4`
+                            : " · H.264/mp4")
+                );
+            } catch (e) {
+                setStatus(`修复 #${id} 失败：` + (e.message || e));
+                if (btn) {
+                    btn.disabled = false;
+                    btn.textContent = "修复";
+                }
+            }
+            return;
+        }
         if (act === "del") {
             if (!confirm(`确定删除媒体 #${id}？不可恢复。`)) return;
             try {
@@ -964,13 +1135,14 @@
         });
 
         $("btnSelPage").onclick = () => {
-            $("mmGrid").querySelectorAll(".mm-card").forEach((c) => {
-                state.selected.add(Number(c.dataset.id));
-            });
+            const ids = visibleCardIds();
+            ids.forEach((id) => state.selected.add(id));
+            if (ids.length) state.selAnchorId = ids[ids.length - 1];
             updateSelUi();
         };
         $("btnSelClear").onclick = () => {
             state.selected.clear();
+            state.selAnchorId = null;
             updateSelUi();
         };
         $("btnBatchMerge").onclick = () => batchTags("merge");
@@ -1019,19 +1191,6 @@
                 } catch (e) { /* ignore */ }
             });
         }
-        const jasnaCb = $("mmUseJasna");
-        if (jasnaCb) {
-            jasnaCb.checked = !!(G && G.lmwUseJasna);
-            jasnaCb.addEventListener("change", () => {
-                const on = !!jasnaCb.checked;
-                if (typeof G !== "undefined") G.lmwUseJasna = on;
-                try {
-                    chrome.storage.sync.set({ lmwUseJasna: on });
-                    chrome.storage.local.set({ lmwUseJasna: on });
-                } catch (e) { /* ignore */ }
-            });
-        }
-
         const drop = $("mmDrop");
         ["dragenter", "dragover"].forEach((ev) => {
             drop.addEventListener(ev, (e) => {
@@ -1054,14 +1213,40 @@
             if (files && files.length) addPendingFiles(files);
         });
 
+        // Prevent checkbox default toggle on Shift+click so range-select isn't undone by native flip
+        $("mmGrid").addEventListener("mousedown", (e) => {
+            const t = e.target;
+            if (e.shiftKey && t.classList && t.classList.contains("mm-card-check")) {
+                e.preventDefault();
+            }
+        });
+
         $("mmGrid").addEventListener("click", (e) => {
             const t = e.target;
+            // Checkbox: normal toggle, or Shift+click continuous range from last anchor
             if (t.classList.contains("mm-card-check")) {
                 const id = Number(t.dataset.id);
-                if (t.checked) state.selected.add(id);
-                else state.selected.delete(id);
-                updateSelUi();
+                if (e.shiftKey) {
+                    e.preventDefault();
+                    applyCardSelection(id, { shiftKey: true });
+                    return;
+                }
+                applyCardSelection(id, { shiftKey: false, checked: !!t.checked });
                 return;
+            }
+            // Shift+click on card body (not action buttons / restricted toggle): range select
+            if (e.shiftKey) {
+                const card = t.closest(".mm-card");
+                if (
+                    card &&
+                    !t.closest("[data-act]") &&
+                    !t.classList.contains("mm-restricted-toggle") &&
+                    !t.closest(".mm-card-restricted")
+                ) {
+                    e.preventDefault();
+                    applyCardSelection(Number(card.dataset.id), { shiftKey: true });
+                    return;
+                }
             }
             const btn = t.closest("[data-act]");
             if (btn) {
@@ -1074,15 +1259,9 @@
                 openPreview(Number(prev.dataset.preview));
             }
         });
+        // Card checkboxes are handled only in click (change has no reliable shiftKey and would undo range select)
         $("mmGrid").addEventListener("change", async (e) => {
             const t = e.target;
-            if (t.classList.contains("mm-card-check")) {
-                const id = Number(t.dataset.id);
-                if (t.checked) state.selected.add(id);
-                else state.selected.delete(id);
-                updateSelUi();
-                return;
-            }
             if (t.classList.contains("mm-restricted-toggle")) {
                 const id = Number(t.dataset.id);
                 const on = !!t.checked;

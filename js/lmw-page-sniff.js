@@ -10,7 +10,7 @@
     const DEFAULTS = {
         lmwEnable: true,
         lmwFloatIngest: true,
-        lmwURL: "http://127.0.0.1:8790",
+        lmwURL: "http://192.168.10.84:8790",
         lmwToken: "",
         lmwDefaultCategory: "default",
         lmwFloatMinPx: 72,

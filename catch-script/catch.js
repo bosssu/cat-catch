@@ -141,7 +141,6 @@
                 <label><input type="checkbox" id="autoDown" ${localStorage.getItem("CatCatchCatch_autoDown") || ""} ${checkboxStyle}><span data-i18n="automaticDownload">完成捕获自动下载</span></label>
                 <label><input type="checkbox" id="autoIngest" ${localStorage.getItem("CatCatchCatch_autoIngest") || ""} ${checkboxStyle}><span>完成捕获自动入库</span></label>
                 <label><input type="checkbox" id="useRestricted" ${localStorage.getItem("CatCatchCatch_useRestricted") || ""} ${checkboxStyle}><span>限制级</span></label>
-                <label><input type="checkbox" id="useJasna" ${localStorage.getItem("CatCatchCatch_useJasna") || ""} ${checkboxStyle}><span>使用 jasna 去马赛克</span></label>
                 <label><input type="checkbox" id="ffmpeg" ${localStorage.getItem("CatCatchCatch_ffmpeg") || ""} ${checkboxStyle}><span data-i18n="ffmpeg">使用ffmpeg合并</span></label>
                 <label><input type="checkbox" id="autoToBuffered" ${checkboxStyle}><span data-i18n="autoToBuffered">自动跳转缓冲尾</span></label>
                 <label><input type="checkbox" id="checkHead" ${checkboxStyle}><span data-i18n="checkHead">清理多余头部数据</span></label>
@@ -301,10 +300,7 @@
             if (useRestricted) useRestricted.addEventListener('change', (event) => {
                 localStorage.setItem("CatCatchCatch_useRestricted", event.target.checked ? "checked" : "");
             });
-            const useJasna = this.catCatch.querySelector("#useJasna");
-            if (useJasna) useJasna.addEventListener('change', (event) => {
-                localStorage.setItem("CatCatchCatch_useJasna", event.target.checked ? "checked" : "");
-            });
+
 
             const hide = this.catCatch.querySelector("#hide");
             if (hide) hide.addEventListener('click', this.handleHide.bind(this));
@@ -557,7 +553,6 @@
                     else finish(() => reject(new Error(event.data.error || "ingest failed")));
                 };
                 window.addEventListener("message", onMsg);
-                const useJasna = !!this.catCatch?.querySelector("#useJasna")?.checked;
                 const restricted = !!this.catCatch?.querySelector("#useRestricted")?.checked;
                 window.postMessage({
                     action: "catCatchIngestBlob",
@@ -568,7 +563,7 @@
                     media_type: meta.media_type || "video",
                     source_url: location.href,
                     tags: meta.tags || [],
-                    use_jasna: useJasna,
+                    use_jasna: false,
                     restricted,
                 }, location.origin);
                 const timer = setTimeout(() => {
@@ -602,7 +597,6 @@
                     else finish(() => reject(new Error(event.data.error || "ingest failed")));
                 };
                 window.addEventListener("message", onMsg);
-                const useJasna = !!this.catCatch?.querySelector("#useJasna")?.checked;
                 const restricted = !!this.catCatch?.querySelector("#useRestricted")?.checked;
                 window.postMessage({
                     action: "catCatchIngestAV",
@@ -613,7 +607,7 @@
                     title: meta.title || document.title || "capture",
                     source_url: location.href,
                     tags: meta.tags || [],
-                    use_jasna: useJasna,
+                    use_jasna: false,
                     restricted,
                 }, location.origin);
                 const timer = setTimeout(() => {

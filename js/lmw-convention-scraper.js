@@ -20,6 +20,10 @@
             targetCount: 8,
             intervalMs: 2000,
             maxWaitMs: 180000,
+            /** 入库过滤：最大体积 MB（0=不限），默认 500 */
+            maxSizeMb: 500,
+            /** 入库过滤：最大时长分钟（0=不限），默认 10 */
+            maxDurationMin: 10,
             restricted: false,
             useJasna: false,
             closeTab: true,
@@ -174,6 +178,8 @@
         const defCount = $("defCount");
         const intervalMs = $("intervalMs");
         const maxWaitMs = $("maxWaitMs");
+        const maxSizeMb = $("maxSizeMb");
+        const maxDurationMin = $("maxDurationMin");
         const optRestricted = $("optRestricted");
         const optJasna = $("optJasna");
         const optCloseTab = $("optCloseTab");
@@ -181,6 +187,14 @@
         config.defaults.targetCount = Math.max(1, parseInt(defCount.value, 10) || 8);
         config.defaults.intervalMs = Math.max(300, parseInt(intervalMs.value, 10) || 2000);
         config.defaults.maxWaitMs = Math.max(10000, parseInt(maxWaitMs.value, 10) || 180000);
+        if (maxSizeMb) {
+            const v = parseFloat(maxSizeMb.value);
+            config.defaults.maxSizeMb = Number.isFinite(v) && v >= 0 ? v : 500;
+        }
+        if (maxDurationMin) {
+            const v = parseFloat(maxDurationMin.value);
+            config.defaults.maxDurationMin = Number.isFinite(v) && v >= 0 ? v : 10;
+        }
         config.defaults.restricted = !!(optRestricted && optRestricted.checked);
         config.defaults.useJasna = !!(optJasna && optJasna.checked);
         config.defaults.closeTab = !!(optCloseTab && optCloseTab.checked);
@@ -188,6 +202,8 @@
 
     /** 可序列化快照（避免把运行时字段写进 storage） */
     function snapshotConfig() {
+        const maxSizeMb = Number(config.defaults.maxSizeMb);
+        const maxDurationMin = Number(config.defaults.maxDurationMin);
         return {
             links: (config.links || []).map((x) => ({
                 id: x.id,
@@ -200,6 +216,9 @@
                 targetCount: Math.max(1, parseInt(config.defaults.targetCount, 10) || 8),
                 intervalMs: Math.max(300, parseInt(config.defaults.intervalMs, 10) || 2000),
                 maxWaitMs: Math.max(10000, parseInt(config.defaults.maxWaitMs, 10) || 180000),
+                maxSizeMb: Number.isFinite(maxSizeMb) && maxSizeMb >= 0 ? maxSizeMb : 500,
+                maxDurationMin:
+                    Number.isFinite(maxDurationMin) && maxDurationMin >= 0 ? maxDurationMin : 10,
                 restricted: !!config.defaults.restricted,
                 useJasna: !!config.defaults.useJasna,
                 closeTab: config.defaults.closeTab !== false,
@@ -265,6 +284,14 @@
         $("defCount").value = String(config.defaults.targetCount || 8);
         $("intervalMs").value = String(config.defaults.intervalMs || 2000);
         $("maxWaitMs").value = String(config.defaults.maxWaitMs || 180000);
+        if ($("maxSizeMb")) {
+            const v = config.defaults.maxSizeMb;
+            $("maxSizeMb").value = String(v != null && v !== "" ? v : 500);
+        }
+        if ($("maxDurationMin")) {
+            const v = config.defaults.maxDurationMin;
+            $("maxDurationMin").value = String(v != null && v !== "" ? v : 10);
+        }
         $("optRestricted").checked = !!config.defaults.restricted;
         $("optJasna").checked = !!config.defaults.useJasna;
         $("optCloseTab").checked = config.defaults.closeTab !== false;
@@ -431,6 +458,8 @@
             "defCount",
             "intervalMs",
             "maxWaitMs",
+            "maxSizeMb",
+            "maxDurationMin",
             "optRestricted",
             "optJasna",
             "optCloseTab",
@@ -637,18 +666,32 @@
         } else {
             const list = await getTabMediaList(tabId);
             const items = Array.isArray(list) ? list : [];
-            log(`开始分析入库 · ${uniqueUrlCount(items)} 条 URL · 分离${avSeparated ? "开" : "关"}`, "info");
+            const maxSizeMb = Number(config.defaults.maxSizeMb);
+            const maxDurationMin = Number(config.defaults.maxDurationMin);
+            const maxSizeBytes =
+                Number.isFinite(maxSizeMb) && maxSizeMb > 0 ? maxSizeMb * 1024 * 1024 : 0;
+            const maxDurationSec =
+                Number.isFinite(maxDurationMin) && maxDurationMin > 0 ? maxDurationMin * 60 : 0;
+            log(
+                `开始分析入库 · ${uniqueUrlCount(items)} 条 URL · 分离${avSeparated ? "开" : "关"}` +
+                    ` · 上限 ${maxSizeMb > 0 ? maxSizeMb + "MB" : "体积不限"}` +
+                    ` / ${maxDurationMin > 0 ? maxDurationMin + "分钟" : "时长不限"}`,
+                "info"
+            );
             try {
                 const summary = await LMWAv.analyzeAndIngest(items, url, {
                     avSeparated,
                     restricted: !!config.defaults.restricted,
                     useJasna: !!config.defaults.useJasna,
                     tags: [],
+                    maxSizeBytes,
+                    maxDurationSec,
                     onStatus: (m) => log(m, "info"),
                 });
                 log(
                     `完成：mode=${summary.mode} 直入=${summary.direct} 合并=${summary.merged || 0}` +
                         (summary.unpaired ? ` 残片=${summary.unpaired}` : "") +
+                        (summary.filtered != null ? ` · 过滤${summary.filtered}` : "") +
                         (summary.result
                             ? ` · 入库成功${summary.result.success || 0}/重复${summary.result.duplicates || 0}/失败${summary.result.failed || 0}`
                             : ""),
@@ -783,7 +826,16 @@
         $("btnBackManage").onclick = () => {
             chrome.tabs.create({ url: chrome.runtime.getURL("lmw-media-manage.html") });
         };
-        ["defCount", "intervalMs", "maxWaitMs", "optRestricted", "optJasna", "optCloseTab"].forEach((id) => {
+        [
+            "defCount",
+            "intervalMs",
+            "maxWaitMs",
+            "maxSizeMb",
+            "maxDurationMin",
+            "optRestricted",
+            "optJasna",
+            "optCloseTab",
+        ].forEach((id) => {
             const el = $(id);
             if (!el) return;
             el.addEventListener("change", () => flushSaveSoon());

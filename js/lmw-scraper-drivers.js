@@ -643,71 +643,106 @@
 
     function pageHarvestVideoUrls() {
         const found = new Set();
+        const addId = (id) => {
+            const s = String(id || "").trim();
+            if (/^\d{8,}$/.test(s)) found.add(`https://www.douyin.com/video/${s}`);
+        };
         const abs = (href) => {
             if (!href) return null;
             try {
                 const u = new URL(href, location.origin);
-                // normalize to www.douyin.com/video/<id>
                 const m = u.pathname.match(/\/video\/(\d+)/);
-                if (m) {
-                    return `https://www.douyin.com/video/${m[1]}`;
-                }
-                // note/modal style sometimes embed aweme id
+                if (m) return `https://www.douyin.com/video/${m[1]}`;
                 const m2 = u.pathname.match(/\/note\/(\d+)/);
                 if (m2) return `https://www.douyin.com/video/${m2[1]}`;
+                // modal routes: ?modal_id= / modal_id=
+                const mid = u.searchParams.get("modal_id") || u.searchParams.get("aweme_id");
+                if (mid && /^\d{8,}$/.test(mid)) return `https://www.douyin.com/video/${mid}`;
                 return null;
             } catch {
                 return null;
             }
         };
 
-        document.querySelectorAll('a[href*="/video/"], a[href*="/note/"]').forEach((a) => {
+        document.querySelectorAll('a[href*="/video/"], a[href*="/note/"], a[href*="modal_id"]').forEach((a) => {
             const u = abs(a.getAttribute("href") || a.href);
             if (u) found.add(u);
         });
 
-        // cards with data attributes
-        document.querySelectorAll("[href], [data-id], [data-aweme-id], [data-e2e]").forEach((el) => {
+        document.querySelectorAll("[href], [data-id], [data-aweme-id], [data-e2e], [data-group-id]").forEach((el) => {
             try {
-                const href = el.getAttribute("href");
-                const u = abs(href);
+                const u = abs(el.getAttribute("href"));
                 if (u) found.add(u);
-                for (const attr of ["data-id", "data-aweme-id", "data-group-id", "data-vid"]) {
-                    const id = el.getAttribute(attr);
-                    if (id && /^\d{6,}$/.test(id)) {
-                        found.add(`https://www.douyin.com/video/${id}`);
-                    }
+                for (const attr of [
+                    "data-id",
+                    "data-aweme-id",
+                    "data-group-id",
+                    "data-vid",
+                    "data-video-id",
+                    "data-item-id",
+                ]) {
+                    addId(el.getAttribute(attr));
                 }
             } catch (_) {}
         });
 
-        // scan raw HTML / scripts for aweme ids (list JSON often embeds them)
-        try {
-            const html = document.documentElement ? document.documentElement.innerHTML : "";
-            const re = /\/video\/(\d{6,})/g;
+        // deep scan HTML + common SPA blobs
+        const scanText = (html) => {
+            if (!html || typeof html !== "string") return;
             let m;
-            while ((m = re.exec(html)) && found.size < 200) {
-                found.add(`https://www.douyin.com/video/${m[1]}`);
+            const reVideo = /\/video\/(\d{8,})/g;
+            while ((m = reVideo.exec(html)) && found.size < 300) addId(m[1]);
+            const keys = [
+                /"aweme_id"\s*:\s*"?(\d{8,})"?/g,
+                /"awemeId"\s*:\s*"?(\d{8,})"?/g,
+                /"group_id"\s*:\s*"?(\d{8,})"?/g,
+                /"groupId"\s*:\s*"?(\d{8,})"?/g,
+                /"itemId"\s*:\s*"?(\d{8,})"?/g,
+                /"item_id"\s*:\s*"?(\d{8,})"?/g,
+                /"videoId"\s*:\s*"?(\d{8,})"?/g,
+                /"vid"\s*:\s*"(\d{8,})"/g,
+                /modal_id=(\d{8,})/g,
+            ];
+            for (const re of keys) {
+                re.lastIndex = 0;
+                while ((m = re.exec(html)) && found.size < 300) addId(m[1]);
             }
-            const re2 = /"aweme_id"\s*:\s*"?(\d{6,})"?/g;
-            while ((m = re2.exec(html)) && found.size < 200) {
-                found.add(`https://www.douyin.com/video/${m[1]}`);
-            }
-            const re3 = /"groupId"\s*:\s*"?(\d{6,})"?/g;
-            while ((m = re3.exec(html)) && found.size < 200) {
-                found.add(`https://www.douyin.com/video/${m[1]}`);
+        };
+        try {
+            scanText(document.documentElement ? document.documentElement.innerHTML : "");
+        } catch (_) {}
+        try {
+            document.querySelectorAll("script").forEach((sc) => {
+                const t = sc.textContent || "";
+                if (t.length > 40 && t.length < 5e6) scanText(t);
+            });
+        } catch (_) {}
+        // window global dumps
+        try {
+            const keys = Object.keys(window).filter((k) =>
+                /STATE|INIT|RENDER|SIGI|DATA|__/i.test(k)
+            );
+            for (const k of keys.slice(0, 40)) {
+                try {
+                    const v = window[k];
+                    if (v && (typeof v === "object" || typeof v === "string")) {
+                        scanText(typeof v === "string" ? v : JSON.stringify(v).slice(0, 500000));
+                    }
+                } catch (_) {}
             }
         } catch (_) {}
 
-        // current page if already a video
         const self = abs(location.href);
         if (self) found.add(self);
 
-        const mode = /\/video\//.test(location.pathname)
-            ? "player"
-            : /jingxuan|recommend|follow|channel|search/i.test(location.pathname + location.search)
-              ? "feed"
-              : "list";
+        // jingxuan/* = grid/list（点卡片进详情），不是推荐竖滑
+        // recommend=1 / 纯首页大 video = feed
+        let mode = "list";
+        if (/\/video\//.test(location.pathname)) mode = "player";
+        else if (/\/jingxuan\//i.test(location.pathname)) mode = "grid";
+        else if (/recommend=1/i.test(location.search) || /\/follow/i.test(location.pathname))
+            mode = "feed";
+        else if (/jingxuan|channel|search/i.test(location.pathname + location.search)) mode = "grid";
 
         return {
             ok: true,
@@ -717,6 +752,7 @@
             urls: Array.from(found),
             count: found.size,
             videos: document.querySelectorAll("video").length,
+            path: location.pathname,
         };
     }
 
@@ -802,58 +838,120 @@
     // ─────────────────────── page: enter first visible card (click) ───────────────────────
 
     function pageClickFirstVideoCard() {
-        const h = window.innerHeight || 800;
-        const candidates = [];
+        const st = (window.__lmwScraper = window.__lmwScraper || {
+            openedVideos: [],
+            cardIndex: 0,
+        });
+        if (!Array.isArray(st.openedVideos)) st.openedVideos = [];
+        st.cardIndex = st.cardIndex || 0;
 
+        const h = window.innerHeight || 800;
+        const addId = (id, list) => {
+            const s = String(id || "").trim();
+            if (/^\d{8,}$/.test(s)) list.push(`https://www.douyin.com/video/${s}`);
+        };
+
+        // 1) Collect navigable video URLs from DOM/HTML (jingxuan often has no plain <a>)
+        const urls = [];
+        const seen = new Set();
+        const pushUrl = (u) => {
+            if (!u || seen.has(u) || st.openedVideos.includes(u)) return;
+            seen.add(u);
+            urls.push(u);
+        };
+        try {
+            document.querySelectorAll('a[href*="/video/"], a[href*="modal_id"]').forEach((a) => {
+                try {
+                    const u = new URL(a.getAttribute("href") || a.href, location.origin);
+                    const m = u.pathname.match(/\/video\/(\d{8,})/);
+                    if (m) pushUrl(`https://www.douyin.com/video/${m[1]}`);
+                    const mid = u.searchParams.get("modal_id");
+                    if (mid) pushUrl(`https://www.douyin.com/video/${mid}`);
+                } catch (_) {}
+            });
+        } catch (_) {}
+        try {
+            const html = document.documentElement.innerHTML || "";
+            let m;
+            const re = /\/video\/(\d{8,})/g;
+            while ((m = re.exec(html)) && urls.length < 80) {
+                pushUrl(`https://www.douyin.com/video/${m[1]}`);
+            }
+            const re2 =
+                /"(?:aweme_id|awemeId|groupId|group_id|itemId|item_id)"\s*:\s*"?(\d{8,})"?/g;
+            while ((m = re2.exec(html)) && urls.length < 80) {
+                pushUrl(`https://www.douyin.com/video/${m[1]}`);
+            }
+        } catch (_) {}
+
+        // 2) Prefer hard navigation (most reliable for jingxuan SPA)
+        if (urls.length) {
+            const next = urls[st.cardIndex % urls.length];
+            st.cardIndex++;
+            st.openedVideos.push(next);
+            if (st.openedVideos.length > 100) st.openedVideos.shift();
+            try {
+                location.assign(next);
+                return {
+                    ok: true,
+                    action: "navigate_video",
+                    href: next,
+                    method: "location.assign",
+                    pool: urls.length,
+                };
+            } catch (e) {
+                return { ok: false, action: "navigate_video", error: String(e), href: next };
+            }
+        }
+
+        // 3) Fallback: click visible cards
+        const candidates = [];
         const push = (el, score) => {
             if (!el) return;
             const r = el.getBoundingClientRect();
             if (r.width < 40 || r.height < 40) return;
             if (r.bottom < 0 || r.top > h) return;
-            candidates.push({ el, score: score + r.width * r.height * 0.0001 - Math.abs(r.top - h * 0.3) });
+            // skip left nav
+            if (r.left < 180 && r.width < 200) return;
+            candidates.push({
+                el,
+                score: score + r.width * r.height * 0.0001 - Math.abs(r.top - h * 0.35),
+            });
         };
 
         document.querySelectorAll('a[href*="/video/"]').forEach((a) => push(a, 1000));
-        document.querySelectorAll('[data-e2e="scroll-list"] li, [data-e2e="feed-item"], li').forEach((li) => {
-            if (li.querySelector("video, a[href*='/video/'], img")) push(li, 500);
+        document
+            .querySelectorAll(
+                '[data-e2e="scroll-list"] li, [data-e2e="feed-item"], [data-e2e*="video"] , ul li, [class*="card"], [class*="Card"], [class*="item"]'
+            )
+            .forEach((li) => {
+                if (li.querySelector("video, img, a[href*='/video/']")) push(li, 500);
+            });
+        document.querySelectorAll("video").forEach((v) => {
+            const r = v.getBoundingClientRect();
+            if (r.width > 80) push(v.closest("a, li, div") || v, 400);
         });
-        document.querySelectorAll("video").forEach((v) => push(v.closest("a, li, div") || v, 300));
 
         candidates.sort((a, b) => b.score - a.score);
         if (!candidates.length) {
-            return { ok: false, action: "click_card", error: "no_card" };
+            return { ok: false, action: "click_card", error: "no_card_no_url", pool: 0 };
         }
 
-        const target = candidates[0].el;
-        const href =
-            (target.getAttribute && target.getAttribute("href")) ||
-            (target.closest && target.closest("a") && target.closest("a").getAttribute("href")) ||
-            "";
-
-        // Prefer real navigation via location if we have href
-        if (href && /\/video\//.test(href)) {
-            try {
-                const u = new URL(href, location.origin);
-                location.assign(u.href);
-                return { ok: true, action: "navigate_href", href: u.href };
-            } catch (_) {}
-        }
-
-        // Hard click sequence
-        const el = target;
+        const pick = candidates[st.cardIndex % candidates.length];
+        st.cardIndex++;
+        const el = pick.el;
         try {
             el.scrollIntoView({ block: "center", behavior: "auto" });
         } catch (_) {}
-        const cx = (() => {
-            const r = el.getBoundingClientRect();
-            return { x: r.left + r.width / 2, y: r.top + r.height / 2 };
-        })();
+        const r = el.getBoundingClientRect();
+        const cx = r.left + r.width / 2;
+        const cy = r.top + r.height / 2;
         const opts = {
             bubbles: true,
             cancelable: true,
             view: window,
-            clientX: cx.x,
-            clientY: cx.y,
+            clientX: cx,
+            clientY: cy,
             button: 0,
             buttons: 1,
         };
@@ -864,30 +962,34 @@
             el.dispatchEvent(new MouseEvent("mousedown", opts));
         } catch (_) {}
         try {
-            el.dispatchEvent(new PointerEvent("pointerup", opts));
+            el.dispatchEvent(new PointerEvent("pointerup", Object.assign({}, opts, { buttons: 0 })));
         } catch (_) {}
         try {
-            el.dispatchEvent(new MouseEvent("mouseup", opts));
+            el.dispatchEvent(new MouseEvent("mouseup", Object.assign({}, opts, { buttons: 0 })));
         } catch (_) {}
         try {
-            el.dispatchEvent(new MouseEvent("click", opts));
+            el.dispatchEvent(new MouseEvent("click", Object.assign({}, opts, { buttons: 0 })));
         } catch (_) {}
         try {
             el.click();
         } catch (_) {}
-        // nested <a>
         const a = el.tagName === "A" ? el : el.querySelector && el.querySelector("a[href*='/video/']");
         if (a && a.href) {
             try {
                 a.click();
+            } catch (_) {}
+            try {
+                if (/\/video\//.test(a.href)) location.assign(a.href);
             } catch (_) {}
         }
 
         return {
             ok: true,
             action: "click_card",
-            href: href || "",
+            href: (a && a.href) || "",
             tag: el.tagName,
+            method: "click_fallback",
+            candidates: candidates.length,
         };
     }
 
@@ -1420,17 +1522,23 @@
             return r;
         };
 
-        // ——— Phase A: Feed 内滑动（推荐页有 video 时优先）———
+        // jingxuan/* = 卡片网格，必须打开 /video/，禁止只滚不进
+        const isJingxuanGrid = /\/jingxuan\//i.test(listUrl || "");
+
+        // ——— Phase A: 仅推荐竖滑流用 Feed 滑动；精选游戏等网格跳过 ———
         let hr = await harvest();
         const preferFeedSwipe =
-            (hr && (hr.mode === "feed" || hr.mode === "list") && (hr.videos || 0) > 0) ||
-            (/推荐/.test(navTab || "") && navTab !== "无") ||
-            /recommend=1/i.test(listUrl || "");
+            !isJingxuanGrid &&
+            hr &&
+            hr.mode === "feed" &&
+            ((hr.videos || 0) > 0 ||
+                (/推荐/.test(navTab || "") && navTab !== "无") ||
+                /recommend=1/i.test(listUrl || ""));
 
         if (preferFeedSwipe && !abortFn()) {
             const maxFeedSteps = Math.max(targetCount * 3, 12);
             onLog(
-                `Feed 滑动阶段：目标嗅探 ${targetCount}，最多 ${maxFeedSteps} 次上下滑（不先跳详情）`,
+                `Feed 滑动阶段：目标嗅探 ${targetCount}，最多 ${maxFeedSteps} 次上下滑`,
                 "info"
             );
             for (let s = 0; s < maxFeedSteps && !abortFn() && !timedOut(); s++) {
@@ -1450,12 +1558,15 @@
                     "info"
                 );
                 await sleep(Math.max(1500, intervalMs));
-                // 每 3 次补 harvest（更新队列备用）
                 if (s % 3 === 2) await harvest();
             }
+        } else if (isJingxuanGrid) {
+            onLog(
+                `精选网格模式（jingxuan）：跳过竖滑，改为滚动加载卡片并打开 /video/ 详情`,
+                "info"
+            );
         }
 
-        // 若 Feed 阶段已达标，直接结束浏览
         {
             const count = await getCount(tabId);
             if (count >= targetCount) {
@@ -1464,27 +1575,68 @@
                     visited: visited.size,
                     queuedLeft: queue.length,
                     count,
-                    phase: "feed_only",
+                    phase: preferFeedSwipe ? "feed_only" : "early",
                 };
             }
         }
 
-        // ——— Phase B: 打开 /video/ 详情补抓 ———
+        // ——— Phase B: 打开 /video/ 详情（精选主路径）———
         onLog("详情阶段：逐个打开 /video/ 链接补嗅探", "info");
-        if (queue.length < 2) {
-            for (let i = 0; i < 4 && queue.length < 2 && !abortFn() && !timedOut(); i++) {
-                await driver.scrollList(tabId);
-                await sleep(Math.max(600, intervalMs * 0.6));
-                await harvest();
+
+        // 网格：先多滚几屏 harvest，再点/导航
+        const loadRounds = isJingxuanGrid ? 8 : 4;
+        for (let i = 0; i < loadRounds && queue.length < Math.max(targetCount, 3) && !abortFn() && !timedOut(); i++) {
+            await driver.scrollList(tabId);
+            await sleep(Math.max(700, intervalMs * 0.55));
+            await harvest();
+            // 每轮尝试点/跳进一个未打开的卡片（不依赖 queue 也行）
+            if (isJingxuanGrid && queue.length < 2) {
+                const ck = await driver.clickCard(tabId);
+                onLog(
+                    `尝试进入视频: ${ck && (ck.action || ck.error)}` +
+                        (ck && ck.href ? ` · ${String(ck.href).slice(0, 70)}` : "") +
+                        (ck && ck.pool != null ? ` · pool=${ck.pool}` : ""),
+                    ck && ck.ok ? "ok" : "warn"
+                );
+                if (ck && ck.ok && /navigate|assign|href/i.test(String(ck.action || ck.method || ""))) {
+                    await waitComplete(tabId, 60000);
+                    await sleep(Math.max(1200, intervalMs));
+                    // 回到列表继续 harvest
+                    try {
+                        await chrome.tabs.update(tabId, { url: listUrl, active: true });
+                        await waitComplete(tabId, 60000);
+                        await sleep(1200);
+                    } catch (_) {}
+                    await harvest();
+                }
             }
         }
+
         if (!queue.length && !abortFn()) {
-            onLog("队列为空，尝试点击首个视频卡片进入…", "warn");
-            const ck = await driver.clickCard(tabId);
-            onLog(`click_card: ${JSON.stringify(ck).slice(0, 180)}`, ck && ck.ok ? "ok" : "warn");
-            await sleep(intervalMs);
-            await waitComplete(tabId);
-            await harvest();
+            onLog("队列仍空，强制 click/navigate 卡片…", "warn");
+            for (let t = 0; t < 5 && !queue.length && !abortFn(); t++) {
+                const ck = await driver.clickCard(tabId);
+                onLog(`click_card#${t + 1}: ${JSON.stringify(ck).slice(0, 200)}`, ck && ck.ok ? "ok" : "warn");
+                await sleep(intervalMs);
+                await waitComplete(tabId, 30000).catch(() => {});
+                await harvest();
+                if (ck && ck.ok) {
+                    try {
+                        const tab = await chrome.tabs.get(tabId);
+                        if (tab && tab.url && /\/video\//.test(tab.url)) {
+                            visited.add(tab.url.split("?")[0]);
+                            await sleep(intervalMs);
+                            await chrome.tabs.update(tabId, { url: listUrl, active: true });
+                            await waitComplete(tabId, 60000);
+                            await sleep(1000);
+                        }
+                    } catch (_) {}
+                    await harvest();
+                } else {
+                    await driver.scrollList(tabId);
+                    await sleep(800);
+                }
+            }
         }
 
         while (!abortFn() && !timedOut()) {

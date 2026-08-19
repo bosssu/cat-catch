@@ -73,21 +73,24 @@ gopeed_min_bytes: 5242880
 
 `/api/health` 中 `gopeed: true` 表示开关已开且找到了二进制。成功任务的 `warning` 字段为 `gopeed`。
 
-### Jasna 去马赛克（可选）
+### Jasna 去马赛克（本机中间件）
 
-视频入库时若客户端勾选 **「使用 jasna 去马赛克」**（管理库上传 / 浮动入库 / 录制 / 缓存捕捉；扩展选项里也有全局默认），服务端在入库成功后把任务加入 **串行 GPU 队列**，调用本机 [jasna](https://github.com/Kruk2/jasna) CLI：
+**默认 `jasna_enabled: false`**（弱主机 / N5095 不要在服务端跑 jasna）。
 
-```yaml
-jasna_enabled: true
-jasna_path: "D:/TMP/jasna-windows-nvidia-0.8.1/jasna.exe"
-jasna_codec: "h264"   # 输出 mp4，成功后替换原文件
-```
+去码请在本机运行 **[JasnaBridge](../../../../PROGRAMER_HAPPY/C#ORIGIN_PROJECTS/JasnaBridge)**（`http://127.0.0.1:8791`）：
 
-- 同一时刻只跑 **1** 个 jasna 进程；后续任务 `queued` 排队。
-- **独立控制台**：`jasna.exe` 在**新开的黑窗口**里跑（默认**最小化**，任务栏可点开看 tqdm），与 LocalMediaWeb **无管道连接**，避免拖死媒体库 API。
-- API 侧进度为粗略估计（输出文件体积）；失败保留原片。
-- 健康检查：`/api/health` 的 `jasna: true` 表示 enabled 且找到了二进制。
-- 手动：`POST /api/media/{id}/jasna`。
+1. FFmpegBridge 推库勾选「使用 jasna 去码」→ 提交路径到中间件  
+2. 中间件串行调用 [jasna](https://github.com/Kruk2/jasna) → 成品再 `POST /api/upload`（`use_jasna=0`）
+
+若仍向 LMW 传 `use_jasna=1` 且服务端已关闭 jasna，入库成功但响应带 `jasna_skipped: true`。
+
+仅本机一体化调试时可设 `jasna_enabled: true` 恢复旧服务端队列。
+
+迁机 / 局域网新主机：见 **`docs/deploy-lan-migrate.md`**（完整拷贝清单与配置）。弱主机并发与 QSV 另见 `docs/deploy-n5095.md`。
+
+### 普通视频转码
+
+上传 `remux=1` 时仍优先 **stream copy + faststart**；需要重编码时 `ffmpeg_hw_encode: auto` 优先 **h264_qsv**，失败回退 libx264。
 
 ### 手机打不开、电脑要刷新两遍
 
@@ -149,7 +152,8 @@ jasna_codec: "h264"   # 输出 mp4，成功后替换原文件
 可调：`config/settings.yaml` 中 `feed_*`（见 `settings.example.yaml`）。
 
 - `POST /api/media/{id}/like` 切换喜欢  
-- `POST /api/media/{id}/interact` `{event: view|dwell|skip, dwell_ms?}`  
+- `POST /api/media/{id}/interact` `{event: view|dwell|skip|progress|ended, dwell_ms?, progress?, duration_sec?}`  
+
 - `DELETE /api/media/{id}` 删文件+索引  
 
 ### 手机 Feed：单例播放器与有声

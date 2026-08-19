@@ -4,11 +4,13 @@
 const LMW = {
     defaults: {
         lmwEnable: true,
-        lmwURL: "http://127.0.0.1:8790",
+        lmwURL: "http://192.168.10.84:8790",
         lmwToken: "",
         lmwDefaultCategory: "default",
         lmwAutoFallback: true,
         lmwUseJasna: false,
+        /** 本机 JasnaBridge（去码中间件，默认 8791） */
+        jasnaBridgeURL: "http://127.0.0.1:8791",
     },
     /** No hard cap on tags per item (server normalize also unlimited). */
     MAX_TAGS: 0,
@@ -37,6 +39,15 @@ const LMW = {
     baseUrl() {
         const u = (G.lmwURL || this.defaults.lmwURL || "").replace(/\/+$/, "");
         return u || this.defaults.lmwURL;
+    },
+
+    jasnaBridgeBaseUrl() {
+        const g =
+            typeof G !== "undefined" && G.jasnaBridgeURL
+                ? G.jasnaBridgeURL
+                : this.defaults.jasnaBridgeURL;
+        const u = (g || "").replace(/\/+$/, "");
+        return u || this.defaults.jasnaBridgeURL;
     },
 
     headers(json = true) {
@@ -96,7 +107,7 @@ const LMW = {
             items,
             tags: this.applyRestrictedTag(tags, restricted),
         };
-        if (opts && opts.use_jasna) body.use_jasna = true;
+        // use_jasna no longer sent to LMW — demosaic via local JasnaBridge / FFmpegBridge
         if (restricted) body.restricted = true;
         return this.request("/api/ingest", {
             method: "POST",
@@ -410,7 +421,6 @@ const LMW = {
         );
         const tags = this.applyRestrictedTag(meta.tags || [], restricted);
         if (tags.length) fd.append("tags", JSON.stringify(tags));
-        if (meta.use_jasna) fd.append("use_jasna", "1");
         if (restricted) fd.append("restricted", "1");
         const name = meta.filename || "upload.bin";
         fd.append("file", blob, name);
@@ -426,6 +436,395 @@ const LMW = {
             throw new Error(`${text || res.statusText}`);
         }
         return res.json();
+    },
+
+    /**
+     * Health-check local JasnaBridge middleware (not LMW server jasna).
+     * @returns {Promise<{ok:boolean, jasna?:boolean, lmw_reachable?:boolean, message?:string, raw?:object}>}
+     */
+    async jasnaBridgeHealth() {
+        const base = this.jasnaBridgeBaseUrl();
+        try {
+            const res = await fetch(base + "/api/health", { method: "GET" });
+            const text = await res.text().catch(() => "");
+            let raw = null;
+            try {
+                raw = text ? JSON.parse(text) : null;
+            } catch (e) {
+                raw = null;
+            }
+            if (!res.ok) {
+                return {
+                    ok: false,
+                    message: `JasnaBridge HTTP ${res.status}: ${(text || res.statusText).slice(0, 160)}`,
+                    raw,
+                };
+            }
+            if (raw && raw.jasna === false) {
+                return {
+                    ok: false,
+                    jasna: false,
+                    lmw_reachable: !!raw.lmw_reachable,
+                    message: "JasnaBridge 已启动但未找到 jasna.exe（检查中间件 config.yaml）",
+                    raw,
+                };
+            }
+            return {
+                ok: true,
+                jasna: raw ? raw.jasna !== false : true,
+                lmw_reachable: !!(raw && raw.lmw_reachable),
+                raw,
+            };
+        } catch (e) {
+            return {
+                ok: false,
+                message: `无法连接 JasnaBridge（${base}）：${(e && e.message) || e}`,
+            };
+        }
+    },
+
+    /**
+     * Enqueue demosaic on local JasnaBridge via multipart file upload.
+     * Bridge runs jasna then POSTs finished video to LMW.
+     * meta.source_media_id: LMW item already saved (m3u8 clip); kept if jasna fails,
+     * deleted by bridge after demosaic succeeds.
+     */
+    async enqueueJasnaBridgeBlob(blob, meta = {}) {
+        if (!blob || !(blob.size > 0)) throw new Error("empty blob for JasnaBridge");
+        const fd = new FormData();
+        const restricted = !!(
+            meta.restricted === true ||
+            meta.restricted === 1 ||
+            meta.restricted === "1"
+        );
+        const tags = this.applyRestrictedTag(meta.tags || [], restricted);
+        fd.append("title", meta.title || "");
+        fd.append("category", meta.category || "default");
+        if (tags.length) fd.append("tags", JSON.stringify(tags));
+        if (restricted) fd.append("restricted", "1");
+        const srcMid = meta.source_media_id != null ? parseInt(meta.source_media_id, 10) : 0;
+        if (srcMid > 0) fd.append("source_media_id", String(srcMid));
+        const name = meta.filename || `${(meta.title || "video").slice(0, 40)}.mp4`;
+        fd.append("file", blob, name);
+        const res = await fetch(this.jasnaBridgeBaseUrl() + "/api/jobs", {
+            method: "POST",
+            body: fd,
+        });
+        const text = await res.text().catch(() => "");
+        let data = null;
+        try {
+            data = text ? JSON.parse(text) : null;
+        } catch (e) {
+            data = null;
+        }
+        if (!res.ok) {
+            throw new Error(
+                (data && (data.detail || data.message)) ||
+                    text ||
+                    res.statusText ||
+                    "JasnaBridge enqueue failed"
+            );
+        }
+        return data || {};
+    },
+
+    async getJasnaBridgeJob(jobId) {
+        const res = await fetch(this.jasnaBridgeBaseUrl() + `/api/jobs/${jobId}`);
+        if (!res.ok) {
+            const text = await res.text().catch(() => "");
+            throw new Error(`${res.status} ${text || res.statusText}`);
+        }
+        return res.json();
+    },
+
+    /**
+     * Poll JasnaBridge jobs until terminal status.
+     */
+    async waitJasnaBridgeJobs(jobIds, { timeoutMs = 3600000, intervalMs = 2000, onUpdate } = {}) {
+        const ids = [...new Set((jobIds || []).map(Number).filter((n) => n > 0))];
+        if (!ids.length) return [];
+        const start = Date.now();
+        const done = new Map();
+        while (Date.now() - start < timeoutMs) {
+            for (const id of ids) {
+                if (done.has(id)) continue;
+                try {
+                    const j = await this.getJasnaBridgeJob(id);
+                    if (
+                        j &&
+                        ["done", "failed", "cancelled", "done_no_jasna"].includes(j.status)
+                    ) {
+                        done.set(id, j);
+                    } else if (j && onUpdate) {
+                        onUpdate(
+                            `jasna#${id} ${j.status || "?"} ${Math.round(j.progress || 0)}%`,
+                            j
+                        );
+                    }
+                } catch (e) {
+                    done.set(id, {
+                        id,
+                        status: "failed",
+                        message: String((e && e.message) || e),
+                    });
+                }
+            }
+            if (done.size >= ids.length) break;
+            if (onUpdate) {
+                const pending = ids.filter((id) => !done.has(id));
+                onUpdate(
+                    `JasnaBridge 排队中 ${done.size}/${ids.length}` +
+                        (pending.length ? ` · 待 #${pending.join(",")}` : ""),
+                    [...done.values()]
+                );
+            }
+            await new Promise((r) => setTimeout(r, intervalMs));
+        }
+        for (const id of ids) {
+            if (!done.has(id)) {
+                done.set(id, { id, status: "failed", message: "timeout waiting JasnaBridge" });
+            }
+        }
+        return ids.map((id) => done.get(id));
+    },
+
+    /**
+     * Download media file bytes from LMW (after server m3u8 job etc.).
+     */
+    async fetchMediaFileBlob(mediaId) {
+        const res = await fetch(this.baseUrl() + `/api/media/${mediaId}/file`, {
+            headers: this.headers(false),
+        });
+        if (!res.ok) {
+            const text = await res.text().catch(() => "");
+            throw new Error(`download media ${mediaId}: ${text || res.statusText}`);
+        }
+        return res.blob();
+    },
+
+    /**
+     * Fetch remote item to Blob (client-side).
+     */
+    async clientFetchBlob(item) {
+        const headers = item.headers || {};
+        const res = await fetch(item.url, { headers, credentials: "omit" });
+        if (!res.ok) throw new Error(`client fetch HTTP ${res.status}`);
+        const blob = await res.blob();
+        let ext = "bin";
+        const ct = res.headers.get("content-type") || "";
+        if (ct.includes("png")) ext = "png";
+        else if (ct.includes("jpeg") || ct.includes("jpg")) ext = "jpg";
+        else if (ct.includes("gif")) ext = "gif";
+        else if (ct.includes("webp")) ext = "webp";
+        else if (ct.includes("mp4")) ext = "mp4";
+        else if (ct.includes("webm")) ext = "webm";
+        else {
+            const m = String(item.url || "").match(/\.([a-z0-9]{2,5})(?:\?|$)/i);
+            if (m) ext = m[1].toLowerCase();
+        }
+        return {
+            blob,
+            filename: `${String(item.title || "media").slice(0, 40)}.${ext}`,
+            ext,
+        };
+    },
+
+    /** True if item has a meaningful time-range clip. */
+    itemHasClip(it) {
+        if (!it) return false;
+        const s = it.start_sec;
+        const e = it.end_sec;
+        const hasStart = s != null && s !== "" && !Number.isNaN(+s) && +s > 0;
+        const hasEnd = e != null && e !== "" && !Number.isNaN(+e) && +e > 0;
+        // start=0 + end set is still a clip
+        const startZero = s != null && s !== "" && !Number.isNaN(+s) && +s === 0 && hasEnd;
+        return hasStart || hasEnd || startZero;
+    },
+
+    /** Human suffix for titles, e.g. [t=240-360] */
+    clipTitleSuffix(it) {
+        if (!this.itemHasClip(it)) return "";
+        const s = Math.max(0, Math.floor(+(it.start_sec || 0)));
+        const e =
+            it.end_sec != null && it.end_sec !== "" && +it.end_sec > 0
+                ? Math.floor(+it.end_sec)
+                : null;
+        return e == null ? ` [t=${s}-end]` : ` [t=${s}-${e}]`;
+    },
+
+    /**
+     * LMW download/clip → fetch file → JasnaBridge.
+     * Intermediate stays in the library until demosaic succeeds (bridge deletes it).
+     * If jasna fails, uncoded item remains — that is intentional.
+     * Used for m3u8/dash and for any video with start_sec/end_sec.
+     */
+    async _lmwPrepareThenJasnaBridge(it, cat, sharedTags, useRestricted, report) {
+        const baseTitle = it.title || "media";
+        const title = baseTitle + this.clipTitleSuffix(it);
+        // Ingest fully (tags/restricted): this IS the library item if jasna fails
+        const one = await this.pushItems([{ ...it, title }], cat, {
+            tags: sharedTags,
+            restricted: useRestricted,
+            wait: true,
+        });
+        const jobs = one.jobs || [];
+        const okJob = jobs.find(
+            (j) =>
+                j &&
+                j.status === "success" &&
+                j.media_id &&
+                !String(j.error_message || "").includes("content_duplicate")
+        );
+        if (!okJob || !okJob.media_id) {
+            const why =
+                (jobs[0] && (jobs[0].error_message || jobs[0].status)) ||
+                "download/clip failed";
+            throw new Error(String(why).slice(0, 200));
+        }
+        const mid = okJob.media_id;
+        if (report) report(`已入库 media#${mid}（未去码）→ JasnaBridge…`);
+        const blob = await this.fetchMediaFileBlob(mid);
+        const enq = await this.enqueueJasnaBridgeBlob(blob, {
+            title,
+            tags: sharedTags,
+            restricted: useRestricted,
+            category: cat,
+            filename: `${String(title).slice(0, 60)}.mp4`,
+            source_media_id: mid,
+        });
+        // Do NOT delete intermediate here. JasnaBridge deletes it only after demosaic OK.
+        return { enq, mid, title, one };
+    },
+
+    /**
+     * Ingest with demosaic: queue finished files on local JasnaBridge (not LMW server jasna).
+     * - image/gif/audio: normal LMW upload/ingest (no jasna)
+     * - m3u8/dash OR any item with time-range clip: LMW download/clip first → JasnaBridge
+     * - direct full video (no clip): client fetch → JasnaBridge multipart
+     */
+    async pushItemsViaJasnaBridge(
+        items,
+        category,
+        { tags, restricted, onProgress, waitBridge = false } = {}
+    ) {
+        const cat = category || (typeof G !== "undefined" && G.lmwDefaultCategory) || "default";
+        const useRestricted =
+            restricted === true ||
+            (typeof G !== "undefined" && G.lmwRestricted === true);
+        const sharedTags = this.applyRestrictedTag(tags || [], useRestricted);
+
+        const hb = await this.jasnaBridgeHealth();
+        if (!hb.ok) {
+            throw new Error(hb.message || "JasnaBridge unavailable");
+        }
+
+        let success = 0;
+        let failed = 0;
+        let duplicates = 0;
+        let contentDuplicates = 0;
+        let fallbackOk = 0;
+        const bridgeJobIds = [];
+        const errors = [];
+
+        const report = (msg) => {
+            if (onProgress) onProgress({ message: msg });
+        };
+
+        for (let i = 0; i < items.length; i++) {
+            const it = { ...(items[i] || {}) };
+            if (sharedTags.length && (!it.tags || !it.tags.length)) it.tags = sharedTags;
+            if (useRestricted) it.restricted = true;
+            const mtype = String(it.media_type || "").toLowerCase();
+            const title = (it.title || "media") + this.clipTitleSuffix(it);
+            report(`JasnaBridge ${i + 1}/${items.length} · ${title.slice(0, 48)}`);
+
+            try {
+                // Non-video: normal path
+                if (mtype === "image" || mtype === "gif" || mtype === "audio") {
+                    const one = await this.pushItems([it], cat, {
+                        tags: sharedTags,
+                        restricted: useRestricted,
+                        wait: true,
+                    });
+                    success += one.success || 0;
+                    failed += one.failed || 0;
+                    duplicates += one.duplicates || 0;
+                    contentDuplicates += one.contentDuplicates || 0;
+                    fallbackOk += one.fallbackOk || 0;
+                    continue;
+                }
+
+                // Streams OR time-range clips: must use LMW first (clip/HLS), never full-file×N
+                const needLmwFirst =
+                    mtype === "m3u8" ||
+                    mtype === "dash" ||
+                    this.itemHasClip(it);
+
+                if (needLmwFirst) {
+                    try {
+                        const { enq, one } = await this._lmwPrepareThenJasnaBridge(
+                            it,
+                            cat,
+                            sharedTags,
+                            useRestricted,
+                            report
+                        );
+                        duplicates += one.duplicates || 0;
+                        contentDuplicates += one.contentDuplicates || 0;
+                        if (enq && enq.job_id) bridgeJobIds.push(enq.job_id);
+                        success++;
+                    } catch (e) {
+                        failed++;
+                        errors.push(`${title}: ${e.message || e}`);
+                    }
+                    continue;
+                }
+
+                // Direct full video URL/blob (no clip): fetch then JasnaBridge
+                let blob;
+                let filename;
+                if (it.blob instanceof Blob) {
+                    blob = it.blob;
+                    filename = it.filename || `${String(title).slice(0, 40)}.mp4`;
+                } else {
+                    const fetched = await this.clientFetchBlob(it);
+                    blob = fetched.blob;
+                    filename = fetched.filename;
+                }
+                const enq = await this.enqueueJasnaBridgeBlob(blob, {
+                    title,
+                    tags: sharedTags,
+                    restricted: useRestricted,
+                    category: cat,
+                    filename,
+                });
+                if (enq.job_id) bridgeJobIds.push(enq.job_id);
+                success++;
+            } catch (e) {
+                failed++;
+                errors.push(`${title}: ${e.message || e}`);
+                console.warn("pushItemsViaJasnaBridge item failed", e);
+            }
+        }
+
+        let bridgeJobs = [];
+        if (waitBridge && bridgeJobIds.length) {
+            bridgeJobs = await this.waitJasnaBridgeJobs(bridgeJobIds, {
+                onUpdate: (t) => report(t),
+            });
+        }
+
+        return {
+            success,
+            failed,
+            duplicates,
+            contentDuplicates,
+            fallbackOk,
+            bridgeJobIds,
+            bridgeJobs,
+            errors,
+            jobs: [],
+        };
     },
 
     getJasnaJob(id) {
@@ -444,7 +843,7 @@ const LMW = {
     },
 
     /**
-     * Poll jasna jobs for given media ids; call onUpdate(statusText, jobs).
+     * Poll LMW-server jasna jobs (legacy; prefer JasnaBridge).
      * Resolves when all related jobs finished or timeout.
      */
     async waitJasnaForMediaIds(mediaIds, { timeoutMs = 3600000, intervalMs = 2000, onUpdate } = {}) {
@@ -501,6 +900,25 @@ const LMW = {
         if (!path) return "";
         if (/^https?:\/\//i.test(path)) return path;
         return this.baseUrl() + (path.startsWith("/") ? path : "/" + path);
+    },
+
+    /**
+     * Media/thumb URL with ?token= for <video>/<img>/<audio> (cannot set X-LMW-Token).
+     * Prefer this over full-file fetch+blob for preview — Range streaming, avoids ERR_FAILED on large files.
+     */
+    mediaUrlWithToken(pathOrUrl) {
+        const url = this.absUrl(pathOrUrl);
+        if (!url) return "";
+        const token = (typeof G !== "undefined" && G.lmwToken ? String(G.lmwToken) : "").trim();
+        if (!token) return url;
+        try {
+            const u = new URL(url);
+            if (!u.searchParams.get("token")) u.searchParams.set("token", token);
+            return u.href;
+        } catch (e) {
+            const sep = url.includes("?") ? "&" : "?";
+            return url + sep + "token=" + encodeURIComponent(token);
+        }
     },
 
     listMedia(params = {}, options = {}) {
@@ -593,6 +1011,66 @@ const LMW = {
         });
     },
 
+    /**
+     * Concatenate library media ids in order (server ffmpeg) into one video.
+     * @param {{ ids: number[], title?: string, tags?: string[], delete_sources?: boolean, use_jasna?: boolean, restricted?: boolean }} body
+     */
+    concatMediaLibrary(body = {}) {
+        return this.request("/api/media/concat", {
+            method: "POST",
+            headers: this.headers(true),
+            body: JSON.stringify({
+                ids: body.ids || [],
+                title: body.title || "",
+                tags: body.tags || [],
+                delete_sources: !!body.delete_sources,
+                use_jasna: !!body.use_jasna,
+                restricted: !!body.restricted,
+            }),
+        });
+    },
+
+    /**
+     * Upload multiple progressive video blobs; server ffmpeg-concats into one library item.
+     * @param {Blob[]} blobs ordered parts
+     * @param {{ title?: string, source_url?: string, tags?: string[], restricted?: boolean, use_jasna?: boolean, filenames?: string[] }} [meta]
+     */
+    async uploadConcatBlobs(blobs, meta = {}) {
+        const list = (blobs || []).filter((b) => b && b.size > 32);
+        if (!list.length) throw new Error("no blobs for concat");
+        const fd = new FormData();
+        fd.append("category", meta.category || "default");
+        fd.append("title", meta.title || "");
+        fd.append("source_url", meta.source_url || meta.url || "");
+        const restricted = !!(
+            meta.restricted === true ||
+            meta.restricted === 1 ||
+            meta.restricted === "1"
+        );
+        const tags = this.applyRestrictedTag(meta.tags || [], restricted);
+        if (tags.length) fd.append("tags", JSON.stringify(tags));
+        if (restricted) fd.append("restricted", "1");
+        if (meta.use_jasna) fd.append("use_jasna", "1");
+        list.forEach((blob, i) => {
+            const name =
+                (meta.filenames && meta.filenames[i]) ||
+                `part_${String(i + 1).padStart(2, "0")}.mp4`;
+            fd.append("files", blob, name);
+        });
+        const headers = this.headers(false);
+        delete headers["Content-Type"];
+        const res = await fetch(this.baseUrl() + "/api/upload-concat", {
+            method: "POST",
+            headers,
+            body: fd,
+        });
+        if (!res.ok) {
+            const text = await res.text().catch(() => "");
+            throw new Error(`${text || res.statusText}`);
+        }
+        return res.json();
+    },
+
     listTags(params = {}) {
         const q = new URLSearchParams();
         if (params.q) q.set("q", params.q);
@@ -627,6 +1105,17 @@ const LMW = {
             method: "POST",
             headers: this.headers(true),
             body: JSON.stringify({ dry_run: !!opts.dry_run }),
+        });
+    },
+
+    /**
+     * Force H.264/AAC re-encode on server and replace library file in place.
+     * Long-running for large videos (no client timeout set; browser may still limit).
+     */
+    reencodeMedia(mediaId) {
+        return this.request(`/api/media/${Number(mediaId)}/reencode`, {
+            method: "POST",
+            headers: this.headers(false),
         });
     },
 
@@ -717,13 +1206,37 @@ const LMW = {
         if (!options.force && this._blobCache.has(url)) {
             return this._blobCache.get(url);
         }
-        const res = await fetch(url, {
-            headers: this.headers(false),
-            signal: options.signal,
-            cache: "no-store",
-        });
-        if (!res.ok) throw new Error(`${res.status} ${res.statusText}`);
+        let res;
+        try {
+            res = await fetch(url, {
+                headers: this.headers(false),
+                signal: options.signal,
+                cache: "no-store",
+            });
+        } catch (netErr) {
+            // Fallback: token query URL (same as native media) then fetch without custom headers
+            const tokUrl = this.mediaUrlWithToken(pathOrUrl);
+            try {
+                res = await fetch(tokUrl, {
+                    signal: options.signal,
+                    cache: "no-store",
+                    credentials: "omit",
+                });
+            } catch (e2) {
+                throw new Error(
+                    `fetch failed ${url}: ${(netErr && netErr.message) || netErr}` +
+                        (e2 && e2.message ? ` | token-url: ${e2.message}` : "")
+                );
+            }
+        }
+        if (!res.ok) {
+            const text = await res.text().catch(() => "");
+            throw new Error(
+                `${res.status} ${text || res.statusText || ""}`.trim().slice(0, 200)
+            );
+        }
         const blob = await res.blob();
+        if (!blob || blob.size < 1) throw new Error("empty media body");
         const obj = URL.createObjectURL(blob);
         const prev = this._blobCache.get(url);
         if (prev) URL.revokeObjectURL(prev);
@@ -857,10 +1370,10 @@ const LMW = {
       <span class="sub">打上「限制级」标签；浏览端默认隐藏，可在设置中开启</span>
     </span>
   </label>
-  <label class="jasna-row" title="仅视频；成功后替换为 h264/mp4；多任务串行排队">
+  <label class="jasna-row" title="提交本机 JasnaBridge 去码后再入库（需中间件 8791 运行）">
     <input type="checkbox" id="lmwDlgUseJasna" />
     <span>使用 jasna 去马赛克
-      <span class="sub">入库成功后服务器调用本机 jasna（GPU 串行队列）</span>
+      <span class="sub">本机 JasnaBridge 串行去码，不占用 LMW 服务端</span>
     </span>
   </label>
   </div>
@@ -1127,18 +1640,8 @@ const LMW = {
                 }
             });
 
-            const jasnaCb = root.querySelector("#lmwDlgUseJasna");
             const restrictedCb = root.querySelector("#lmwDlgRestricted");
-            if (jasnaCb) {
-                try {
-                    const pref =
-                        (typeof G !== "undefined" && G.lmwUseJasna === true) ||
-                        false;
-                    jasnaCb.checked = !!pref;
-                } catch (e) {
-                    jasnaCb.checked = false;
-                }
-            }
+            const jasnaCb = root.querySelector("#lmwDlgUseJasna");
             if (restrictedCb) {
                 try {
                     restrictedCb.checked = !!(
@@ -1148,18 +1651,20 @@ const LMW = {
                     restrictedCb.checked = false;
                 }
             }
-            function readUseJasna() {
-                return !!(jasnaCb && jasnaCb.checked);
+            if (jasnaCb) {
+                try {
+                    jasnaCb.checked = !!(
+                        typeof G !== "undefined" && G.lmwUseJasna === true
+                    );
+                } catch (e) {
+                    jasnaCb.checked = false;
+                }
             }
             function readRestricted() {
                 return !!(restrictedCb && restrictedCb.checked);
             }
-            function persistUseJasna(on) {
-                try {
-                    if (typeof G !== "undefined") G.lmwUseJasna = on;
-                    chrome.storage.sync.set({ lmwUseJasna: on });
-                    chrome.storage.local.set({ lmwUseJasna: on });
-                } catch (e) { /* ignore */ }
+            function readUseJasna() {
+                return !!(jasnaCb && jasnaCb.checked);
             }
             function persistRestricted(on) {
                 try {
@@ -1168,14 +1673,21 @@ const LMW = {
                     chrome.storage.local.set({ lmwRestricted: on });
                 } catch (e) { /* ignore */ }
             }
-            if (jasnaCb) {
-                jasnaCb.addEventListener("change", () => {
-                    persistUseJasna(!!jasnaCb.checked);
-                });
+            function persistUseJasna(on) {
+                try {
+                    if (typeof G !== "undefined") G.lmwUseJasna = on;
+                    chrome.storage.sync.set({ lmwUseJasna: on });
+                    chrome.storage.local.set({ lmwUseJasna: on });
+                } catch (e) { /* ignore */ }
             }
             if (restrictedCb) {
                 restrictedCb.addEventListener("change", () => {
                     persistRestricted(!!restrictedCb.checked);
+                });
+            }
+            if (jasnaCb) {
+                jasnaCb.addEventListener("change", () => {
+                    persistUseJasna(!!jasnaCb.checked);
                 });
             }
 
@@ -1197,10 +1709,10 @@ const LMW = {
             };
             root.querySelector("#lmwDlgSkip").onclick = (e) => {
                 e.stopPropagation();
-                const uj = readUseJasna();
                 const rs = readRestricted();
-                persistUseJasna(uj);
+                const uj = readUseJasna();
                 persistRestricted(rs);
+                persistUseJasna(uj);
                 finish({ ok: true, tags: [], use_jasna: uj, restricted: rs });
             };
             root.querySelector("#lmwDlgOk").onclick = (e) => {
@@ -1220,10 +1732,10 @@ const LMW = {
                     return nd || t;
                 });
                 tags = self.normalizeTags(tags);
-                const uj = readUseJasna();
                 const rs = readRestricted();
-                persistUseJasna(uj);
+                const uj = readUseJasna();
                 persistRestricted(rs);
+                persistUseJasna(uj);
                 finish({ ok: true, tags, use_jasna: uj, restricted: rs });
             };
             root.addEventListener("click", (e) => {
@@ -1673,7 +2185,6 @@ const LMW = {
         );
         const tags = this.applyRestrictedTag(meta.tags || [], restricted);
         if (tags.length) fd.append("tags", JSON.stringify(tags));
-        if (meta.use_jasna) fd.append("use_jasna", "1");
         if (restricted) fd.append("restricted", "1");
         const base = (meta.filename || meta.title || "merge").replace(/\.[^.]+$/, "");
         fd.append("video", videoBlob, `${base}_video.mp4`);
@@ -1715,27 +2226,71 @@ const LMW = {
         return row;
     },
 
+    /**
+     * Poll job ids until terminal. onProgress(job, meta) — job is last polled job;
+     * meta: { phase, total, done, pending, active, finished }.
+     * Callers that only use the first arg stay compatible.
+     */
     async waitJobs(jobIds, { timeoutMs = 600000, onProgress } = {}) {
-        const pending = new Set(jobIds);
+        const ids = (jobIds || []).filter((id) => id != null);
+        const pending = new Set(ids);
         const results = [];
+        const lastById = new Map();
         const start = Date.now();
+        const total = ids.length;
+
+        const emit = (job, phase) => {
+            if (!onProgress) return;
+            const active = [...pending]
+                .map((id) => lastById.get(id))
+                .filter(Boolean);
+            try {
+                onProgress(job, {
+                    phase: phase || "wait",
+                    total,
+                    done: results.length,
+                    pending: pending.size,
+                    active,
+                    finished: results.slice(),
+                });
+            } catch (e) {
+                console.warn("LMW waitJobs onProgress", e);
+            }
+        };
+
         while (pending.size && Date.now() - start < timeoutMs) {
             for (const id of [...pending]) {
                 try {
                     const job = await this.getJob(id);
-                    if (onProgress) onProgress(job);
+                    if (job && job.id == null) job.id = id;
+                    lastById.set(id, job);
+                    emit(job, "wait");
                     if (["queued", "running"].includes(job.status)) continue;
                     pending.delete(id);
                     results.push(job);
+                    emit(job, "job_done");
                 } catch (e) {
                     pending.delete(id);
-                    results.push({ id, status: "failed_network", error_message: String(e) });
+                    const failed = {
+                        id,
+                        status: "failed_network",
+                        error_message: String(e && e.message ? e.message : e),
+                    };
+                    lastById.set(id, failed);
+                    results.push(failed);
+                    emit(failed, "job_done");
                 }
             }
             if (pending.size) await new Promise((r) => setTimeout(r, 800));
         }
         for (const id of pending) {
-            results.push({ id, status: "failed_network", error_message: "timeout waiting job" });
+            const failed = {
+                id,
+                status: "failed_network",
+                error_message: "timeout waiting job",
+            };
+            results.push(failed);
+            emit(failed, "timeout");
         }
         return results;
     },
@@ -1753,9 +2308,6 @@ const LMW = {
         else if (ct.includes("webp")) ext = "webp";
         else if (ct.includes("mp4")) ext = "mp4";
         else if (ct.includes("webm")) ext = "webm";
-        const useJasna =
-            item.use_jasna === true ||
-            (typeof G !== "undefined" && G.lmwUseJasna === true);
         const restricted =
             item.restricted === true ||
             (typeof G !== "undefined" && G.lmwRestricted === true);
@@ -1766,52 +2318,166 @@ const LMW = {
             media_type: item.media_type || "",
             filename: `${(item.title || "media").slice(0, 40)}.${ext}`,
             tags: item.tags || [],
-            use_jasna: !!useJasna,
             restricted: !!restricted,
         });
     },
 
+    /** Short label for progress lines (title + host). */
+    _itemProgressLabel(it, index, total) {
+        const n = total > 1 ? `${(index != null ? index : 0) + 1}/${total} ` : "";
+        const title = String((it && (it.title || it.name)) || "media")
+            .replace(/\s+/g, " ")
+            .slice(0, 40);
+        let host = "";
+        try {
+            host = it && it.url ? new URL(String(it.url)).host : "";
+        } catch (_) {
+            host = "";
+        }
+        const mt = String((it && it.media_type) || "").toLowerCase();
+        const typeBit = mt ? ` · ${mt}` : "";
+        const hostBit = host ? ` @${host}` : "";
+        return `${n}«${title}»${typeBit}${hostBit}`;
+    },
+
+    _jobProgressLabel(job, items) {
+        const title = String((job && (job.title || job.name)) || "").replace(/\s+/g, " ").slice(0, 40);
+        let host = "";
+        const url = (job && job.url) || "";
+        try {
+            if (url) host = new URL(String(url)).host;
+        } catch (_) {}
+        if (!title && items && items.length) {
+            const hit =
+                (url && items.find((it) => it && it.url === url)) ||
+                null;
+            if (hit) return this._itemProgressLabel(hit, items.indexOf(hit), items.length);
+        }
+        const idBit = job && job.id != null ? `#${job.id}` : "";
+        const hostBit = host ? ` @${host}` : "";
+        const titleBit = title ? ` «${title}»` : "";
+        return `${idBit}${titleBit}${hostBit}`.trim() || "job";
+    },
+
     /**
      * Ingest items; optionally fallback upload on auth/network failure.
+     * onProgress(jobOrNull, meta) — meta.message is preferred for UI status bars.
      */
     async pushItems(items, category, { autoFallback, wait = true, onProgress, tags, use_jasna, restricted } = {}) {
         const cat = category || (typeof G !== "undefined" && G.lmwDefaultCategory) || "default";
         const fallback = autoFallback ?? (typeof G !== "undefined" ? G.lmwAutoFallback : true) ?? true;
-        const useJasna =
-            use_jasna === true ||
-            (typeof G !== "undefined" && G.lmwUseJasna === true);
         const useRestricted =
             restricted === true ||
             (typeof G !== "undefined" && G.lmwRestricted === true);
         const sharedTags = this.applyRestrictedTag(tags || [], useRestricted);
+        const list = items || [];
+        const total = list.length;
         if (sharedTags.length) {
-            for (const it of items) {
+            for (const it of list) {
                 if (!it.tags || !it.tags.length) it.tags = sharedTags;
                 else if (useRestricted) it.tags = this.applyRestrictedTag(it.tags, true);
             }
         }
-        if (useJasna) {
-            for (const it of items) {
-                if (it.use_jasna == null) it.use_jasna = true;
-            }
-        }
         if (useRestricted) {
-            for (const it of items) {
+            for (const it of list) {
                 it.restricted = true;
             }
         }
-        const ingestRes = await this.ingest(cat, items, sharedTags, {
-            use_jasna: !!useJasna,
+
+        const report = (message, extra = {}) => {
+            if (!onProgress) return;
+            try {
+                onProgress(extra.job || null, {
+                    phase: extra.phase || "info",
+                    total: extra.total != null ? extra.total : total,
+                    done: extra.done != null ? extra.done : 0,
+                    pending: extra.pending != null ? extra.pending : 0,
+                    message,
+                    ...extra,
+                });
+            } catch (e) {
+                console.warn("LMW pushItems onProgress", e);
+            }
+        };
+
+        report(`提交入库 ${total} 项…`, { phase: "submit" });
+
+        const ingestRes = await this.ingest(cat, list, sharedTags, {
             restricted: !!useRestricted,
         });
         const jobIds = ingestRes.job_ids || [];
+        const dupN = (ingestRes.duplicate_media_ids || []).length;
+        const accepted = ingestRes.accepted != null ? ingestRes.accepted : jobIds.length;
+
         if (!wait) {
-            return { ...ingestRes, jobs: [], fallbackOk: 0, failed: 0, success: 0, pending: jobIds.length };
+            report(
+                `已提交 ${jobIds.length} 个任务` +
+                    (dupN ? ` · 链接重复 ${dupN}` : "") +
+                    `（共 ${total} 项，后台下载）`,
+                { phase: "submitted", pending: jobIds.length, job_ids: jobIds }
+            );
+            return {
+                ...ingestRes,
+                jobs: [],
+                fallbackOk: 0,
+                failed: 0,
+                success: 0,
+                pending: jobIds.length,
+            };
         }
-        const jobs = jobIds.length ? await this.waitJobs(jobIds, { onProgress }) : [];
+
+        report(
+            `已提交任务 ${jobIds.length}/${total}` +
+                (accepted != null && accepted !== jobIds.length ? ` · accepted ${accepted}` : "") +
+                (dupN ? ` · 链接重复 ${dupN}` : "") +
+                (jobIds.length ? " · 等待服务端下载…" : " · 无新任务"),
+            { phase: "submitted", pending: jobIds.length }
+        );
+
+        const jobs = jobIds.length
+            ? await this.waitJobs(jobIds, {
+                  onProgress: (job, meta) => {
+                      if (!onProgress) return;
+                      const m = meta || {};
+                      const st = (job && job.status) || "?";
+                      const pct =
+                          job && job.progress != null && job.progress !== ""
+                              ? ` ${Math.round(+job.progress)}%`
+                              : "";
+                      const label = this._jobProgressLabel(job, list);
+                      const done = m.done != null ? m.done : 0;
+                      const tot = m.total != null ? m.total : jobIds.length;
+                      const pend = m.pending != null ? m.pending : 0;
+                      const activeN = (m.active || []).filter((j) =>
+                          ["queued", "running"].includes(j && j.status)
+                      ).length;
+                      let message;
+                      if (m.phase === "job_done") {
+                          const em = String((job && job.error_message) || "").slice(0, 80);
+                          message =
+                              `入库任务 ${done}/${tot} 完成 · ${st}${pct} · ${label}` +
+                              (em ? ` · ${em}` : "") +
+                              (pend ? ` · 剩余 ${pend}` : "");
+                      } else {
+                          message =
+                              `入库中 ${done}/${tot} 已结束` +
+                              (activeN ? ` · 进行中 ${activeN}` : "") +
+                              ` · ${st}${pct} · ${label}` +
+                              (pend > 1 ? ` · 队列 ${pend}` : "");
+                      }
+                      try {
+                          onProgress(job, { ...m, message, phase: m.phase || "wait" });
+                      } catch (e) {
+                          console.warn("LMW pushItems job onProgress", e);
+                      }
+                  },
+              })
+            : [];
+
         let fallbackOk = 0;
         let failed = 0;
         let contentDuplicates = 0;
+        const needFallback = [];
         for (const job of jobs) {
             if (job.status === "success") {
                 const em = String(job.error_message || "");
@@ -1821,26 +2487,63 @@ const LMW = {
             const can =
                 fallback &&
                 job.client_fallback_allowed !== false &&
-                ["failed_auth", "need_client_fetch", "failed_network", "failed_partial"].includes(job.status);
+                ["failed_auth", "need_client_fetch", "failed_network", "failed_partial"].includes(
+                    job.status
+                );
             if (!can) {
                 failed++;
                 continue;
             }
-            const item = items.find((it) => it.url === job.url) || items[0];
+            const item = list.find((it) => it.url === job.url) || list[0];
             if (!item || item.media_type === "m3u8" || item.media_type === "dash") {
                 // stream client merge is heavy; server should handle HLS/DASH
                 failed++;
                 continue;
             }
+            needFallback.push({ job, item });
+        }
+
+        for (let i = 0; i < needFallback.length; i++) {
+            const { item } = needFallback[i];
+            const label = this._itemProgressLabel(item, i, needFallback.length);
+            report(`客户端回退上传 ${i + 1}/${needFallback.length} · ${label}`, {
+                phase: "fallback",
+                index: i,
+                total: needFallback.length,
+                done: i,
+            });
             try {
                 const up = await this.clientFetchAndUpload(item, cat);
                 if (up && up.duplicate) contentDuplicates++;
                 else fallbackOk++;
+                report(
+                    `客户端回退 ${i + 1}/${needFallback.length} 完成` +
+                        (up && up.duplicate ? " · 内容重复" : " · 已上传") +
+                        ` · ${label}`,
+                    {
+                        phase: "fallback_done",
+                        index: i,
+                        total: needFallback.length,
+                        done: i + 1,
+                    }
+                );
             } catch (e) {
                 console.warn("LMW fallback failed", e);
                 failed++;
+                report(
+                    `客户端回退 ${i + 1}/${needFallback.length} 失败 · ${label} · ${
+                        (e && e.message) || e
+                    }`.slice(0, 200),
+                    {
+                        phase: "fallback_fail",
+                        index: i,
+                        total: needFallback.length,
+                        done: i + 1,
+                    }
+                );
             }
         }
+
         const pureSuccess = jobs.filter(
             (j) =>
                 j.status === "success" &&
@@ -1892,7 +2595,6 @@ const LMW = {
         );
         const tags = this.applyRestrictedTag(meta.tags || [], restricted);
         if (tags.length) fd.append("tags", JSON.stringify(tags));
-        if (meta.use_jasna) fd.append("use_jasna", "1");
         if (restricted) fd.append("restricted", "1");
         const name = meta.filename || "upload.bin";
         fd.append("file", blob, name);

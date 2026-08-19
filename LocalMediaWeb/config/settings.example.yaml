@@ -37,13 +37,17 @@ gopeed_path: ""              # e.g. C:/Users/you/.grok/bin/gopeed.exe
 gopeed_connections: 16
 gopeed_min_bytes: 5242880    # 5 * 1024 * 1024；HEAD Content-Length 低于此不用
 
-# Jasna 去马赛克（入库后可选；GPU 串行队列）
-jasna_enabled: true
-jasna_path: "D:/TMP/jasna-windows-nvidia-0.8.1/jasna.exe"  # 或安装目录；空=自动探测
+# Jasna：默认关。重活放到本机 JasnaBridge（见 C#ORIGIN_PROJECTS/JasnaBridge）。
+# 仅一体化本机且要服务端跑 jasna 时设 true。
+jasna_enabled: false
+jasna_path: ""               # 或安装目录 / jasna.exe；空=自动探测
 jasna_cwd: ""                # 空=exe 所在目录（模型权重相对路径）
 jasna_codec: "h264"          # 浏览器友好；成功后替换为 .mp4
 jasna_extra_args: []         # 例如 ["--max-clip-size", "60"]
 jasna_concurrency: 1         # 保持 1（GPU）
+
+# 需要转码时的编码器：auto=优先 h264_qsv 再 libx264；qsv | none
+ffmpeg_hw_encode: "auto"
 
 # HLS / m3u8 分片并行
 hls_concurrency: 8
@@ -60,10 +64,10 @@ feed_recommend_candidate_random: 250  # recommend 候选：全库 RANDOM 长尾
 feed_recommend_temperature: 28        # Gumbel 温度，越大越散
 feed_explore_every: 5                 # 每 N 条强制一条探索位；0=关
 feed_fatigue_half_life_hours: 18      # 刚看过的降权半衰期（小时）
-feed_w_interest: 0.45                 # 通道权重：兴趣
-feed_w_fresh: 0.20                    # 新鲜
-feed_w_explore: 0.20                  # 探索
-feed_w_revisit: 0.15                  # 回访（喜欢/高停留且过疲劳窗）
+feed_w_interest: 0.45                 # 通道权重：兴趣（深度观看 + tag 亲和）
+feed_w_fresh: 0.18                    # 新鲜
+feed_w_explore: 0.22                  # 探索（冷门/未见过硬插槽，略抬）
+feed_w_revisit: 0.15                  # 回访（喜欢/深看长片且过疲劳窗）
 
-# pc | router (router = lower concurrency hints)
+# pc | n5095 | router（n5095/router 建议手调降低 download/hls 并发）
 profile: "pc"

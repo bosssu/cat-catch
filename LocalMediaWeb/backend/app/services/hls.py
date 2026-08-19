@@ -14,7 +14,6 @@ from app.core.config import ffmpeg_available, get_settings
 from app.services.http_client import iter_http_modes, proxy_env_for_subprocess
 from app.services.media_process import (
     align_av_timeline,
-    before_av_not_ok,
     format_av_align_warning,
 )
 from app.services.util import is_probably_html
@@ -31,6 +30,15 @@ class HlsError(Exception):
         super().__init__(message)
         self.http_status = http_status
         self.need_client = need_client
+
+
+def _fmt_hms(sec: float) -> str:
+    s = max(0, int(round(float(sec or 0))))
+    h, rem = divmod(s, 3600)
+    m, sec_i = divmod(rem, 60)
+    if h:
+        return f"{h:02d}:{m:02d}:{sec_i:02d}"
+    return f"{m:02d}:{sec_i:02d}"
 
 
 def _is_master(text: str) -> bool:
@@ -56,14 +64,24 @@ def _pick_variant(text: str, base_url: str) -> str:
 
 
 def _parse_media_playlist(text: str, base_url: str) -> tuple[list[dict], dict | None]:
-    """Return (segments, key_info)."""
+    """Return (segments, key_info). Segments may set discontinuity=True after #EXT-X-DISCONTINUITY."""
     lines = [ln.strip() for ln in text.splitlines() if ln.strip()]
     key = None
     segments: list[dict] = []
+    media_seq = 0
+    pending_discontinuity = False
     i = 0
     while i < len(lines):
         line = lines[i]
-        if line.startswith("#EXT-X-KEY:"):
+        if line.startswith("#EXT-X-MEDIA-SEQUENCE:"):
+            try:
+                media_seq = int(line.split(":", 1)[1].strip())
+            except ValueError:
+                media_seq = 0
+        elif line.startswith("#EXT-X-DISCONTINUITY"):
+            # Next media segment starts a new timeline (ads, codec change, PCR jump)
+            pending_discontinuity = True
+        elif line.startswith("#EXT-X-KEY:"):
             km = EXT_X_KEY.search(line)
             if km:
                 method = km.group(1).upper()
@@ -87,14 +105,22 @@ def _parse_media_playlist(text: str, base_url: str) -> tuple[list[dict], dict | 
             uri = lines[i]
             if uri.startswith("#"):
                 continue
+            seq = media_seq + len(segments)
+            seg_key = key.copy() if key else None
+            # Default AES-128 IV = media sequence number (16-byte big-endian) when not explicit
+            if seg_key and seg_key.get("method") == "AES-128" and not seg_key.get("iv"):
+                seg_key["iv"] = f"{seq:032x}"
             segments.append(
                 {
                     "url": urljoin(base_url, uri),
                     "duration": dur,
-                    "key": key.copy() if key else None,
+                    "key": seg_key,
+                    "seq": seq,
+                    "discontinuity": pending_discontinuity,
                 }
             )
-        elif line.startswith("#EXT-X-PLAYLIST-TYPE:EVENT") or "EXT-X-MEDIA-SEQUENCE" in line:
+            pending_discontinuity = False
+        elif line.startswith("#EXT-X-PLAYLIST-TYPE:EVENT"):
             pass
         i += 1
     if not segments:
@@ -114,6 +140,25 @@ def _parse_media_playlist(text: str, base_url: str) -> tuple[list[dict], dict | 
         # allow but mark; for v1 still download current window only
         pass
     return segments, key
+
+
+def _gap_indices(ok_indices: list[int]) -> list[int]:
+    """Return missing indices strictly between first and last successful segment."""
+    if len(ok_indices) < 2:
+        return []
+    lo, hi = ok_indices[0], ok_indices[-1]
+    have = set(ok_indices)
+    return [i for i in range(lo, hi + 1) if i not in have]
+
+
+def _write_av_timeline_json(path: Path, av_report: dict) -> None:
+    try:
+        path.write_text(
+            json.dumps(av_report, ensure_ascii=False, indent=2),
+            encoding="utf-8",
+        )
+    except Exception as e:
+        logger.debug("write av_timeline.json skip: %s", e)
 
 
 async def _fetch_text(client: httpx.AsyncClient, url: str, headers: dict[str, str]) -> tuple[str, int]:
@@ -195,9 +240,23 @@ def _slice_segments_by_time(
 
     s0 = max(0.0, float(start_sec or 0.0))
     total_dur = sum(float(x.get("duration") or 0) for x in segments)
+    # end omitted / 0 / "to end" → playlist end (not wall-clock 00:00)
     s1 = float(end_sec) if end_sec is not None and end_sec > 0 else total_dur
+    if total_dur <= 0:
+        raise HlsError("Playlist has no timed segments (total duration 0)")
+    if s0 >= total_dur:
+        raise HlsError(
+            f"Start {s0:.1f}s is past this m3u8 duration {total_dur:.1f}s "
+            f"(~{_fmt_hms(total_dur)}). "
+            f"「结束=末尾」uses playlist length, not the page player timeline. "
+            f"Use a start earlier than {_fmt_hms(total_dur)}."
+        )
     if s1 <= s0:
-        raise HlsError(f"Invalid time range {s0:.1f}s – {s1:.1f}s")
+        raise HlsError(
+            f"Invalid time range {s0:.1f}s – {s1:.1f}s "
+            f"(playlist total {total_dur:.1f}s / {_fmt_hms(total_dur)}; "
+            f"end must be > start, or omit end for playlist end)"
+        )
 
     out: list[dict] = []
     t = 0.0
@@ -300,9 +359,11 @@ async def _download_hls_segments(
 
     list_path = work_dir / "concat.txt"
     lines = []
+    ok_indices: list[int] = []
     for i in range(total):
         if state.get("segments", {}).get(str(i)) != "ok":
             continue
+        ok_indices.append(i)
         p = work_dir / f"seg_{i:05d}.ts"
         esc = p.as_posix().replace("'", r"'\''")
         lines.append(f"file '{esc}'")
@@ -310,11 +371,31 @@ async def _download_hls_segments(
         raise HlsError("No segments downloaded", need_client=True)
     list_path.write_text("\n".join(lines), encoding="utf-8")
 
+    # Mid-stream holes (missing segs between first/last ok) → must hard-rebuild timeline
+    mid_gaps = _gap_indices(ok_indices)
+    has_discontinuity = any(
+        bool(segments[i].get("discontinuity")) for i in ok_indices if i < len(segments)
+    )
+    is_clip = bool(clip_note)
+    # Hard when anything can break continuous PCR/PTS
+    hard_align = bool(partial or mid_gaps or has_discontinuity or is_clip)
+    if mid_gaps:
+        gap_msg = f"mid-gap {len(mid_gaps)} segs (idx {mid_gaps[0]}…{mid_gaps[-1]})"
+        warning = f"{warning}; {gap_msg}".strip("; ") if warning else gap_msg
+    if has_discontinuity:
+        disc_msg = "playlist DISCONTINUITY"
+        warning = f"{warning}; {disc_msg}".strip("; ") if warning else disc_msg
+
     out_file.parent.mkdir(parents=True, exist_ok=True)
     result_out = out_file
+    # Prefer concat demuxer with regenerated PTS; copy first (fast), align step fixes A/V
     cmd = [
         "ffmpeg",
         "-y",
+        "-fflags",
+        "+genpts+igndts+discardcorrupt",
+        "-err_detect",
+        "ignore_err",
         "-f",
         "concat",
         "-safe",
@@ -328,6 +409,8 @@ async def _download_hls_segments(
         "aac_adtstoasc",
         "-movflags",
         "+faststart",
+        "-avoid_negative_ts",
+        "make_zero",
         str(out_file),
     ]
     proc = await asyncio.to_thread(
@@ -342,6 +425,10 @@ async def _download_hls_segments(
         cmd_plain = [
             "ffmpeg",
             "-y",
+            "-fflags",
+            "+genpts+igndts+discardcorrupt",
+            "-err_detect",
+            "ignore_err",
             "-f",
             "concat",
             "-safe",
@@ -350,6 +437,8 @@ async def _download_hls_segments(
             str(list_path),
             "-c",
             "copy",
+            "-avoid_negative_ts",
+            "make_zero",
             str(out_file),
         ]
         if out_file.is_file():
@@ -380,22 +469,29 @@ async def _download_hls_segments(
                     need_client=True,
                 )
 
-    # Concat / mid-playlist clips: probe; remux only when before is skew/error.
+    # Always re-time A/V after HLS concat. Probe alone false-cleans mid-stream drift;
+    # hard path rebuilds H.264+AAC when gaps / DISCONTINUITY / clip / partial.
     result_out, av_report = await asyncio.to_thread(
-        align_av_timeline, result_out, force=False
+        align_av_timeline,
+        result_out,
+        force=True,
+        hard=hard_align,
     )
+    av_report["hls"] = {
+        "partial": partial,
+        "mid_gaps": mid_gaps[:40],
+        "mid_gap_count": len(mid_gaps),
+        "discontinuity": has_discontinuity,
+        "clip": is_clip,
+        "hard": hard_align,
+        "segments_total": total,
+        "segments_ok": ok_count,
+    }
     av_warn = format_av_align_warning(av_report)
     if av_warn:
         warning = f"{warning}; {av_warn}".strip("; ") if warning else av_warn
-    # JSON only when pre-align probe was not ok (post-mortem of real skew)
-    if before_av_not_ok(av_report):
-        try:
-            (work_dir / "av_timeline.json").write_text(
-                json.dumps(av_report, ensure_ascii=False, indent=2),
-                encoding="utf-8",
-            )
-        except Exception as e:
-            logger.debug("write av_timeline.json skip: %s", e)
+    # Always persist probe for post-mortem (user-visible desync often has probe ok)
+    _write_av_timeline_json(work_dir / "av_timeline.json", av_report)
 
     return {
         "partial": partial,
@@ -482,21 +578,19 @@ async def _download_hls_ffmpeg_direct(
     if is_clip:
         note = f"ffmpeg-direct clip {s0:.1f}s–{end_sec or 'end'}"
 
-    # Probe; remux only when before is skew/error (clip or full).
+    # Always force align; clips use hard rebuild (input-ss often leaves A/V phase offset)
     out_file, av_report = await asyncio.to_thread(
-        align_av_timeline, out_file, force=False
+        align_av_timeline, out_file, force=True, hard=is_clip
     )
+    av_report["hls"] = {
+        "mode": "ffmpeg-direct",
+        "clip": is_clip,
+        "hard": is_clip,
+    }
     av_warn = format_av_align_warning(av_report)
     if av_warn:
         note = f"{note}; {av_warn}"
-    if before_av_not_ok(av_report):
-        try:
-            dbg = out_file.parent / "av_timeline.json"
-            dbg.write_text(
-                json.dumps(av_report, ensure_ascii=False, indent=2), encoding="utf-8"
-            )
-        except Exception:
-            pass
+    _write_av_timeline_json(out_file.parent / "av_timeline.json", av_report)
 
     return {
         "partial": False,

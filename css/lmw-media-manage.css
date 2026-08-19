@@ -441,6 +441,13 @@
   opacity: 0.9;
 }
 
+.mm-sel-hint {
+  font-size: 11px;
+  opacity: 0.72;
+  white-space: nowrap;
+  cursor: help;
+}
+
 .mm-status {
   font-size: 12px;
   flex: 1 1 120px;
@@ -684,6 +691,20 @@
 
 .mm-card-actions button:hover {
   background: rgba(255, 255, 255, 0.1);
+}
+
+.mm-card-actions button[data-act="fix"] {
+  border-color: rgba(96, 165, 250, 0.35);
+  color: #93c5fd;
+}
+
+.mm-card-actions button[data-act="fix"]:hover {
+  background: rgba(59, 130, 246, 0.18);
+}
+
+.mm-card-actions button[data-act="fix"]:disabled {
+  opacity: 0.65;
+  cursor: wait;
 }
 
 .mm-footer {

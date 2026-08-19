@@ -4,6 +4,12 @@
   const searchHistoryKey = "lmw_search_history";
   /** include media tagged 限制级 in feed/search/grid (default off) */
   const includeRestrictedKey = "lmw_include_restricted";
+  /** include static images (media_type=image) in feed/search/grid (default off) */
+  const includeImagesKey = "lmw_include_images";
+  /** Feed: replace review button with delete (default off) */
+  const editModeKey = "lmw_edit_mode";
+  /** DLNA cast end behavior: once | loop (server-side; no auto-next) */
+  const castPlayModeKey = "lmw_cast_play_mode";
   /** session: once user unmutes, keep sound on for later videos in this tab */
   const soundKey = "lmw_want_sound";
   /** session: browser media element unlocked for unmuted play (user gesture) */
@@ -14,6 +20,8 @@
     prevView: "feed",
     mode: localStorage.getItem(feedModeKey) || "random",
     includeRestricted: localStorage.getItem(includeRestrictedKey) === "1",
+    includeImages: localStorage.getItem(includeImagesKey) === "1",
+    editMode: localStorage.getItem(editModeKey) === "1",
     similarTo: null,
     /** when mode=similar and set, rank by this tag (not whole media) */
     similarTag: null,
@@ -49,6 +57,10 @@
     searchTotal: 0,
     searchOffset: 0,
     searchLoading: false,
+    /** search results: name | created */
+    searchSort: "name",
+    /** search results: asc | desc */
+    searchOrder: "asc",
     /**
      * Feed playlist source:
      * - "normal": /api/feed ranked by mode
@@ -2064,10 +2076,12 @@
       const pageSize = Math.max(limit, 24);
       const params = new URLSearchParams({
         q: query,
-        sort: "new",
+        sort: state.searchSort === "created" ? "created" : "name",
+        order: state.searchOrder === "desc" ? "desc" : "asc",
         limit: String(pageSize),
         offset: String(offset),
         include_restricted: state.includeRestricted ? "true" : "false",
+        include_images: state.includeImages ? "true" : "false",
       });
       const data = await api(`/api/media?${params}`);
       const items = data.items || [];
@@ -2098,6 +2112,7 @@
       mode: state.mode || "random",
       limit: String(limit),
       include_restricted: state.includeRestricted ? "true" : "false",
+      include_images: state.includeImages ? "true" : "false",
     });
     if (state.mode === "similar") {
       if (state.similarTag) {
@@ -2353,7 +2368,11 @@
             <div class="actions">
               <button type="button" class="round mute-btn" data-act="mute" data-id="${item.id}" title="取消静音（播放声音）">${state.wantSound ? ICO.volOn : ICO.volOff}</button>
               <button type="button" class="round like ${liked}" data-act="like" data-id="${item.id}" title="喜欢 (L)">${ICO.heart}</button>
-              <button type="button" class="round review ${(item.review || "").trim() ? "on" : ""}" data-act="review" data-id="${item.id}" title="点评">${ICO.review}</button>
+              ${
+                state.editMode
+                  ? `<button type="button" class="round danger feed-del" data-act="delete" data-id="${item.id}" title="删除" aria-label="删除">${ICO.trash}</button>`
+                  : `<button type="button" class="round review ${(item.review || "").trim() ? "on" : ""}" data-act="review" data-id="${item.id}" title="点评">${ICO.review}</button>`
+              }
             </div>
           </div>
         </section>`;
@@ -2649,6 +2668,7 @@
         limit: "100",
         sort: "new",
         include_restricted: state.includeRestricted ? "true" : "false",
+        include_images: state.includeImages ? "true" : "false",
       });
       console.debug("[grid] fetching /api/media?%s", q.toString());
       const data = await api(`/api/media?${q}`);
@@ -2660,6 +2680,653 @@
       try {
         renderGrid();
       } catch (__) {}
+    }
+  }
+
+  function getActiveFeedMedia() {
+    const id = getCommittedFeedId() || state.activeFeedId;
+    if (id == null || id === "") return null;
+    return state.items.find((x) => String(x.id) === String(id)) || null;
+  }
+
+  function closeCastModal() {
+    const modal = document.getElementById("castModal");
+    if (!modal) return;
+    modal.classList.add("hide");
+    modal.setAttribute("aria-hidden", "true");
+  }
+
+  /** Persist last chosen DLNA device across reloads. */
+  const CAST_LAST_DEVICE_KEY = "lmw_last_dlna_device";
+  /** Tab-session cast state (survives SPA reloads in same tab). */
+  const CAST_SESSION_KEY = "lmw_cast_session";
+  /**
+   * Active cast session: scrub Seek + pause/play only while active.
+   * { deviceId, mediaId, deviceName, title, paused }
+   */
+  let _castSession = null;
+
+  /** once | loop — from 管理 → 设置; sent with each /api/dlna/play */
+  function getCastPlayMode() {
+    try {
+      const m = (localStorage.getItem(castPlayModeKey) || "once").trim().toLowerCase();
+      return m === "loop" ? "loop" : "once";
+    } catch (_) {
+      return "once";
+    }
+  }
+
+  function setCastPlayMode(mode) {
+    const m = mode === "loop" ? "loop" : "once";
+    try {
+      localStorage.setItem(castPlayModeKey, m);
+    } catch (_) {}
+    return m;
+  }
+  let _castSeekInFlight = false;
+  let _castSeekPendingSec = null;
+  let _castSeekTimer = null;
+  let _castControlBusy = false;
+  /** After a failed Stop, next Stop click force-clears phone session. */
+  let _castStopFailOnce = false;
+  /** Auto-cast on feed swipe: only latest request wins. */
+  let _castAutoGen = 0;
+  let _castAutoTimer = null;
+
+  function isCastSessionActive() {
+    return !!( _castSession && _castSession.deviceId);
+  }
+
+  function loadLastCastDevice() {
+    try {
+      const raw = localStorage.getItem(CAST_LAST_DEVICE_KEY);
+      if (!raw) return null;
+      const o = JSON.parse(raw);
+      if (!o || !o.id) return null;
+      return { id: String(o.id), name: o.name ? String(o.name) : "" };
+    } catch (_) {
+      return null;
+    }
+  }
+
+  function saveLastCastDevice(deviceId, deviceName) {
+    if (!deviceId) return;
+    try {
+      localStorage.setItem(
+        CAST_LAST_DEVICE_KEY,
+        JSON.stringify({ id: String(deviceId), name: deviceName || "" })
+      );
+    } catch (_) {}
+  }
+
+  function persistCastSession() {
+    try {
+      if (_castSession && _castSession.deviceId) {
+        sessionStorage.setItem(CAST_SESSION_KEY, JSON.stringify(_castSession));
+      } else {
+        sessionStorage.removeItem(CAST_SESSION_KEY);
+      }
+    } catch (_) {}
+  }
+
+  function restoreCastSessionFromStorage() {
+    try {
+      const raw = sessionStorage.getItem(CAST_SESSION_KEY);
+      if (!raw) return;
+      const o = JSON.parse(raw);
+      if (!o || !o.deviceId || o.mediaId == null) return;
+      _castSession = {
+        deviceId: String(o.deviceId),
+        mediaId: Number(o.mediaId),
+        deviceName: o.deviceName ? String(o.deviceName) : "",
+        title: o.title ? String(o.title) : "",
+        paused: !!o.paused,
+      };
+    } catch (_) {
+      _castSession = null;
+    }
+  }
+
+  function setCastSession(deviceId, mediaId, deviceName, title) {
+    if (!deviceId || mediaId == null) {
+      _castSession = null;
+      persistCastSession();
+      updateCastBar();
+      return;
+    }
+    _castSession = {
+      deviceId: String(deviceId),
+      mediaId: Number(mediaId),
+      deviceName: deviceName || "",
+      title: title || "",
+      paused: false,
+    };
+    persistCastSession();
+    updateCastBar();
+  }
+
+  function clearCastSession() {
+    _castSession = null;
+    _castSeekPendingSec = null;
+    _castAutoGen += 1;
+    if (_castSeekTimer) {
+      clearTimeout(_castSeekTimer);
+      _castSeekTimer = null;
+    }
+    if (_castAutoTimer) {
+      clearTimeout(_castAutoTimer);
+      _castAutoTimer = null;
+    }
+    persistCastSession();
+    updateCastBar();
+  }
+
+  /**
+   * While casting: keep feed local video paused (userPaused) so autoplay
+   * and slide switches never fight the TV.
+   */
+  function holdFeedPausedForCast() {
+    if (!isCastSessionActive()) return;
+    pauseActiveFeedAfterCast();
+  }
+
+  /**
+   * Push a library item to the current cast device (or an explicit deviceId).
+   * Used by modal pick and by feed swipe auto-sync.
+   */
+  async function pushMediaToDlna(deviceId, media, opts = {}) {
+    const quiet = !!opts.quiet;
+    if (!deviceId || !media || media.id == null) {
+      throw new Error("missing device or media");
+    }
+    const mode = getCastPlayMode();
+    const data = await api("/api/dlna/play", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        device_id: deviceId,
+        media_id: media.id,
+        mode,
+      }),
+    });
+    const name = (data && data.device && data.device.name) || "电视";
+    const did = (data && data.device && data.device.id) || deviceId;
+    const title = (data && data.title) || media.title || "";
+    saveLastCastDevice(did, name);
+    setCastSession(did, media.id, name, title);
+    pauseActiveFeedAfterCast();
+    if (!quiet) {
+      const modeHint = mode === "loop" ? "循环" : "单次";
+      showToast(`已推送到 ${name} · ${modeHint} · 可用底部栏暂停/结束`);
+    }
+    return data;
+  }
+
+  /**
+   * After user swipe settles on a new feed item while cast session is open:
+   * push that item to the same TV and keep phone paused.
+   */
+  function scheduleAutoCastForFeedMedia(mediaId) {
+    if (!isCastSessionActive()) return;
+    if (mediaId == null || mediaId === "") return;
+    const mid = Number(mediaId);
+    if (!Number.isFinite(mid)) return;
+    // Already casting this item — just re-hold pause
+    if (Number(_castSession.mediaId) === mid) {
+      holdFeedPausedForCast();
+      return;
+    }
+    if (_castAutoTimer) clearTimeout(_castAutoTimer);
+    // Debounce rapid flings: only last settled slide is pushed
+    _castAutoTimer = setTimeout(() => {
+      _castAutoTimer = null;
+      autoCastSessionToMedia(mid).catch(() => {});
+    }, 140);
+  }
+
+  async function autoCastSessionToMedia(mediaId) {
+    if (!isCastSessionActive()) return;
+    const deviceId = _castSession.deviceId;
+    const mid = Number(mediaId);
+    if (!Number.isFinite(mid)) return;
+    // User may have ended cast or switched again
+    if (!_castSession || _castSession.deviceId !== deviceId) return;
+    if (Number(_castSession.mediaId) === mid) {
+      holdFeedPausedForCast();
+      return;
+    }
+    // Prefer active feed item; fall back to library list
+    let media =
+      state.items.find((x) => Number(x.id) === mid) ||
+      (getActiveFeedMedia() && Number(getActiveFeedMedia().id) === mid
+        ? getActiveFeedMedia()
+        : null);
+    if (!media) {
+      // Still hold pause; bar shows previous title until media loads into list
+      holdFeedPausedForCast();
+      return;
+    }
+
+    const gen = ++_castAutoGen;
+    const prevMediaId = _castSession.mediaId;
+    const prevTitle = _castSession.title || "";
+    const prevPaused = !!_castSession.paused;
+    // Optimistic bar: pushing new item
+    _castSession = {
+      ..._castSession,
+      mediaId: mid,
+      title: media.title || prevTitle,
+      paused: false,
+      syncing: true,
+    };
+    persistCastSession();
+    updateCastBar();
+    holdFeedPausedForCast();
+
+    try {
+      await pushMediaToDlna(deviceId, media, { quiet: true });
+      if (gen !== _castAutoGen) return;
+      if (!_castSession || _castSession.deviceId !== deviceId) return;
+      // pushMediaToDlna already set session; clear syncing flag
+      if (_castSession) {
+        _castSession.syncing = false;
+        persistCastSession();
+        updateCastBar();
+      }
+      holdFeedPausedForCast();
+    } catch (e) {
+      if (gen !== _castAutoGen) return;
+      // Revert media id so Seek still matches what TV is actually playing
+      if (_castSession && _castSession.deviceId === deviceId) {
+        _castSession.mediaId = prevMediaId;
+        _castSession.title = prevTitle;
+        _castSession.paused = prevPaused;
+        _castSession.syncing = false;
+        persistCastSession();
+        updateCastBar();
+      }
+      showToast(`电视切换失败：${String(e.message || e).slice(0, 100)}`);
+      holdFeedPausedForCast();
+    }
+  }
+
+  function ensureCastBar() {
+    let bar = document.getElementById("castBar");
+    if (bar) return bar;
+    bar = document.createElement("div");
+    bar.id = "castBar";
+    bar.className = "cast-bar hide";
+    bar.setAttribute("aria-hidden", "true");
+    bar.innerHTML = `
+      <div class="cast-bar-inner">
+        <div class="cast-bar-meta">
+          <span class="cast-bar-ico" aria-hidden="true">
+            <svg class="ico" viewBox="0 0 24 24"><path fill="currentColor" d="M21 3H3c-1.1 0-2 .9-2 2v12c0 1.1.9 2 2 2h5v2h8v-2h5c1.1 0 2-.9 2-2V5c0-1.1-.9-2-2-2zm0 14H3V5h18v12z"/></svg>
+          </span>
+          <div class="cast-bar-text">
+            <div class="cast-bar-title" id="castBarTitle">投屏中</div>
+            <div class="cast-bar-sub" id="castBarSub"></div>
+          </div>
+        </div>
+        <div class="cast-bar-actions">
+          <button type="button" class="cast-bar-btn" id="btnCastPause" title="暂停电视" aria-label="暂停电视">暂停</button>
+          <button type="button" class="cast-bar-btn ghost" id="btnCastSwitch" title="换设备" aria-label="换设备">换设备</button>
+          <button type="button" class="cast-bar-btn danger" id="btnCastStop" title="结束投屏" aria-label="结束投屏">结束</button>
+        </div>
+      </div>`;
+    document.body.appendChild(bar);
+    return bar;
+  }
+
+  function updateCastBar() {
+    const bar = ensureCastBar();
+    const titleEl = document.getElementById("castBarTitle");
+    const subEl = document.getElementById("castBarSub");
+    const pauseBtn = document.getElementById("btnCastPause");
+    if (!_castSession || !_castSession.deviceId) {
+      bar.classList.add("hide");
+      bar.setAttribute("aria-hidden", "true");
+      document.body.classList.remove("has-cast-bar");
+      return;
+    }
+    bar.classList.remove("hide");
+    bar.setAttribute("aria-hidden", "false");
+    document.body.classList.add("has-cast-bar");
+    const dev = _castSession.deviceName || "电视";
+    const mid = _castSession.mediaId;
+    const t = (_castSession.title || "").trim();
+    if (titleEl) {
+      titleEl.textContent = t
+        ? `投屏 · #${mid} ${t}`
+        : `投屏 · #${mid}`;
+    }
+    if (subEl) {
+      if (_castSession.syncing) {
+        subEl.textContent = `${dev} · 切换推送中…`;
+      } else {
+        subEl.textContent = _castSession.paused
+          ? `${dev} · 已暂停 · 上下滑自动换片`
+          : `${dev} · 播放中 · 上下滑自动换片`;
+      }
+    }
+    if (pauseBtn) {
+      pauseBtn.textContent = _castSession.paused ? "继续" : "暂停";
+      pauseBtn.title = _castSession.paused ? "继续播放" : "暂停电视";
+      pauseBtn.setAttribute(
+        "aria-label",
+        _castSession.paused ? "继续播放" : "暂停电视"
+      );
+      pauseBtn.classList.toggle("is-paused", !!_castSession.paused);
+    }
+    const busy = _castControlBusy;
+    bar.querySelectorAll(".cast-bar-btn").forEach((b) => {
+      b.disabled = busy;
+    });
+  }
+
+  async function castControl(action) {
+    if (!_castSession || !_castSession.deviceId) {
+      showToast("当前没有投屏会话");
+      return;
+    }
+    if (_castControlBusy) return;
+    const act = String(action || "").toLowerCase();
+    if (act !== "pause" && act !== "play" && act !== "stop") return;
+
+    // Second Stop after failure: drop phone session without SOAP
+    if (act === "stop" && _castStopFailOnce) {
+      _castStopFailOnce = false;
+      forceClearCastSession();
+      return;
+    }
+
+    _castControlBusy = true;
+    updateCastBar();
+    const deviceId = _castSession.deviceId;
+    try {
+      await api("/api/dlna/control", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ device_id: deviceId, action: act }),
+      });
+      _castStopFailOnce = false;
+      if (act === "stop") {
+        clearCastSession();
+        showToast("已结束投屏");
+        return;
+      }
+      if (_castSession) {
+        _castSession.paused = act === "pause";
+        persistCastSession();
+      }
+      showToast(act === "pause" ? "电视已暂停" : "电视继续播放");
+    } catch (e) {
+      const msg = String(e.message || e).slice(0, 100);
+      if (act === "stop") {
+        _castStopFailOnce = true;
+        showToast(`结束失败：${msg} · 再点「结束」仅清除本机状态`);
+      } else {
+        showToast(`电视控制失败：${msg}`);
+      }
+    } finally {
+      _castControlBusy = false;
+      updateCastBar();
+    }
+  }
+
+  /** Force-clear session without SOAP (box already stopped / gone). */
+  function forceClearCastSession() {
+    _castStopFailOnce = false;
+    clearCastSession();
+    showToast("已清除投屏状态");
+  }
+
+  function toggleCastPause() {
+    if (!_castSession) return;
+    castControl(_castSession.paused ? "play" : "pause").catch(() => {});
+  }
+
+  /**
+   * On scrub release: Seek TV if we have an active cast for this media.
+   * Fire-and-forget; coalesce rapid seeks (double pointerup).
+   */
+  function syncCastSeekOnScrubEnd(mediaId, positionSec) {
+    if (!_castSession || !_castSession.deviceId) return;
+    if (mediaId == null || mediaId === "") return;
+    if (Number(mediaId) !== Number(_castSession.mediaId)) return;
+    const t = Number(positionSec);
+    if (!Number.isFinite(t) || t < 0) return;
+    _castSeekPendingSec = t;
+    if (_castSeekTimer) clearTimeout(_castSeekTimer);
+    // Slight debounce so final pointerup + ghost cancel settle on one target
+    _castSeekTimer = setTimeout(() => {
+      _castSeekTimer = null;
+      flushCastSeek();
+    }, 80);
+  }
+
+  async function flushCastSeek() {
+    if (_castSeekPendingSec == null || !_castSession) return;
+    if (_castSeekInFlight) return;
+    const pos = _castSeekPendingSec;
+    _castSeekPendingSec = null;
+    const deviceId = _castSession.deviceId;
+    _castSeekInFlight = true;
+    try {
+      await api("/api/dlna/seek", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ device_id: deviceId, position_sec: pos }),
+      });
+      // After seek while "paused" UI, box may still be paused — leave paused flag as-is
+    } catch (e) {
+      // Soft fail: box may have stopped or Seek unsupported
+      showToast(`电视进度同步失败：${String(e.message || e).slice(0, 80)}`);
+    } finally {
+      _castSeekInFlight = false;
+      // If another scrub landed while in flight, send the latest
+      if (_castSeekPendingSec != null) {
+        flushCastSeek().catch(() => {});
+      }
+    }
+  }
+
+  function renderCastDevices(items) {
+    const list = document.getElementById("castDeviceList");
+    if (!list) return;
+    let arr = Array.isArray(items) ? items.slice() : [];
+    if (!arr.length) {
+      list.innerHTML =
+        '<div class="cast-empty">未发现 DLNA 设备<br/>请确认电视盒与手机同一 Wi‑Fi，且已开启 DLNA/投屏接收</div>';
+      return;
+    }
+    const last = loadLastCastDevice();
+    const lastId = last && last.id ? String(last.id) : "";
+    // Pin last-used device to top
+    if (lastId) {
+      arr.sort((a, b) => {
+        const ai = String(a.id || "") === lastId ? 0 : 1;
+        const bi = String(b.id || "") === lastId ? 0 : 1;
+        if (ai !== bi) return ai - bi;
+        return String(a.name || "").localeCompare(String(b.name || ""), "zh");
+      });
+    }
+    const tvIco =
+      '<svg class="ico" viewBox="0 0 24 24" aria-hidden="true"><path fill="currentColor" d="M21 3H3c-1.1 0-2 .9-2 2v12c0 1.1.9 2 2 2h5v2h8v-2h5c1.1 0 2-.9 2-2V5c0-1.1-.9-2-2-2zm0 14H3V5h18v12z"/></svg>';
+    list.innerHTML = arr
+      .map((d) => {
+        const name = escapeHtml(d.name || "DLNA 设备");
+        const host = escapeHtml(
+          [d.host, d.manufacturer, d.model].filter(Boolean).join(" · ") || d.location || ""
+        );
+        const id = escapeHtml(d.id || "");
+        const isLast = lastId && String(d.id || "") === lastId;
+        const badge = isLast
+          ? '<span class="cast-device-badge">上次</span>'
+          : "";
+        return `<button type="button" class="cast-device${isLast ? " is-last" : ""}" role="listitem" data-cast-id="${id}">
+          <span class="cast-device-ico">${tvIco}</span>
+          <span class="cast-device-meta">
+            <span class="cast-device-name">${name}${badge}</span>
+            <span class="cast-device-host">${host}</span>
+          </span>
+        </button>`;
+      })
+      .join("");
+  }
+
+  /** Last cast device list in this tab (paint before network when possible). */
+  let _castClientCache = null;
+  let _castLoadGen = 0;
+
+  function castMediaHead() {
+    const media = getActiveFeedMedia();
+    return media
+      ? `当前：#${media.id} ${media.title || ""}`.trim()
+      : "暂无当前媒体";
+  }
+
+  function castAgeLabel(ageSec) {
+    if (ageSec == null || !Number.isFinite(ageSec)) return "";
+    const s = Math.max(0, Math.round(ageSec));
+    if (s < 5) return "刚刚扫描";
+    if (s < 60) return `${s}秒前`;
+    if (s < 3600) return `${Math.round(s / 60)}分钟前`;
+    return `${Math.round(s / 3600)}小时前`;
+  }
+
+  async function loadCastDevices({ refresh = false, silent = false } = {}) {
+    const gen = ++_castLoadGen;
+    const sub = document.getElementById("castModalSub");
+    const list = document.getElementById("castDeviceList");
+    const head = castMediaHead();
+    // Instant paint from in-tab cache when not forcing a full rescan.
+    if (!refresh && _castClientCache && list) {
+      renderCastDevices(_castClientCache);
+      if (sub && !silent) {
+        const n = _castClientCache.length;
+        sub.textContent =
+          n > 0
+            ? `${head} · 缓存 ${n} 台 · 可点刷新重扫`
+            : `${head} · 缓存：暂无设备 · 可点刷新`;
+      }
+    } else if (!silent && list) {
+      if (sub) {
+        sub.textContent = refresh
+          ? `${head} · 正在重新扫描…`
+          : `${head} · 首次扫描局域网…`;
+      }
+      list.innerHTML = refresh
+        ? '<div class="cast-empty">正在重新扫描 DLNA 设备…</div>'
+        : '<div class="cast-empty">首次扫描局域网设备，请稍候…</div>';
+    }
+    try {
+      const q = refresh ? "?refresh=1&timeout=3" : "?timeout=2.5";
+      const data = await api(`/api/dlna/devices${q}`);
+      if (gen !== _castLoadGen) return;
+      const items = (data && data.items) || [];
+      _castClientCache = items;
+      renderCastDevices(items);
+      if (sub && !silent) {
+        const n = items.length;
+        const cached = !!(data && data.cached);
+        const age = castAgeLabel(data && data.age_sec);
+        if (n > 0) {
+          sub.textContent = cached
+            ? `${head} · ${n} 台（${age || "缓存"}）· 点选推送`
+            : `${head} · 找到 ${n} 台设备，点选推送`;
+        } else {
+          sub.textContent = cached
+            ? `${head} · 暂无设备（${age || "缓存"}）· 可点刷新`
+            : `${head} · 未找到设备 · 可点刷新重试`;
+        }
+      }
+    } catch (e) {
+      if (gen !== _castLoadGen) return;
+      if (silent) return;
+      if (list && !_castClientCache) {
+        list.innerHTML = `<div class="cast-empty">扫描失败<br/>${escapeHtml(String(e.message || e))}</div>`;
+      }
+      if (sub) sub.textContent = "扫描失败";
+    }
+  }
+
+  async function openCastModal() {
+    const modal = document.getElementById("castModal");
+    if (!modal) return;
+    modal.classList.remove("hide");
+    modal.setAttribute("aria-hidden", "false");
+    // Default: use server/memory cache (instant after first scan). Full scan only via refresh btn.
+    await loadCastDevices({ refresh: false });
+  }
+
+  /** Pause current feed video as user-pause so autoplay/resume won't fight the TV. */
+  function pauseActiveFeedAfterCast() {
+    const id = getCommittedFeedId() || state.activeFeedId;
+    const candidates = [];
+    if (id != null && id !== "") {
+      const slide = document.querySelector(
+        `#feedScroller .snap-slide[data-id="${CSS.escape(String(id))}"]`
+      );
+      if (slide) {
+        const v = slide.querySelector("video");
+        if (v) candidates.push(v);
+      }
+    }
+    if (state._feedPlayer) candidates.push(state._feedPlayer);
+    document.querySelectorAll("#feedScroller video.feed-player, #feedScroller video").forEach((v) => {
+      candidates.push(v);
+    });
+    const seen = new Set();
+    for (const v of candidates) {
+      if (!v || seen.has(v)) continue;
+      seen.add(v);
+      try {
+        v.dataset.userPaused = "1";
+        if (!v.paused) v.pause();
+      } catch (_) {}
+      const stage = v.closest(".media-stage");
+      if (stage) {
+        try {
+          stage.classList.add("is-paused-hold");
+          stage
+            .querySelectorAll(".media-play-toggle, [data-act='play'], .center-play")
+            .forEach((btn) => {
+              if (typeof ICO !== "undefined" && ICO.play) {
+                btn.innerHTML = ICO.play;
+              }
+              btn.classList.add("is-paused");
+              btn.setAttribute("aria-label", "播放");
+            });
+        } catch (_) {}
+      }
+    }
+  }
+
+  async function castToDevice(deviceId) {
+    const media = getActiveFeedMedia();
+    if (!media) {
+      showToast("当前没有可推送的媒体");
+      return;
+    }
+    if (!deviceId) return;
+    const list = document.getElementById("castDeviceList");
+    list?.querySelectorAll(".cast-device").forEach((b) => {
+      b.disabled = true;
+    });
+    const sub = document.getElementById("castModalSub");
+    if (sub) sub.textContent = `正在推送 #${media.id}…`;
+    try {
+      // Cancel any in-flight auto-cast from prior swipe
+      _castAutoGen += 1;
+      await pushMediaToDlna(deviceId, media, { quiet: false });
+      closeCastModal();
+    } catch (e) {
+      showToast(`推送失败：${String(e.message || e).slice(0, 120)}`);
+      if (sub) sub.textContent = "推送失败，可重试或换设备";
+      list?.querySelectorAll(".cast-device").forEach((b) => {
+        b.disabled = false;
+      });
     }
   }
 
@@ -2682,8 +3349,10 @@
     // ~2.5s while page visible — catches finished ingest jobs quickly
     state.libPollTimer = setInterval(pollLibraryChange, 2500);
     document.addEventListener("visibilitychange", () => {
-      if (!document.hidden) pollLibraryChange();
+      if (document.hidden) flushCurrentWatchPosition();
+      else pollLibraryChange();
     });
+    window.addEventListener("pagehide", () => flushCurrentWatchPosition());
     // initial baseline after first feed load
     setTimeout(pollLibraryChange, 800);
   }
@@ -2692,17 +3361,136 @@
     return state.items[state.feedIndex] || null;
   }
 
-  async function postInteract(id, event, dwell_ms = 0) {
+  /** Per-media progress milestones already reported (avoid spam). */
+  const progressMarksSent = new Map(); // id -> Set of mark keys
+  const POSITION_SAVE_MS = 5000;
+  const RESUME_MIN_DUR = 90;
+  const RESUME_SKIP_HEAD = 3;
+  const RESUME_SKIP_TAIL = 5;
+  const _posSaveAt = new Map();
+  const _posSaveLast = new Map();
+
+  async function postInteract(id, event, dwell_ms = 0, extra = {}) {
     try {
+      const body = { event, dwell_ms, ...extra };
       return await api(`/api/media/${id}/interact`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ event, dwell_ms }),
+        body: JSON.stringify(body),
       });
     } catch (e) {
       console.warn("interact failed", e);
       return null;
     }
+  }
+
+  /**
+   * Report duration-aware progress milestones for feed ranking
+   * (25% / 50% / 90% / ended). Long videos get strong interest at 25%.
+   */
+  function maybeReportWatchProgress(video, mediaId) {
+    if (!video || mediaId == null) return;
+    const d = video.duration;
+    if (!d || !isFinite(d) || d <= 0) return;
+    const p = Math.min(1, Math.max(0, (video.currentTime || 0) / d));
+    let sent = progressMarksSent.get(mediaId);
+    if (!sent) {
+      sent = new Set();
+      progressMarksSent.set(mediaId, sent);
+    }
+    const marks = [
+      [0.25, "p25"],
+      [0.5, "p50"],
+      [0.9, "p90"],
+    ];
+    for (const [thr, key] of marks) {
+      if (p >= thr && !sent.has(key)) {
+        sent.add(key);
+        postInteract(mediaId, "progress", 0, {
+          progress: thr,
+          duration_sec: d,
+        }).catch(() => {});
+      }
+    }
+  }
+
+  function reportWatchEnded(video, mediaId) {
+    if (!video || mediaId == null) return;
+    const d = video.duration;
+    const dur = d && isFinite(d) && d > 0 ? d : undefined;
+    let sent = progressMarksSent.get(mediaId);
+    if (!sent) {
+      sent = new Set();
+      progressMarksSent.set(mediaId, sent);
+    }
+    if (sent.has("ended")) return;
+    sent.add("ended");
+    _posSaveLast.set(mediaId, 0);
+    _posSaveAt.set(mediaId, Date.now());
+    const idx = state.items.findIndex((x) => x.id === mediaId);
+    if (idx >= 0) state.items[idx].last_position_sec = 0;
+    postInteract(mediaId, "ended", 0, {
+      progress: 1,
+      position_sec: 0,
+      ...(dur != null ? { duration_sec: dur } : {}),
+    }).catch(() => {});
+  }
+
+  function patchItemPosition(mediaId, sec) {
+    const idx = state.items.findIndex((x) => x.id === mediaId);
+    if (idx >= 0) state.items[idx].last_position_sec = sec;
+  }
+
+  function saveWatchPosition(video, mediaId, { force = false } = {}) {
+    if (mediaId == null || !video) return;
+    const d = video.duration;
+    const dur = d && isFinite(d) && d > 0 ? d : undefined;
+    if (dur != null && dur < RESUME_MIN_DUR && !force) return;
+    const t = video.currentTime;
+    if (!isFinite(t) || t < 0) return;
+    const now = Date.now();
+    const prev = _posSaveLast.get(mediaId);
+    const lastAt = _posSaveAt.get(mediaId) || 0;
+    if (
+      !force &&
+      now - lastAt < POSITION_SAVE_MS &&
+      prev != null &&
+      Math.abs(t - prev) < 2
+    ) {
+      return;
+    }
+    _posSaveLast.set(mediaId, t);
+    _posSaveAt.set(mediaId, now);
+    patchItemPosition(mediaId, t);
+    postInteract(mediaId, "progress", 0, {
+      position_sec: t,
+      ...(dur != null ? { duration_sec: dur } : {}),
+    }).catch(() => {});
+  }
+
+  function flushCurrentWatchPosition() {
+    const item = currentItem();
+    const v = state._feedPlayer;
+    if (item && v) saveWatchPosition(v, item.id, { force: true });
+  }
+
+  function tryResumeWatchPosition(video, mediaId) {
+    if (!video || mediaId == null) return false;
+    if (String(video.dataset.resumeAppliedId || "") === String(mediaId)) return false;
+    const d = video.duration;
+    if (!d || !isFinite(d) || d < RESUME_MIN_DUR) return false;
+    const item = state.items.find((x) => x.id === mediaId);
+    const pos = Number(item && item.last_position_sec);
+    if (!isFinite(pos) || pos < RESUME_SKIP_HEAD) return false;
+    if (pos > d - RESUME_SKIP_TAIL) return false;
+    const t = Math.min(pos, Math.max(0, d - 0.25));
+    try {
+      video.currentTime = t;
+    } catch (_) {
+      return false;
+    }
+    video.dataset.resumeAppliedId = String(mediaId);
+    return true;
   }
 
   async function flushDwell(prevIndex) {
@@ -2749,6 +3537,9 @@
     }
     if (prev !== (state.feedIndex | 0)) {
       flushDwell(prev).catch(() => {});
+      const prevItem = state.items[prev];
+      const v = state._feedPlayer;
+      if (prevItem && v) saveWatchPosition(v, prevItem.id, { force: true });
     }
   }
 
@@ -3035,8 +3826,33 @@
       syncToggleIcon();
     };
 
-    video.addEventListener("timeupdate", paint, sig);
-    video.addEventListener("loadedmetadata", paint, sig);
+    const mediaIdForProgress = () => {
+      const slide = stage.closest(".snap-slide");
+      const raw = slide && slide.getAttribute("data-id");
+      const n = raw != null ? parseInt(raw, 10) : NaN;
+      return Number.isFinite(n) ? n : null;
+    };
+    const onTimeForRank = () => {
+      paint();
+      const mid = mediaIdForProgress();
+      if (mid != null) {
+        maybeReportWatchProgress(video, mid);
+        saveWatchPosition(video, mid);
+      }
+    };
+    const onEndedForRank = () => {
+      const mid = mediaIdForProgress();
+      if (mid != null) reportWatchEnded(video, mid);
+    };
+    const onMetaResume = () => {
+      paint();
+      const mid = mediaIdForProgress();
+      if (mid != null) tryResumeWatchPosition(video, mid);
+    };
+
+    video.addEventListener("timeupdate", onTimeForRank, sig);
+    video.addEventListener("ended", onEndedForRank, sig);
+    video.addEventListener("loadedmetadata", onMetaResume, sig);
     video.addEventListener("durationchange", paint, sig);
     video.addEventListener("seeked", onSeeked, sig);
     video.addEventListener(
@@ -3253,12 +4069,20 @@
         track.releasePointerCapture?.(e.pointerId);
       } catch (_) {}
       // final exact position
+      let finalT = scrubTarget;
       if (e && typeof e.clientX === "number") {
+        const hit = ratioFromEvent(e.clientX);
+        if (hit) finalT = hit.t;
         scrubFromEvent(e.clientX, true);
       } else if (scrubTarget != null) {
         scheduleSeek(scrubTarget, true);
       }
       scrubTarget = null;
+      // Sync TV on release (active cast session for this media only)
+      if (finalT != null) {
+        const mid = mediaIdForProgress();
+        syncCastSeekOnScrubEnd(mid, finalT);
+      }
       hideBarSoon();
       // resume after decoder lands (async)
       resumeAfterSeekIfNeeded().catch(() => {});
@@ -3547,9 +4371,22 @@
       try {
         track.releasePointerCapture?.(e.pointerId);
       } catch (_) {}
-      if (e && typeof e.clientX === "number") scrubFromEvent(e.clientX, true);
-      else if (scrubTarget != null) scheduleSeek(scrubTarget, true);
+      let finalT = scrubTarget;
+      if (e && typeof e.clientX === "number") {
+        const hit = ratioFromEvent(e.clientX);
+        if (hit) finalT = hit.t;
+        scrubFromEvent(e.clientX, true);
+      } else if (scrubTarget != null) {
+        scheduleSeek(scrubTarget, true);
+      }
       scrubTarget = null;
+      if (finalT != null) {
+        const v = getLandVideo();
+        const slide = v && v.closest(".snap-slide");
+        const raw = slide && slide.getAttribute("data-id");
+        const mid = raw != null ? parseInt(raw, 10) : NaN;
+        if (Number.isFinite(mid)) syncCastSeekOnScrubEnd(mid, finalT);
+      }
       showLandChrome({ force: true });
       if (resumeAfterScrub) {
         resumeAfterScrub = false;
@@ -3834,6 +4671,130 @@
       openReviewModal(id);
       return;
     }
+    if (act === "delete") {
+      if (!state.editMode) return;
+      if (!confirm(`确定删除媒体 #${id}？不可恢复。`)) return;
+      try {
+        await api(`/api/media/${id}`, { method: "DELETE" });
+        await removeFeedItemById(id);
+        if (state._gridCache) {
+          state._gridCache = state._gridCache.filter((x) => x.id !== id);
+        }
+        if (state.searchItems && state.searchItems.length) {
+          state.searchItems = state.searchItems.filter((x) => x.id !== id);
+        }
+        showToast(`已删除 #${id}`);
+      } catch (e) {
+        alert("删除失败: " + (e && e.message ? e.message : e));
+      }
+      return;
+    }
+  }
+
+  /**
+   * Remove a media from the Feed playlist + DOM after server delete.
+   * Prefer advancing to next; if last item, go prev; if empty, hard reload.
+   */
+  async function removeFeedItemById(id) {
+    const idNum = Number(id);
+    const idx = state.items.findIndex((x) => Number(x.id) === idNum);
+    if (idx < 0) {
+      await loadFeed({ quiet: true });
+      return;
+    }
+    const wasCurrent = (state.feedIndex | 0) === idx;
+    const scroller = $("#feedScroller");
+    const el = scroller && scroller.querySelector(`.snap-slide[data-id="${idNum}"]`);
+    if (el) _removeSlideEl(el);
+    state.items = state.items.filter((x) => Number(x.id) !== idNum);
+    if (state.feedSeenSet && state.feedSeenSet.has(idNum)) {
+      state.feedSeenSet.delete(idNum);
+      state.feedSeenIds = (state.feedSeenIds || []).filter((x) => Number(x) !== idNum);
+    }
+    if (state.viewedIds) state.viewedIds.delete(idNum);
+    if (String(state.activeFeedId) === String(idNum)) state.activeFeedId = null;
+
+    if (!state.items.length) {
+      state.feedIndex = 0;
+      try {
+        unlockFeedId();
+      } catch (_) {}
+      await loadFeed({ quiet: true });
+      return;
+    }
+
+    // Reindex remaining slides to match state.items order
+    if (scroller) {
+      const byId = new Map(state.items.map((it, i) => [Number(it.id), i]));
+      scroller.querySelectorAll(".snap-slide").forEach((slide) => {
+        const sid = Number(slide.dataset.id);
+        if (byId.has(sid)) slide.dataset.index = String(byId.get(sid));
+      });
+    }
+
+    let nextIdx = wasCurrent ? idx : state.feedIndex | 0;
+    if (wasCurrent) {
+      // prefer next item (same index after removal); else previous
+      if (nextIdx >= state.items.length) nextIdx = state.items.length - 1;
+    } else if (idx < nextIdx) {
+      nextIdx = Math.max(0, nextIdx - 1);
+    }
+    state.feedIndex = Math.max(0, Math.min(nextIdx, state.items.length - 1));
+
+    const nextItem = state.items[state.feedIndex];
+    if (!nextItem) return;
+    try {
+      unlockFeedId();
+    } catch (_) {}
+    commitFeedId(nextItem.id, state.feedIndex);
+    const nextEl =
+      scroller && scroller.querySelector(`.snap-slide[data-id="${nextItem.id}"]`);
+    if (nextEl) {
+      try {
+        nextEl.scrollIntoView({ block: "start", behavior: "auto" });
+      } catch (_) {}
+      try {
+        await activateFeedSlide(nextEl, { force: true, fromUserScroll: true });
+      } catch (e) {
+        console.warn("activate after delete", e);
+      }
+      kickFeedAutoplay(nextItem.id);
+    }
+    ensureFeedAhead(6, { force: true }).catch(() => {});
+  }
+
+  /** Swap Feed review ↔ delete buttons without rebuilding the playing slide. */
+  function syncFeedEditModeButtons() {
+    document.querySelectorAll(".snap-slide .actions").forEach((actions) => {
+      const slide = actions.closest(".snap-slide");
+      const id = slide && slide.dataset.id;
+      if (!id) return;
+      const item = state.items.find((x) => String(x.id) === String(id));
+      const old = actions.querySelector("[data-act='review'], [data-act='delete']");
+      const btn = document.createElement("button");
+      btn.type = "button";
+      btn.className = "round";
+      btn.dataset.id = id;
+      if (state.editMode) {
+        btn.classList.add("danger", "feed-del");
+        btn.dataset.act = "delete";
+        btn.title = "删除";
+        btn.setAttribute("aria-label", "删除");
+        btn.innerHTML = ICO.trash;
+      } else {
+        btn.classList.add("review");
+        if (item && (item.review || "").trim()) btn.classList.add("on");
+        btn.dataset.act = "review";
+        btn.title = "点评";
+        btn.innerHTML = ICO.review;
+      }
+      btn.addEventListener("click", (e) => {
+        e.stopPropagation();
+        handleAction(btn.dataset.act, Number(btn.dataset.id), btn);
+      });
+      if (old) old.replaceWith(btn);
+      else actions.appendChild(btn);
+    });
   }
 
   /** Review modal state */
@@ -4268,9 +5229,14 @@
     if (id && (fromUser || !getCommittedFeedId())) {
       commitFeedId(id, index);
     }
+    // Cast session open + user swipe → mirror new item to TV, keep phone paused
+    if (fromUser && id && isCastSessionActive()) {
+      scheduleAutoCastForFeedMedia(id);
+    }
     const stage = slideEl.querySelector(".media-stage");
     if (!stage) return;
 
+    const casting = isCastSessionActive();
     const isVideoSlide =
       stage.getAttribute("data-kind") === "video" ||
       !!stage.querySelector("video") ||
@@ -4287,6 +5253,7 @@
         applyMediaStageFit(media);
         setSlideLoading(slideEl, false);
         onSlideActive(index);
+        if (casting) holdFeedPausedForCast();
         return;
       }
       const epoch = ++state.playEpoch;
@@ -4324,6 +5291,7 @@
       } finally {
         if (epoch === state.playEpoch) state._feedActivating = false;
       }
+      if (casting) holdFeedPausedForCast();
       return;
     }
 
@@ -4336,6 +5304,14 @@
 
     let media = mountFeedPlayer(slideEl);
     if (!media) return;
+
+    // While casting: always hold local pause (TV is the player)
+    if (casting) {
+      try {
+        media.dataset.userPaused = "1";
+        if (!media.paused) media.pause();
+      } catch (_) {}
+    }
 
     // Same clip already loaded & ready → soft resume (keep sound unlock)
     // After L→P, first switch to a *different* clip must not take soft path on stale buffer
@@ -4350,6 +5326,7 @@
     if (
       !forcePostOrient &&
       media.dataset.userPaused !== "1" &&
+      !casting &&
       mediaSrcLoaded(media, src) &&
       media.getAttribute("src") &&
       media.readyState >= 1 &&
@@ -4374,6 +5351,30 @@
       return;
     }
 
+    // Soft path when casting & clip already buffered: stay paused, no autoplay
+    if (
+      casting &&
+      !forcePostOrient &&
+      mediaSrcLoaded(media, src) &&
+      media.getAttribute("src") &&
+      media.readyState >= 1 &&
+      !media.error
+    ) {
+      state.activeFeedId = id;
+      onSlideActive(index);
+      pauseOtherFeedVideos(media);
+      stripDistantFeedVideos(index);
+      try {
+        media.dataset.userPaused = "1";
+        if (!media.paused) media.pause();
+      } catch (_) {}
+      applyMediaStageFit(media);
+      media.classList.add("is-ready");
+      setSlideLoading(slideEl, false);
+      holdFeedPausedForCast();
+      return;
+    }
+
     const epoch = ++state.playEpoch;
     state.activeFeedId = id;
     state._feedActivating = true;
@@ -4393,14 +5394,57 @@
 
     // Re-mount in case compact moved DOM
     media = mountFeedPlayer(slideEl) || media;
+    if (casting) {
+      try {
+        media.dataset.userPaused = "1";
+        if (!media.paused) media.pause();
+      } catch (_) {}
+    }
 
     // Clear sticky userPaused from orient thrash when switching clips
-    if (forcePostOrient || isDifferentClip) {
+    // (never while cast session is active — phone stays paused for TV)
+    if ((forcePostOrient || isDifferentClip) && !casting && !isCastSessionActive()) {
       media.dataset.userPaused = "0";
     }
 
-    if (media.dataset.userPaused === "1") {
-      setSlideLoading(slideEl, false);
+    // Cast / user-pause: still load so scrub + Seek-to-TV work; never autoplay
+    if (media.dataset.userPaused === "1" || casting || isCastSessionActive()) {
+      try {
+        media.dataset.userPaused = "1";
+      } catch (_) {}
+      try {
+        media.classList.remove("is-ready");
+        media.removeAttribute("poster");
+      } catch (_) {}
+      media.setAttribute("data-src", src);
+      media.preload = "auto";
+      try {
+        const needForce =
+          !!media.error ||
+          !media.getAttribute("src") ||
+          !mediaSrcLoaded(media, src) ||
+          forcePostOrient ||
+          isDifferentClip;
+        await loadMediaEl(media, src, { force: needForce });
+        if (epoch === state.playEpoch && state.activeFeedId === id) {
+          try {
+            media.dataset.userPaused = "1";
+            if (!media.paused) media.pause();
+          } catch (_) {}
+          try {
+            const mid = parseInt(String(id), 10);
+            if (Number.isFinite(mid)) tryResumeWatchPosition(media, mid);
+          } catch (_) {}
+          applyMediaStageFit(media);
+          if (media.readyState >= 1) media.classList.add("is-ready");
+          setSlideLoading(slideEl, false);
+        }
+      } catch (_) {
+        if (epoch === state.playEpoch && state.activeFeedId === id) {
+          setSlideLoading(slideEl, false);
+        }
+      }
+      holdFeedPausedForCast();
       releaseActivating();
       return;
     }
@@ -4433,12 +5477,29 @@
         releaseActivating();
         return;
       }
+      // Cast may have started mid-load
+      if (isCastSessionActive()) {
+        try {
+          media.dataset.userPaused = "1";
+          if (!media.paused) media.pause();
+        } catch (_) {}
+        applyMediaStageFit(media);
+        media.classList.add("is-ready");
+        setSlideLoading(slideEl, false);
+        holdFeedPausedForCast();
+        releaseActivating();
+        return;
+      }
       if (String(media.dataset.playGen) !== String(gen)) {
         releaseActivating();
         return;
       }
 
       applyMediaStageFit(media);
+      try {
+        const mid = parseInt(String(id), 10);
+        if (Number.isFinite(mid)) tryResumeWatchPosition(media, mid);
+      } catch (_) {}
 
       let played = await playVideoRobust(media, gen);
       if (
@@ -4692,6 +5753,11 @@
         const prevSrc = el.getAttribute("src") || "";
         el.src = authed;
         el.dataset.loadedSrc = url;
+        if (force || prevSrc !== authed) {
+          try {
+            delete el.dataset.resumeAppliedId;
+          } catch (_) {}
+        }
         // Only call load() when src actually changes (iOS: load() is expensive)
         if (force || prevSrc !== authed) {
           if (typeof el.load === "function") el.load();
@@ -5351,11 +6417,19 @@
     setView(back);
   }
 
+  function readSearchSortFromUI() {
+    const by = $("#searchSortBy")?.value;
+    const dir = $("#searchSortDir")?.value;
+    if (by === "created" || by === "name") state.searchSort = by;
+    if (dir === "desc" || dir === "asc") state.searchOrder = dir;
+  }
+
   /**
    * Media list search — same API as manage page: title / URL / tags via `q`.
    */
   async function runSearch(q, { reset = true } = {}) {
     const query = String(q ?? $("#searchInput")?.value ?? "").trim();
+    readSearchSortFromUI();
     state.searchQ = query;
     const discover = $("#searchDiscover");
     const head = $("#searchResultHead");
@@ -5394,10 +6468,12 @@
       const offset = reset ? 0 : state.searchOffset;
       const params = new URLSearchParams({
         q: query,
-        sort: "new",
+        sort: state.searchSort === "created" ? "created" : "name",
+        order: state.searchOrder === "desc" ? "desc" : "asc",
         limit: String(limit),
         offset: String(offset),
         include_restricted: state.includeRestricted ? "true" : "false",
+        include_images: state.includeImages ? "true" : "false",
       });
       const data = await api(`/api/media?${params}`);
       const items = data.items || [];
@@ -5465,7 +6541,7 @@
       .filter(Boolean);
   }
 
-  async function uploadAlbumFile(file, { tags, restricted }) {
+  async function uploadAlbumFile(file, { tags }) {
     const fd = new FormData();
     fd.append("title", file.name.replace(/\.[^.]+$/, "") || file.name);
     fd.append("source_url", "");
@@ -5476,7 +6552,7 @@
     );
     fd.append("remux", "1");
     if (tags && tags.length) fd.append("tags", JSON.stringify(tags));
-    if (restricted) fd.append("restricted", "1");
+    // 限制级仅插件 / FFmpegBridge 提交；相册上传不传 restricted
     fd.append("file", file, file.name || "upload.bin");
     // Do not set Content-Type — browser sets multipart boundary
     return api("/api/upload", { method: "POST", body: fd });
@@ -5487,7 +6563,6 @@
     const prog = document.getElementById("albumUploadProg");
     if (!files.length) return;
     const tags = parseTagsInput(document.getElementById("albumUploadTags")?.value);
-    const restricted = !!document.getElementById("albumUploadRestricted")?.checked;
     let ok = 0;
     let fail = 0;
     let dups = 0;
@@ -5495,7 +6570,7 @@
     for (let i = 0; i < files.length; i++) {
       if (prog) prog.textContent = `${i + 1}/${files.length} 上传中… ${files[i].name}`;
       try {
-        const r = await uploadAlbumFile(files[i], { tags, restricted });
+        const r = await uploadAlbumFile(files[i], { tags });
         if (r && r.duplicate) dups += 1;
         else ok += 1;
       } catch (e) {
@@ -5660,6 +6735,12 @@
         });
         document.addEventListener("keydown", (e) => {
           if (e.key !== "Escape") return;
+          const cast = document.getElementById("castModal");
+          if (cast && !cast.classList.contains("hide")) {
+            e.preventDefault();
+            closeCastModal();
+            return;
+          }
           const m = document.getElementById("reviewModal");
           if (m && !m.classList.contains("hide")) {
             e.preventDefault();
@@ -5667,6 +6748,62 @@
           }
         });
       }
+    }
+
+    // —— DLNA cast sheet + cast bar (once) ——
+    if (!document.documentElement.dataset.lmwCastBound) {
+      document.documentElement.dataset.lmwCastBound = "1";
+      restoreCastSessionFromStorage();
+      ensureCastBar();
+      updateCastBar();
+      document.addEventListener("click", (e) => {
+        const t = e.target;
+        if (!t || !t.closest) return;
+        if (t.closest("#btnCast")) {
+          e.preventDefault();
+          e.stopPropagation();
+          openCastModal();
+          return;
+        }
+        if (t.closest("#btnCastRefresh")) {
+          e.preventDefault();
+          loadCastDevices({ refresh: true });
+          return;
+        }
+        if (t.closest("[data-cast-dismiss]")) {
+          e.preventDefault();
+          closeCastModal();
+          return;
+        }
+        if (t.closest("#btnCastPause")) {
+          e.preventDefault();
+          e.stopPropagation();
+          toggleCastPause();
+          return;
+        }
+        if (t.closest("#btnCastStop")) {
+          e.preventDefault();
+          e.stopPropagation();
+          // Shift+click: force clear without SOAP (box already gone)
+          if (e.shiftKey) {
+            forceClearCastSession();
+            return;
+          }
+          castControl("stop").catch(() => {});
+          return;
+        }
+        if (t.closest("#btnCastSwitch")) {
+          e.preventDefault();
+          e.stopPropagation();
+          openCastModal();
+          return;
+        }
+        const devBtn = t.closest(".cast-device[data-cast-id]");
+        if (devBtn) {
+          e.preventDefault();
+          castToDevice(devBtn.getAttribute("data-cast-id") || "");
+        }
+      });
     }
 
     // —— Global click delegation (survives re-renders; capture beats feed layer) ——
@@ -5778,6 +6915,20 @@
         }
       });
     }
+    const searchSortBy = document.getElementById("searchSortBy");
+    const searchSortDir = document.getElementById("searchSortDir");
+    const onSearchSortChange = () => {
+      readSearchSortFromUI();
+      if ((state.searchQ || "").trim()) runSearch(state.searchQ, { reset: true });
+    };
+    if (searchSortBy && searchSortBy.dataset.bound !== "1") {
+      searchSortBy.dataset.bound = "1";
+      searchSortBy.addEventListener("change", onSearchSortChange);
+    }
+    if (searchSortDir && searchSortDir.dataset.bound !== "1") {
+      searchSortDir.dataset.bound = "1";
+      searchSortDir.addEventListener("change", onSearchSortChange);
+    }
 
     // —— Admin media library search ——
     const adminQ = document.getElementById("adminMediaQ");
@@ -5824,6 +6975,51 @@
         } catch (e) {
           console.warn("restricted filter refresh", e);
         }
+      });
+    }
+    const imagesToggle = document.getElementById("includeImagesToggle");
+    if (imagesToggle) {
+      imagesToggle.checked = !!state.includeImages;
+      imagesToggle.addEventListener("change", async () => {
+        state.includeImages = !!imagesToggle.checked;
+        localStorage.setItem(includeImagesKey, state.includeImages ? "1" : "0");
+        showToast(
+          state.includeImages
+            ? "已允许静态图片浏览"
+            : "已隐藏静态图片"
+        );
+        try {
+          await loadFeed({ quiet: true });
+          if (state.view === "grid") await renderGridQuiet();
+          if (state.view === "search" && (state.searchQ || "").trim()) {
+            await runSearch(state.searchQ, { reset: true });
+          }
+        } catch (e) {
+          console.warn("images filter refresh", e);
+        }
+      });
+    }
+    const editModeToggle = document.getElementById("editModeToggle");
+    if (editModeToggle) {
+      editModeToggle.checked = !!state.editMode;
+      editModeToggle.addEventListener("change", () => {
+        state.editMode = !!editModeToggle.checked;
+        localStorage.setItem(editModeKey, state.editMode ? "1" : "0");
+        syncFeedEditModeButtons();
+        showToast(state.editMode ? "已开启编辑模式 · 右下角为删除" : "已关闭编辑模式 · 右下角为留言");
+      });
+    }
+    const castPlayModeSel = document.getElementById("castPlayMode");
+    if (castPlayModeSel) {
+      castPlayModeSel.value = getCastPlayMode();
+      castPlayModeSel.addEventListener("change", () => {
+        const m = setCastPlayMode(castPlayModeSel.value);
+        castPlayModeSel.value = m;
+        showToast(
+          m === "loop"
+            ? "投屏模式：单个循环（服务端播完重推同一条）"
+            : "投屏模式：单个播放（播完即停）"
+        );
       });
     }
     const albumIn = document.getElementById("albumUploadInput");

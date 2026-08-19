@@ -106,9 +106,7 @@
             <label style="color:#fff;font-size:12px;display:flex;align-items:center;gap:4px;white-space:nowrap;" title="入库标记限制级">
                 <input type="checkbox" id="useRestricted" style="-webkit-appearance:auto;" ${localStorage.getItem("CatCatchRecorder2_useRestricted") || ""}>限制级
             </label>
-            <label style="color:#fff;font-size:12px;display:flex;align-items:center;gap:4px;white-space:nowrap;" title="入库后 jasna 去马赛克">
-                <input type="checkbox" id="useJasna" style="-webkit-appearance:auto;" ${localStorage.getItem("CatCatchRecorder2_useJasna") || ""}>jasna
-            </label>
+
             <label style="color:#fff;font-size:12px;display:flex;align-items:center;gap:4px;white-space:nowrap;">
                 <input type="checkbox" id="alsoDownload" style="-webkit-appearance:auto;">下载
             </label>
@@ -294,7 +292,7 @@
                 else finish(() => reject(new Error(event.data.error || "ingest failed")));
             };
             window.addEventListener("message", onMsg);
-            const useJasna = !!cat?.querySelector?.("#useJasna")?.checked || !!meta.use_jasna;
+            const useJasna = false;
             const restricted = !!cat?.querySelector?.("#useRestricted")?.checked || !!meta.restricted;
             window.postMessage({
                 action: "catCatchIngestBlob",

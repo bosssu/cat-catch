@@ -5082,7 +5082,14 @@
         }
     }
 
+    function isPairAudioRole(it) {
+        if (!it || !it._key) return false;
+        const info = avPairByKey.get(it._key);
+        return !!(info && info.role === "audio");
+    }
+
     function isVideoLikeItem(it) {
+        if (isPairAudioRole(it)) return false;
         const t = mediaTypeOf(it);
         if (t === "audio" || t === "image" || t === "gif") return false;
         if (t === "video" || t === "m3u8" || t === "dash") return true;
@@ -5095,6 +5102,7 @@
     }
 
     function isAudioLikeItem(it) {
+        if (isPairAudioRole(it)) return true;
         const t = mediaTypeOf(it);
         if (t === "audio") return true;
         if (t === "video" || t === "m3u8" || t === "dash" || t === "image" || t === "gif") return false;
@@ -5114,41 +5122,78 @@
     }
 
     /**
-     * Audio/container extension from file magic (first ~16–32 bytes).
-     * Used so disguised .mp4 audio is saved as .m4a / .mp3 / …
+     * Container from file magic (first ~16–32 bytes).
+     * family:
+     *   safe-audio  — never a video file (mp3/flac/ogg/wav/aac/weba)
+     *   m4a-brand   — ftyp M4A/M4B/M4P, safe to save as .m4a
+     *   mp4-family  — ftyp isom/mp42/…  video and disguised audio look the same
      */
-    function extFromMagicBytes(buf) {
-        if (!buf || buf.byteLength < 4) return "";
+    function parseMagicContainer(buf) {
+        if (!buf || buf.byteLength < 4) return { family: "unknown", ext: "" };
         const b = buf instanceof Uint8Array ? buf : new Uint8Array(buf);
         const ascii = (i, n) => {
             let s = "";
             for (let k = 0; k < n && i + k < b.length; k++) s += String.fromCharCode(b[i + k]);
             return s;
         };
-        if (b[0] === 0x49 && b[1] === 0x44 && b[2] === 0x33) return "mp3";
-        if (ascii(0, 4) === "fLaC") return "flac";
-        if (ascii(0, 4) === "OggS") return "ogg";
-        if (ascii(0, 4) === "RIFF" && b.length >= 12 && ascii(8, 4) === "WAVE") return "wav";
+        if (b[0] === 0x49 && b[1] === 0x44 && b[2] === 0x33) {
+            return { family: "safe-audio", ext: "mp3" };
+        }
+        if (ascii(0, 4) === "fLaC") return { family: "safe-audio", ext: "flac" };
+        if (ascii(0, 4) === "OggS") return { family: "safe-audio", ext: "ogg" };
+        if (ascii(0, 4) === "RIFF" && b.length >= 12 && ascii(8, 4) === "WAVE") {
+            return { family: "safe-audio", ext: "wav" };
+        }
         if (b.length >= 12 && ascii(4, 4) === "ftyp") {
             const brand = ascii(8, 4);
-            if (/^(M4A |M4B |M4P )/i.test(brand)) return "m4a";
-            if (/^(mp41|mp42|isom|iso2|iso5|iso6|avc1|dash|msdh|mp71|M4V )/i.test(brand)) return "m4a";
-            return "m4a";
+            if (/^(M4A |M4B |M4P )/i.test(brand)) {
+                return { family: "m4a-brand", ext: "m4a" };
+            }
+            return { family: "mp4-family", ext: "mp4" };
         }
-        if (b[0] === 0x1a && b[1] === 0x45 && b[2] === 0xdf && b[3] === 0xa3) return "weba";
-        // ADTS AAC
-        if (b[0] === 0xff && (b[1] & 0xf6) === 0xf0) return "aac";
-        // MPEG audio frame (layer 3 → mp3)
+        if (b[0] === 0x1a && b[1] === 0x45 && b[2] === 0xdf && b[3] === 0xa3) {
+            // WebM video and weba share EBML; only rename when already audio-like
+            return { family: "ebml", ext: "webm" };
+        }
+        if (b[0] === 0xff && (b[1] & 0xf6) === 0xf0) {
+            return { family: "safe-audio", ext: "aac" };
+        }
         if (b[0] === 0xff && (b[1] & 0xe0) === 0xe0) {
             const layer = (b[1] >> 1) & 0x03;
-            if (layer === 0x01) return "mp3";
-            if (layer === 0x02) return "mp2";
-            return "mp3";
+            return { family: "safe-audio", ext: layer === 0x02 ? "mp2" : "mp3" };
         }
+        return { family: "unknown", ext: "" };
+    }
+
+    function extFromMagicBytes(buf) {
+        const s = parseMagicContainer(buf);
+        return s.ext || "";
+    }
+
+    /**
+     * Only rename when it cannot clobber a real video:
+     * - unambiguous audio magic
+     * - ftyp M4A/M4B
+     * - ftyp isom/mp42 AND (typed audio OR merge-pair audio role)
+     */
+    function audioExtFromSniff(it, sniff) {
+        if (!sniff || !sniff.family) return "";
+        if (sniff.family === "safe-audio" && sniff.ext) return sniff.ext;
+        if (sniff.family === "m4a-brand") return "m4a";
+        const audioHint = isAudioLikeItem(it) || isPairAudioRole(it);
+        if (sniff.family === "mp4-family" && audioHint) return "m4a";
+        if (sniff.family === "ebml" && audioHint) return "weba";
         return "";
     }
 
-    async function sniffAudioExtForItem(it) {
+    function applyDownloadAudioExt(it, ext) {
+        if (!it || !ext) return;
+        it._sniffedExt = ext;
+        it.ext = ext;
+        if (it.downFileName) it.downFileName = replaceFileNameExt(it.downFileName, ext);
+    }
+
+    async function sniffDownloadExtForItem(it) {
         if (!it || !it.url) return "";
         if (it._sniffedExt) return it._sniffedExt;
         const headers = playHeaderMap(it);
@@ -5168,15 +5213,13 @@
             });
             if (!resp.ok && resp.status !== 206) return "";
             const raw = await resp.arrayBuffer();
-            const ext = extFromMagicBytes(raw);
-            if (ext) {
-                it._sniffedExt = ext;
-                it.ext = ext;
-                if (it.downFileName) it.downFileName = replaceFileNameExt(it.downFileName, ext);
-            }
+            const sniff = parseMagicContainer(raw);
+            it._magicFamily = sniff.family;
+            const ext = audioExtFromSniff(it, sniff);
+            if (ext) applyDownloadAudioExt(it, ext);
             return ext || "";
         } catch (e) {
-            console.warn("sniff audio ext failed", it.url, e);
+            console.warn("sniff download ext failed", it.url, e);
             return "";
         } finally {
             if (timer) clearTimeout(timer);
@@ -5321,8 +5364,8 @@
                     continue;
                 }
 
-                if (isAudioLikeItem(it)) {
-                    await sniffAudioExtForItem(it);
+                await sniffDownloadExtForItem(it);
+                if (isAudioLikeItem(it) || it._sniffedExt) {
                     audioN++;
                 } else {
                     videoN++;

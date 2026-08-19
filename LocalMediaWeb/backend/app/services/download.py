@@ -4,6 +4,7 @@ import asyncio
 import json
 import logging
 import shutil
+import subprocess
 from pathlib import Path
 
 import httpx
@@ -25,6 +26,7 @@ from app.services.util import (
     safe_category,
     clip_disambiguator,
     ensure_unique_path,
+    live_stream_reject_reason,
     media_url_hash,
     normalize_clip_bounds,
     safe_filename,
@@ -157,11 +159,24 @@ async def enqueue_jobs(
     accepted = 0
     top_tags = normalize_tags(default_tags or [])
 
+    settings = get_settings()
+    rejected_live = 0
+    rejected_live_reasons: list[str] = []
+
     with session_scope() as db:
         for it in items:
             url = (it.get("url") or "").strip()
             if not url or url.startswith("file:"):
                 continue
+
+            if bool(getattr(settings, "block_live_streams", True)):
+                live_why = live_stream_reject_reason(url)
+                if live_why:
+                    rejected_live += 1
+                    if len(rejected_live_reasons) < 5:
+                        rejected_live_reasons.append(f"{live_why}: {url[:120]}")
+                    logger.info("enqueue reject live/unbounded stream: %s | %s", live_why, url[:200])
+                    continue
 
             media_type = detect_media_type(url, None, it.get("media_type"))
             headers = dict(it.get("headers") or {})
@@ -222,13 +237,29 @@ async def enqueue_jobs(
             db.flush()
             job_ids.append(job.id)
             accepted += 1
+            logger.info(
+                "enqueue job=%s type=%s title=%s url=%s",
+                job.id,
+                media_type,
+                (it.get("title") or "")[:80],
+                url[:160],
+            )
         db.commit()
 
+    logger.info(
+        "enqueue summary accepted=%s duplicates=%s rejected_live=%s job_ids=%s",
+        accepted,
+        len(duplicates),
+        rejected_live,
+        job_ids,
+    )
     return {
         "job_ids": job_ids,
         "accepted": accepted,
         "duplicates": len(duplicates),
         "duplicate_media_ids": duplicates,
+        "rejected_live": rejected_live,
+        "rejected_live_samples": rejected_live_reasons,
     }
 
 
@@ -253,6 +284,13 @@ async def _run_job(job_id: int) -> None:
         _cancel_flags.discard(job_id)
         return
 
+    logger.info(
+        "job %s start type=%s title=%s url=%s",
+        job_id,
+        media_type,
+        (title or "")[:80],
+        (url or "")[:160],
+    )
     try:
         path_l = url.lower().split("?")[0]
         if media_type == "dash" or path_l.endswith(".mpd") or "/dash_" in path_l:
@@ -270,7 +308,18 @@ async def _run_job(job_id: int) -> None:
                 end_sec=end_sec,
             )
         else:
-            await _run_direct(job_id, url, headers, cat, title, media_type, uh, source_page)
+            await _run_direct(
+                job_id,
+                url,
+                headers,
+                cat,
+                title,
+                media_type,
+                uh,
+                source_page,
+                start_sec=start_sec,
+                end_sec=end_sec,
+            )
     except httpx.RequestError as e:
         logger.warning("job %s network error: %s", job_id, e)
         _finish_fail(
@@ -295,18 +344,55 @@ async def _stream_to_file(
     url: str,
     headers: dict[str, str],
     dest: Path,
+    *,
+    max_bytes: int = 0,
+    known_size: int = 0,
+    job_id: int | None = None,
 ) -> tuple[int, str | None, bytes]:
-    """Stream full GET to dest. Returns (status, content-type, first_bytes)."""
+    """
+    Stream full GET to dest. Returns (status, content-type, first_bytes).
+
+    When Content-Length is missing, enforce max_bytes (live FLV safety).
+    When known_size/max_file cap is set, also stop early.
+    """
     first = b""
     async with client.stream("GET", url, headers=headers) as r:
         if r.status_code >= 400:
             return r.status_code, r.headers.get("content-type"), b""
         ct = r.headers.get("content-type")
+        cl_hdr = r.headers.get("content-length")
+        declared = 0
+        if cl_hdr and str(cl_hdr).isdigit():
+            declared = int(cl_hdr)
+        if known_size > 0:
+            declared = declared or known_size
+
+        # Live / unbounded: no length → hard cap
+        cap = 0
+        if declared > 0:
+            if max_bytes > 0:
+                cap = max_bytes
+        else:
+            cap = max_bytes if max_bytes > 0 else get_settings().effective_max_unknown_size_bytes()
+
+        written = 0
         with dest.open("wb") as f:
             async for chunk in r.aiter_bytes(chunk_size=256 * 1024):
+                if job_id is not None and _is_cancelled(job_id):
+                    raise httpx.HTTPError("cancelled")
                 if not first:
                     first = chunk[:200]
+                if cap > 0 and written + len(chunk) > cap:
+                    keep = cap - written
+                    if keep > 0:
+                        f.write(chunk[:keep])
+                        written += keep
+                    raise httpx.HTTPError(
+                        f"download exceeded size cap ({cap} bytes); "
+                        "likely live/unbounded stream or oversize file"
+                    )
                 f.write(chunk)
+                written += len(chunk)
         return r.status_code, ct, first
 
 
@@ -354,6 +440,79 @@ async def _download_multi_range(
         shutil.rmtree(tmp_dir, ignore_errors=True)
 
 
+def _ffmpeg_cut_file(
+    src: Path,
+    dest: Path,
+    *,
+    start_sec: float | None,
+    end_sec: float | None,
+) -> Path:
+    """
+    Cut progressive media with ffmpeg (copy when possible).
+    Used so multi-range clips of the same direct URL become distinct files.
+    """
+    from app.core.config import ffmpeg_available
+
+    if not ffmpeg_available():
+        raise RuntimeError("ffmpeg missing; cannot cut clip for direct download")
+    s, e = normalize_clip_bounds(start_sec, end_sec)
+    if s is None and e is None:
+        return src
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    if dest.exists():
+        dest.unlink()
+    # -ss after -i is more accurate; for long files input -ss is faster — prefer accurate cut
+    cmd = ["ffmpeg", "-hide_banner", "-loglevel", "error", "-y"]
+    if s is not None and s > 0:
+        cmd += ["-ss", str(s)]
+    cmd += ["-i", str(src)]
+    if e is not None and e > 0:
+        # duration when we have start; absolute end when start is 0
+        if s is not None and s > 0:
+            dur = max(0.1, float(e) - float(s))
+            cmd += ["-t", str(dur)]
+        else:
+            cmd += ["-to", str(e)]
+    cmd += ["-c", "copy", "-avoid_negative_ts", "make_zero", str(dest)]
+    proc = subprocess.run(cmd, capture_output=True, text=True, timeout=1800, check=False)
+    if proc.returncode != 0 or not dest.is_file() or dest.stat().st_size < 32:
+        # re-encode fallback (copy can fail on keyframes)
+        if dest.exists():
+            try:
+                dest.unlink()
+            except OSError:
+                pass
+        cmd2 = ["ffmpeg", "-hide_banner", "-loglevel", "error", "-y"]
+        if s is not None and s > 0:
+            cmd2 += ["-ss", str(s)]
+        cmd2 += ["-i", str(src)]
+        if e is not None and e > 0:
+            if s is not None and s > 0:
+                cmd2 += ["-t", str(max(0.1, float(e) - float(s)))]
+            else:
+                cmd2 += ["-to", str(e)]
+        cmd2 += [
+            "-c:v",
+            "libx264",
+            "-preset",
+            "veryfast",
+            "-crf",
+            "23",
+            "-c:a",
+            "aac",
+            "-b:a",
+            "128k",
+            "-movflags",
+            "+faststart",
+            str(dest),
+        ]
+        proc2 = subprocess.run(cmd2, capture_output=True, text=True, timeout=3600, check=False)
+        if proc2.returncode != 0 or not dest.is_file() or dest.stat().st_size < 32:
+            err = (proc2.stderr or proc.stderr or "")[-400:]
+            raise RuntimeError(f"ffmpeg cut failed: {err}")
+    return dest
+
+
 async def _run_direct(
     job_id: int,
     url: str,
@@ -363,12 +522,28 @@ async def _run_direct(
     media_type: str,
     uh: str,
     source_page: str,
+    start_sec: float | None = None,
+    end_sec: float | None = None,
 ) -> None:
     settings = get_settings()
+    if bool(getattr(settings, "block_live_streams", True)):
+        live_why = live_stream_reject_reason(url)
+        if live_why:
+            _finish_fail(
+                job_id,
+                "failed_network",
+                0,
+                f"blocked live/unbounded stream: {live_why}",
+                False,
+            )
+            return
+
     timeout = httpx.Timeout(settings.request_timeout_sec, connect=30.0)
     work = settings.tmp_path() / "jobs" / str(job_id)
     work.mkdir(parents=True, exist_ok=True)
     tmp_path = work / "download.bin"
+    max_file = int(settings.max_file_bytes or 0)
+    unknown_cap = settings.effective_max_unknown_size_bytes()
 
     from app.services.http_client import iter_http_modes
 
@@ -477,6 +652,23 @@ async def _run_direct(
                     tmp_path.unlink(missing_ok=True)
                     used_gopeed = False
 
+        # No Content-Length: treat as high-risk unbounded (live) unless already capped
+        stream_cap = max_file if max_file > 0 else 0
+        if size <= 0:
+            stream_cap = unknown_cap if (not stream_cap or unknown_cap < stream_cap) else stream_cap
+            # Prefer reject known FLV live content-types early after first probe fails length
+            if bool(getattr(settings, "block_live_streams", True)):
+                live_why2 = live_stream_reject_reason(url, ct)
+                if live_why2:
+                    _finish_fail(
+                        job_id,
+                        "failed_network",
+                        0,
+                        f"blocked live/unbounded stream: {live_why2}",
+                        False,
+                    )
+                    return
+
         try:
             if used_gopeed:
                 pass  # already have tmp_path
@@ -484,7 +676,7 @@ async def _run_direct(
                 connections > 1
                 and size >= _RANGE_MIN_BYTES
                 and accept_ranges
-                and (not settings.max_file_bytes or size <= settings.max_file_bytes)
+                and (not max_file or size <= max_file)
             ):
                 await _download_multi_range(client, url, hdrs, tmp_path, size, connections)
                 used_multi = True
@@ -493,18 +685,46 @@ async def _run_direct(
                     with tmp_path.open("rb") as f:
                         first = f.read(200)
             else:
-                status, ct2, first = await _stream_to_file(client, url, hdrs, tmp_path)
+                status, ct2, first = await _stream_to_file(
+                    client,
+                    url,
+                    hdrs,
+                    tmp_path,
+                    max_bytes=stream_cap,
+                    known_size=size,
+                    job_id=job_id,
+                )
                 ct = ct or ct2
                 if status in (401, 403) and source_page:
                     hdrs2 = dict(headers)
                     hdrs2["Referer"] = source_page
-                    status, ct, first = await _stream_to_file(client, url, hdrs2, tmp_path)
+                    status, ct, first = await _stream_to_file(
+                        client,
+                        url,
+                        hdrs2,
+                        tmp_path,
+                        max_bytes=stream_cap,
+                        known_size=size,
+                        job_id=job_id,
+                    )
         except httpx.HTTPError as e:
+            msg = str(e)
+            if "size cap" in msg or "unbounded" in msg:
+                _finish_fail(job_id, "failed_disk", 0, msg[:500], False)
+                return
             # multi-range fail → single stream fallback
             if used_multi or connections > 1:
                 logger.info("job %s multi-range failed (%s), fallback single", job_id, e)
                 try:
-                    status, ct, first = await _stream_to_file(client, url, hdrs, tmp_path)
+                    status, ct, first = await _stream_to_file(
+                        client,
+                        url,
+                        hdrs,
+                        tmp_path,
+                        max_bytes=stream_cap,
+                        known_size=size,
+                        job_id=job_id,
+                    )
                 except httpx.HTTPError as e2:
                     _finish_fail(job_id, "failed_network", 0, str(e2)[:500], True)
                     return
@@ -528,18 +748,69 @@ async def _run_direct(
             return
 
         fsize = tmp_path.stat().st_size
-        if settings.max_file_bytes and fsize > settings.max_file_bytes:
+        if max_file and fsize > max_file:
             tmp_path.unlink(missing_ok=True)
             _finish_fail(job_id, "failed_disk", 0, "File exceeds max_file_bytes", False)
+            return
+        # No declared size and hit near unknown_cap → almost certainly live/unbounded
+        if size <= 0 and fsize >= unknown_cap:
+            tmp_path.unlink(missing_ok=True)
+            _finish_fail(
+                job_id,
+                "failed_disk",
+                0,
+                f"no Content-Length and size hit cap {unknown_cap}; blocked as unbounded stream",
+                False,
+            )
             return
 
         mtype = detect_media_type(url, ct, media_type)
         ext = guess_ext(url, ct, mtype)
-        fname = safe_filename(title, url, ext)
+        clip_key = clip_disambiguator(start_sec, end_sec)
+        fname = safe_filename(title, url, ext, disambiguator=clip_key)
         dest_dir = settings.medias_path()
         dest_dir.mkdir(parents=True, exist_ok=True)
         dest = ensure_unique_path(dest_dir / fname)
-        shutil.move(str(tmp_path), str(dest))
+
+        # Optional time-range clip (same URL + different ranges must become different files)
+        s_clip, e_clip = normalize_clip_bounds(start_sec, end_sec)
+        if s_clip is not None or e_clip is not None:
+            cut_tmp = work / "clip.mp4"
+            try:
+                _ffmpeg_cut_file(tmp_path, cut_tmp, start_sec=s_clip, end_sec=e_clip)
+                try:
+                    tmp_path.unlink(missing_ok=True)
+                except OSError:
+                    pass
+                # prefer .mp4 after cut
+                if dest.suffix.lower() != ".mp4":
+                    dest = ensure_unique_path(dest.with_suffix(".mp4"))
+                shutil.move(str(cut_tmp), str(dest))
+                mtype = "video"
+                if used_gopeed:
+                    warn = "gopeed;clip"
+                elif used_multi:
+                    warn = "multi-range;clip"
+                else:
+                    warn = "clip"
+            except Exception as e:
+                logger.warning("job %s clip failed (%s); keep full file", job_id, e)
+                shutil.move(str(tmp_path), str(dest))
+                if used_gopeed:
+                    warn = f"gopeed;clip_fail:{e}"
+                elif used_multi:
+                    warn = f"multi-range;clip_fail:{e}"
+                else:
+                    warn = f"clip_fail:{e}"
+        else:
+            shutil.move(str(tmp_path), str(dest))
+            if used_gopeed:
+                warn = "gopeed"
+            elif used_multi:
+                warn = "multi-range"
+            else:
+                warn = ""
+
         # Content probe after download (audio may use .mp4 suffix)
         try:
             from app.services.media_process import classify_media_file
@@ -551,16 +822,14 @@ async def _run_direct(
                 ct = cls["mime"] or ct
         except Exception as e:
             logger.warning("classify after download failed: %s", e)
-        if used_gopeed:
-            warn = "gopeed"
-        elif used_multi:
-            warn = "multi-range"
-        else:
-            warn = ""
+
+        display_title = title or dest.stem
+        if clip_key and title:
+            display_title = f"{title} [{clip_key}]"
         await _register_media(
             job_id,
             cat=cat,
-            title=title or dest.stem,
+            title=display_title,
             media_type=mtype,
             dest=dest,
             source_url=url,
@@ -680,25 +949,20 @@ async def _run_m3u8(
     dest = settings.medias_path() / fname
     dest.parent.mkdir(parents=True, exist_ok=True)
     dest = ensure_unique_path(dest)
-    # Snapshot A/V probe next to media only when before probe was not ok
+    # Always snapshot A/V probe next to media (post-mortem even when probe looks clean)
     work_json = work / "av_timeline.json"
     shutil.move(str(out_file), str(dest))
     try:
-        from app.services.media_process import before_av_not_ok
+        import json as _json
 
-        if before_av_not_ok(av_tl):
-            if work_json.is_file():
-                shutil.copy2(
-                    str(work_json),
-                    str(dest.with_name(dest.name + ".av_timeline.json")),
-                )
-            else:
-                import json as _json
-
-                dest.with_name(dest.name + ".av_timeline.json").write_text(
-                    _json.dumps(av_tl, ensure_ascii=False, indent=2),
-                    encoding="utf-8",
-                )
+        side = dest.with_name(dest.name + ".av_timeline.json")
+        if work_json.is_file():
+            shutil.copy2(str(work_json), str(side))
+        elif av_tl:
+            side.write_text(
+                _json.dumps(av_tl, ensure_ascii=False, indent=2),
+                encoding="utf-8",
+            )
     except Exception as e:
         logger.debug("copy av_timeline.json skip: %s", e)
     display_title = title or dest.stem
@@ -874,6 +1138,13 @@ async def _register_media(
                 job.error_message = (warn + f" [{note}]").strip() if warn else note
                 job.headers_json = "{}"
             db.commit()
+            if job:
+                logger.info(
+                    "job %s success media_id=%s content_dup=1 size=%s",
+                    job_id,
+                    media_id,
+                    fsize,
+                )
         else:
             item = MediaItem(
                 category="default",
@@ -899,6 +1170,14 @@ async def _register_media(
                 job.error_message = warning or ""
                 job.headers_json = "{}"  # drop secrets
             db.commit()
+            if job:
+                logger.info(
+                    "job %s success media_id=%s content_dup=0 size=%s type=%s",
+                    job_id,
+                    media_id,
+                    fsize,
+                    media_type,
+                )
 
     if content_dup:
         # Drop the just-downloaded copy; library already has identical bytes
@@ -922,9 +1201,11 @@ async def _register_media(
 
     if want_jasna:
         try:
+            from app.core.config import get_settings as _gs
             from app.services.jasna import enqueue_jasna_for_media
 
-            enqueue_jasna_for_media(media_id)
+            if bool(getattr(_gs(), "jasna_enabled", False)):
+                enqueue_jasna_for_media(media_id)
         except Exception:
             logger.exception("jasna enqueue after download failed media=%s", media_id)
 
@@ -936,6 +1217,14 @@ def _finish_fail(
     message: str,
     client_fallback: bool,
 ) -> None:
+    logger.warning(
+        "job %s end status=%s http=%s fallback=%s err=%s",
+        job_id,
+        status,
+        http_status,
+        client_fallback,
+        (message or "")[:300],
+    )
     with session_scope() as db:
         job = db.get(DownloadJob, job_id)
         if not job:
@@ -947,6 +1236,13 @@ def _finish_fail(
         if status in ("failed_auth", "need_client_fetch", "failed_partial", "failed_network"):
             job.client_fallback_allowed = client_fallback
         db.commit()
+    # Always drop staging files so failed live/partial downloads cannot fill the disk
+    try:
+        work = get_settings().tmp_path() / "jobs" / str(job_id)
+        if work.is_dir():
+            shutil.rmtree(work, ignore_errors=True)
+    except Exception:
+        logger.debug("cleanup job work dir failed job=%s", job_id, exc_info=True)
 
 
 class RegisterResult:

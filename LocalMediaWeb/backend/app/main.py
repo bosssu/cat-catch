@@ -16,11 +16,23 @@ from app import __version__
 from app.api.routes import public_router, router
 from app.core.config import PROJECT_ROOT, get_settings
 from app.core.db import init_db
+from app.core.logging_setup import setup_logging
 from app.services.download import start_worker
 from app.services.jasna import start_jasna_worker
 
 STATIC_DIR = PROJECT_ROOT / "frontend" / "public"
 logger = logging.getLogger("lmw")
+
+# High-frequency GET paths: only log failures (status >= 400)
+_API_QUIET_GET_PREFIXES = (
+    "/api/health",
+    "/api/feed",
+    "/api/media/",
+    "/api/jobs",
+    "/api/jasna/",
+    "/api/tags",
+    "/api/thumb",
+)
 
 
 class NoCacheHtmlMiddleware(BaseHTTPMiddleware):
@@ -35,6 +47,56 @@ class NoCacheHtmlMiddleware(BaseHTTPMiddleware):
         elif path.startswith("/assets/"):
             # short cache; query-string versioning (?v=) busts on release
             response.headers.setdefault("Cache-Control", "public, max-age=60, must-revalidate")
+        return response
+
+
+class ApiAccessLogMiddleware(BaseHTTPMiddleware):
+    """
+    Light API access log: all mutating methods + any 4xx/5xx.
+    Skips successful high-frequency feed/media GETs to avoid flooding app.log.
+    """
+
+    async def dispatch(self, request: Request, call_next):
+        import time
+
+        path = request.url.path or ""
+        method = (request.method or "GET").upper()
+        if not path.startswith("/api/"):
+            return await call_next(request)
+
+        t0 = time.perf_counter()
+        try:
+            response: Response = await call_next(request)
+        except Exception:
+            ms = (time.perf_counter() - t0) * 1000
+            logging.getLogger("lmw.api").exception(
+                "crash %s %s after %.0fms client=%s",
+                method,
+                path,
+                ms,
+                (request.client.host if request.client else "-"),
+            )
+            raise
+
+        status = int(getattr(response, "status_code", 0) or 0)
+        ms = (time.perf_counter() - t0) * 1000
+        quiet_ok = (
+            method == "GET"
+            and status < 400
+            and any(path == p or path.startswith(p) for p in _API_QUIET_GET_PREFIXES)
+        )
+        if quiet_ok:
+            return response
+
+        client = request.client.host if request.client else "-"
+        log = logging.getLogger("lmw.api")
+        msg = "%s %s -> %s %.0fms client=%s"
+        if status >= 500:
+            log.error(msg, method, path, status, ms, client)
+        elif status >= 400:
+            log.warning(msg, method, path, status, ms, client)
+        else:
+            log.info(msg, method, path, status, ms, client)
         return response
 
 
@@ -75,12 +137,34 @@ def _install_asyncio_quiet_handler() -> None:
 
 @asynccontextmanager
 async def lifespan(_app: FastAPI):
+    settings = get_settings()
+    setup_logging(logs_dir=settings.logs_path())
     _install_asyncio_quiet_handler()
-    get_settings().ensure_dirs()
+    settings.ensure_dirs()
     init_db()
+    logger.info(
+        "LocalMediaWeb %s starting host=%s port=%s profile=%s medias=%s",
+        __version__,
+        settings.host,
+        settings.port,
+        settings.profile,
+        settings.medias_path(),
+    )
     await start_worker()
-    await start_jasna_worker()
+    # Jasna is optional; weak 24/7 hosts should keep jasna_enabled=false and use JasnaBridge.
+    if bool(getattr(settings, "jasna_enabled", False)):
+        await start_jasna_worker()
+    else:
+        logger.info("jasna worker not started (jasna_enabled=false; use local JasnaBridge)")
+    # Warm DLNA device list in background so first cast UI open is usually instant.
+    try:
+        from app.services.dlna import warm_cache_background
+
+        warm_cache_background(timeout_sec=2.5, delay_sec=1.5)
+    except Exception:
+        logger.exception("dlna warm schedule failed")
     yield
+    logger.info("LocalMediaWeb shutting down")
 
 
 app = FastAPI(title="LocalMediaWeb", version=__version__, lifespan=lifespan)
@@ -92,6 +176,8 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+# Starlette: last added runs first. Access log outermost so it sees final status.
+app.add_middleware(ApiAccessLogMiddleware)
 app.add_middleware(NoCacheHtmlMiddleware)
 
 app.include_router(public_router)

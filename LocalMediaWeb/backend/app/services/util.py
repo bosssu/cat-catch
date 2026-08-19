@@ -100,6 +100,103 @@ def content_hash_file(path: Path, chunk: int = 1024 * 1024) -> str:
     return h.hexdigest()
 
 
+# Douyin / generic live or unbounded progressive streams (no finite VOD file).
+_LIVE_HOST_RE = re.compile(
+    r"(^|\.)("
+    r"pull[-.].*douyincdn\.com|"
+    r".*live.*douyincdn\.com|"
+    r"live\.douyin\.com|"
+    r"pull-flv[^.]*\.|"
+    r"pull-hls[^.]*\.|"
+    r"push-.*douyincdn\.com|"
+    r"webcast\..*"
+    r")",
+    re.I,
+)
+_LIVE_PATH_RE = re.compile(
+    r"("
+    r"/thirdgame/stream-|"
+    r"/stream-\d|"
+    r"/webcast/|"
+    r"/live/stream|"
+    r"/liveplay|"
+    r"/flv/live|"
+    r"rtm_expr_tag=|"
+    r"major_anchor|"
+    r"biz_protocol=flv"
+    r")",
+    re.I,
+)
+
+
+def live_stream_reject_reason(url: str, content_type: str | None = None) -> str | None:
+    """
+    Return a short reason if URL looks like a live / unbounded stream
+    (Douyin pull-FLV, RTMP, etc.). VOD m3u8/mp4 should return None.
+    """
+    u = (url or "").strip()
+    if not u:
+        return None
+    low = u.lower()
+    if low.startswith("rtmp://") or low.startswith("rtmps://") or low.startswith("srt://"):
+        return "live protocol (rtmp/srt)"
+    try:
+        p = urlparse(u)
+    except Exception:
+        return None
+    host = (p.hostname or "").lower()
+    path = (p.path or "").lower()
+    query = (p.query or "").lower()
+    path_q = f"{path}?{query}"
+
+    # Explicit live CDN hosts (Douyin pull edge)
+    if host and _LIVE_HOST_RE.search(host):
+        return f"live CDN host ({host})"
+    if "douyincdn.com" in host and (
+        host.startswith("pull-") or ".pull" in host or "pull." in host
+    ):
+        return f"Douyin pull CDN ({host})"
+    if host.endswith("douyincdn.com") and path.endswith(".flv"):
+        return "Douyin CDN FLV (likely live)"
+
+    if _LIVE_PATH_RE.search(path_q) or _LIVE_PATH_RE.search(low):
+        # Allow normal VOD mp4 on same query noise? major_anchor is live-only.
+        if path.endswith((".m3u8", ".mpd", ".mp4", ".webm", ".mov", ".mkv")):
+            # finite playlist/file extensions usually VOD
+            if "biz_protocol=flv" in query or "/thirdgame/stream-" in path:
+                return "live stream path markers"
+            return None
+        return "live stream path markers"
+
+    # Bare .flv on streaming-style hosts without VOD path
+    if path.endswith(".flv"):
+        if any(
+            x in host
+            for x in (
+                "live",
+                "pull",
+                "push",
+                "flv",
+                "douyin",
+                "tiktok",
+                "byte",
+                "webcast",
+            )
+        ):
+            return "FLV on streaming host (likely live)"
+
+    ct = (content_type or "").split(";")[0].strip().lower()
+    if ct in ("video/x-flv", "video/flv") and (
+        "live" in host or "pull" in host or path.endswith(".flv")
+    ):
+        return f"FLV content-type ({ct})"
+    return None
+
+
+def is_likely_live_stream(url: str, content_type: str | None = None) -> bool:
+    return live_stream_reject_reason(url, content_type) is not None
+
+
 def safe_filename(title: str, url: str, ext: str, *, disambiguator: str = "") -> str:
     """
     Build a filesystem-safe name. ``disambiguator`` (e.g. m3u8 clip range

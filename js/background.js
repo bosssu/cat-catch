@@ -315,7 +315,7 @@ function save(tabId) {
 /** LocalMediaWeb helpers for page float-ingest (service worker). */
 async function lmwGetSettings() {
     const defaults = {
-        lmwURL: "http://127.0.0.1:8790",
+        lmwURL: "http://192.168.10.84:8790",
         lmwToken: "",
         lmwDefaultCategory: "default",
         lmwAutoFallback: true,
@@ -336,7 +336,7 @@ async function lmwGetSettings() {
 }
 
 function lmwBaseUrl(s) {
-    return (s.lmwURL || "http://127.0.0.1:8790").replace(/\/+$/, "");
+    return (s.lmwURL || "http://192.168.10.84:8790").replace(/\/+$/, "");
 }
 
 function lmwAuthHeaders(s, json) {
@@ -384,6 +384,200 @@ async function lmwBuildCookieHeader(url) {
         }
     } catch (e) { /* ignore */ }
     return "";
+}
+
+/**
+ * Collect cookies for media URL + page/referer + known site domains (e.g. douyin.com).
+ * CDN hosts like douyinvod.com rarely carry first-party cookies; page-domain cookies still help some edges.
+ */
+async function lmwBuildCookieHeaderRich(mediaUrl, pageUrl) {
+    const map = new Map();
+    const addList = (cookies) => {
+        for (const c of cookies || []) {
+            if (c && c.name) map.set(c.name, c.value);
+        }
+    };
+    const tryUrl = async (u) => {
+        if (!u || !/^https?:/i.test(String(u))) return;
+        try {
+            addList(await chrome.cookies.getAll({ url: String(u) }));
+        } catch (e) { /* ignore */ }
+    };
+    const tryDomain = async (domain) => {
+        if (!domain || !chrome.cookies?.getAll) return;
+        try {
+            addList(await chrome.cookies.getAll({ domain }));
+        } catch (e) { /* ignore */ }
+    };
+    await tryUrl(mediaUrl);
+    await tryUrl(pageUrl);
+    const blob = `${mediaUrl || ""}\n${pageUrl || ""}`;
+    if (/douyin|douyinvod|byteicdn|bytedance|ixigua|toutiao/i.test(blob)) {
+        await tryUrl("https://www.douyin.com/");
+        await tryUrl("https://www.douyin.com");
+        await tryDomain("douyin.com");
+        await tryDomain(".douyin.com");
+    }
+    if (/bilibili|bilivideo/i.test(blob)) {
+        await tryUrl("https://www.bilibili.com/");
+        await tryDomain("bilibili.com");
+    }
+    if (!map.size) return "";
+    return [...map.entries()].map(([k, v]) => `${k}=${v}`).join("; ");
+}
+
+/**
+ * Extension-page fetch to CDN often fails with net::ERR_FAILED (Origin/credentials).
+ * Service worker fetch with host_permissions + explicit Referer/Cookie is more reliable
+ * (same path as lmwPageIngest float button).
+ * @returns {Promise<Blob>}
+ */
+async function lmwFetchMediaBlob(url, headersIn, pageUrl) {
+    if (!url || !/^https?:/i.test(String(url))) {
+        throw new Error("invalid media url");
+    }
+    const src = headersIn && typeof headersIn === "object" ? headersIn : {};
+    const pick = (names) => {
+        for (const n of names) {
+            if (src[n] != null && src[n] !== "") return String(src[n]);
+        }
+        return "";
+    };
+    let referer =
+        pick(["Referer", "referer"]) ||
+        (pageUrl && String(pageUrl)) ||
+        "";
+    // Prefer site origin as Referer when only a deep page URL is known
+    if (!referer && /douyinvod|douyin\.com/i.test(url)) {
+        referer = "https://www.douyin.com/";
+    }
+    const ua =
+        pick(["User-Agent", "user-agent"]) ||
+        (typeof navigator !== "undefined"
+            ? navigator.userAgent
+            : "Mozilla/5.0 Chrome");
+    let cookie =
+        pick(["Cookie", "cookie"]) ||
+        (await lmwBuildCookieHeaderRich(url, referer || pageUrl));
+
+    const buildHeaders = (withCookie) => {
+        const h = {
+            Referer: referer || "https://www.douyin.com/",
+            "User-Agent": ua,
+        };
+        if (withCookie && cookie) h.Cookie = cookie;
+        return h;
+    };
+
+    const attempts = [];
+    // 1) force-cache + cookie (hits disk cache after page play)
+    attempts.push({ cache: "force-cache", cookie: true, label: "cache+cookie" });
+    // 2) network + cookie
+    attempts.push({ cache: "no-store", cookie: true, label: "net+cookie" });
+    // 3) network without cookie (signed CDN often enough)
+    attempts.push({ cache: "no-store", cookie: false, label: "net-nocookie" });
+
+    let lastErr = null;
+    for (const a of attempts) {
+        try {
+            const res = await fetch(url, {
+                headers: buildHeaders(a.cookie),
+                credentials: "omit",
+                cache: a.cache,
+                redirect: "follow",
+            });
+            if (!res.ok) {
+                lastErr = new Error(`HTTP ${res.status} (${a.label})`);
+                continue;
+            }
+            const blob = await res.blob();
+            if (!blob || blob.size < 32) {
+                lastErr = new Error(`empty body size=${blob ? blob.size : 0} (${a.label})`);
+                continue;
+            }
+            return blob;
+        } catch (e) {
+            lastErr = e;
+        }
+    }
+    const host = (() => {
+        try {
+            return new URL(url).host;
+        } catch (e) {
+            return "?";
+        }
+    })();
+    throw new Error(
+        `bg fetch failed @${host}: ${(lastErr && lastErr.message) || lastErr || "unknown"}`
+    );
+}
+
+/** Message helper: fetch URL → ArrayBuffer for extension pages (merge / upload). */
+async function lmwClientFetchBlobFromBackground(Message) {
+    const url = (Message.url || "").trim();
+    if (!url) throw new Error("缺少 url");
+    const blob = await lmwFetchMediaBlob(
+        url,
+        Message.headers || {},
+        Message.referer || Message.page_url || ""
+    );
+    const buf = await blob.arrayBuffer();
+    return {
+        ok: true,
+        size: buf.byteLength,
+        type: blob.type || Message.mime || "application/octet-stream",
+        buffer: buf,
+        role: Message.role || "",
+    };
+}
+
+/**
+ * Fetch video+audio in SW, POST /api/upload-av (avoids shipping large blobs via page fetch).
+ */
+async function lmwMergeAvFromUrlsBackground(Message) {
+    const s = await lmwGetSettings();
+    const vUrl = (Message.video_url || "").trim();
+    const aUrl = (Message.audio_url || "").trim();
+    if (!vUrl || !aUrl) throw new Error("需要 video_url 与 audio_url");
+    const pageUrl = Message.referer || Message.page_url || Message.source_url || "";
+    const vBlob = await lmwFetchMediaBlob(vUrl, Message.video_headers || {}, pageUrl);
+    const aBlob = await lmwFetchMediaBlob(aUrl, Message.audio_headers || {}, pageUrl);
+
+    const restricted =
+        Message.restricted === true ||
+        Message.restricted === 1 ||
+        Message.restricted === "1" ||
+        s.lmwRestricted === true;
+    let tags = lmwNormalizeTags(Message.tags || []);
+    if (restricted && !tags.includes("限制级")) tags = tags.concat(["限制级"]);
+
+    const title = Message.title || "merged";
+    const base = String(title).replace(/\.[^.]+$/, "").slice(0, 80) || "merge";
+    const fd = new FormData();
+    fd.append("category", Message.category || "default");
+    fd.append("title", title);
+    fd.append("source_url", Message.source_url || vUrl);
+    if (tags.length) fd.append("tags", JSON.stringify(tags));
+    if (restricted) fd.append("restricted", "1");
+    fd.append("video", vBlob, `${base}_video.mp4`);
+    if (aBlob && aBlob.size > 32) {
+        fd.append("audio", aBlob, `${base}_audio.m4a`);
+    }
+    const headers = lmwAuthHeaders(s, false);
+    const data = await lmwFetchJson(lmwBaseUrl(s) + "/api/upload-av", {
+        method: "POST",
+        headers,
+        body: fd,
+    });
+    return {
+        ok: true,
+        media_id: data.media_id ?? data.item?.id,
+        item: data.item,
+        note: data.note || "merged",
+        video_size: vBlob.size,
+        audio_size: aBlob.size,
+        duplicate: !!data.duplicate,
+    };
 }
 
 function lmwGuessExt(url, mime, mediaType) {
@@ -448,12 +642,7 @@ async function lmwUploadBlob(s, blob, meta) {
     let tags = lmwNormalizeTags(meta.tags || []);
     if (restricted && !tags.includes("限制级")) tags = tags.concat(["限制级"]);
     if (tags.length) fd.append("tags", JSON.stringify(tags));
-    const useJasna =
-        meta.use_jasna === true ||
-        meta.use_jasna === 1 ||
-        meta.use_jasna === "1" ||
-        s.lmwUseJasna === true;
-    if (useJasna) fd.append("use_jasna", "1");
+    // jasna demosaic: local JasnaBridge / FFmpegBridge only — do not send use_jasna to LMW
     if (restricted) fd.append("restricted", "1");
     const name = meta.filename || "upload.bin";
     fd.append("file", blob, name);
@@ -547,11 +736,6 @@ async function lmwPageIngestFromBackground(Message) {
     }
 
     // Server ingest (m3u8/dash or client fetch failed)
-    const useJasna =
-        Message.use_jasna === true ||
-        Message.use_jasna === 1 ||
-        Message.use_jasna === "1" ||
-        s.lmwUseJasna === true;
     const item = {
         url,
         media_type: isStream
@@ -564,7 +748,6 @@ async function lmwPageIngestFromBackground(Message) {
         source_page: page,
         headers,
         tags,
-        use_jasna: !!useJasna,
         restricted: !!restricted,
     };
     const ingestRes = await lmwFetchJson(lmwBaseUrl(s) + "/api/ingest", {
@@ -574,7 +757,6 @@ async function lmwPageIngestFromBackground(Message) {
             category,
             items: [item],
             tags,
-            use_jasna: !!useJasna,
             restricted: !!restricted,
         }),
     });
@@ -833,6 +1015,29 @@ chrome.runtime.onMessage.addListener(function (Message, sender, sendResponse) {
         lmwPageUploadFromBackground(Message)
             .then((r) => sendResponse(r))
             .catch((e) => sendResponse({ ok: false, error: (e && e.message) || String(e) }));
+        return true;
+    }
+    // local-media merge / client blob: SW fetch (page fetch often ERR_FAILED on CDN)
+    if (Message.Message == "lmwClientFetchBlob") {
+        lmwClientFetchBlobFromBackground(Message)
+            .then((r) => sendResponse(r))
+            .catch((e) =>
+                sendResponse({
+                    ok: false,
+                    error: (e && e.message) || String(e),
+                })
+            );
+        return true;
+    }
+    if (Message.Message == "lmwMergeAvClient") {
+        lmwMergeAvFromUrlsBackground(Message)
+            .then((r) => sendResponse(r))
+            .catch((e) =>
+                sendResponse({
+                    ok: false,
+                    error: (e && e.message) || String(e),
+                })
+            );
         return true;
     }
     if (!G.initLocalComplete || !G.initSyncComplete) {

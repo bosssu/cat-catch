@@ -16,21 +16,19 @@
   <link rel="icon" type="image/png" sizes="192x192" href="/icons/icon-192.png" />
   <link rel="icon" type="image/png" sizes="512x512" href="/icons/icon-512.png" />
   <title>LocalMediaWeb</title>
-  <link rel="stylesheet" href="/assets/app.css?v=20260731pausereview1" />
+  <link rel="stylesheet" href="/assets/app.css?v=20260812castmode1" />
 </head>
 <body>
   <div id="app">
     <nav class="topnav" aria-label="主导航">
-      <div class="brand" title="LocalMediaWeb">
+      <button type="button" id="btnCast" class="brand brand-btn" title="推送到电视" aria-label="推送到电视" aria-haspopup="dialog">
         <span class="brand-mark" aria-hidden="true">
-          <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2">
-            <rect x="3" y="5" width="18" height="14" rx="2"/>
-            <circle cx="9" cy="11" r="2"/>
-            <path d="M3 16l5-4 4 3 4-5 5 6"/>
+          <svg class="ico" viewBox="0 0 24 24" width="14" height="14" fill="currentColor" aria-hidden="true">
+            <path d="M21 3H3c-1.1 0-2 .9-2 2v12c0 1.1.9 2 2 2h5v2h8v-2h5c1.1 0 2-.9 2-2V5c0-1.1-.9-2-2-2zm0 14H3V5h18v12zM10 8v6l5-3-5-3z"/>
           </svg>
         </span>
-        <span class="brand-text">LocalMedia</span>
-      </div>
+        <span class="brand-text">投屏</span>
+      </button>
       <div class="nav-tabs">
         <button type="button" data-view="feed" class="nav active" title="短视频式浏览">
           <svg class="ico" viewBox="0 0 24 24" aria-hidden="true"><path fill="currentColor" d="M8 5v14l11-7z"/></svg>
@@ -116,6 +114,20 @@
         </div>
         <div id="searchResultHead" class="search-result-head hide">
           <span id="searchResultMeta" class="muted"></span>
+          <div class="search-sort-bar">
+            <label class="search-sort-label">搜索排序
+              <select id="searchSortBy" aria-label="搜索排序">
+                <option value="name" selected>名称</option>
+                <option value="created">导入时间</option>
+              </select>
+            </label>
+            <label class="search-sort-label">
+              <select id="searchSortDir" aria-label="排序方向">
+                <option value="asc" selected>升序</option>
+                <option value="desc">降序</option>
+              </select>
+            </label>
+          </div>
           <span class="muted search-result-hint">点击进入 Feed 全屏播放</span>
         </div>
         <div id="searchGrid" class="grid search-grid"></div>
@@ -161,6 +173,23 @@
           <input type="checkbox" id="includeRestrictedToggle" />
         </label>
         <p class="muted tip">默认关闭：服务端只推送不含「限制级」标签的内容。打开后才会推送带该标签的内容。</p>
+        <label class="switch-row" title="关闭时 Feed / 搜索 / 网格不推送静态图片（media_type=image）；GIF/视频/音频不受影响">
+          <span>允许静态图片浏览</span>
+          <input type="checkbox" id="includeImagesToggle" />
+        </label>
+        <p class="muted tip">默认关闭：服务端不推送静态图。打开后 Feed / 搜索 / 网格才会出现 image 类型媒体。</p>
+        <label class="switch-row" title="打开后 Feed 右下角「留言」变为「删除」，可直接删当前媒体">
+          <span>编辑模式</span>
+          <input type="checkbox" id="editModeToggle" />
+        </label>
+        <p class="muted tip">默认关闭：Feed 右下角为留言。打开后切换为删除按钮（需确认）。</p>
+        <label>投屏播放模式
+          <select id="castPlayMode">
+            <option value="once">单个播放</option>
+            <option value="loop">单个循环</option>
+          </select>
+        </label>
+        <p class="muted tip">投到电视时由服务端执行：单个播放播完即停；单个循环在检测到电视播完后自动重推同一条。不向电视推送列表，也无「自动下一首」。</p>
         <hr class="admin-sep" />
         <h3 class="admin-subhead">从相册上传</h3>
         <p class="muted tip">iOS / Android 可选相册图片与视频；视频服务端默认 remux。多选后排队上传。</p>
@@ -171,10 +200,7 @@
         <label>本批标签
           <input id="albumUploadTags" type="text" placeholder="逗号分隔，可选" autocomplete="off" />
         </label>
-        <label class="switch-row" title="本批打上限制级标签">
-          <span>限制级</span>
-          <input type="checkbox" id="albumUploadRestricted" />
-        </label>
+        <p class="muted tip">限制级入库请用浏览器插件或 FFmpegBridge（本页相册上传不打限制级）。</p>
         <div id="albumUploadProg" class="muted tip" aria-live="polite"></div>
       </div>
       <div class="admin-card">
@@ -246,7 +272,24 @@
         </div>
       </div>
     </div>
+
+    <div id="castModal" class="cast-modal hide" aria-hidden="true" aria-modal="true" role="dialog" aria-labelledby="castModalTitle">
+      <div class="cast-modal-backdrop" data-cast-dismiss="1"></div>
+      <div class="cast-modal-card">
+        <div class="cast-modal-head">
+          <h2 id="castModalTitle" class="cast-modal-title">推送到电视</h2>
+          <button type="button" id="btnCastRefresh" class="nav-icon-btn" title="重新扫描" aria-label="重新扫描">
+            <svg class="ico" viewBox="0 0 24 24" aria-hidden="true"><path fill="currentColor" d="M17.65 6.35A7.95 7.95 0 0012 4V1L7 6l5 5V7c2.76 0 5 2.24 5 5a5 5 0 01-8.9 3.1L6.7 16.5A7.97 7.97 0 0012 20c4.42 0 8-3.58 8-8 0-2.21-.9-4.21-2.35-5.65zM6 12c0-1.6.6-3.06 1.58-4.17L6.17 6.42A7.95 7.95 0 004 12c0 4.08 3.05 7.44 7 7.93v-2.02C8.28 17.45 6 14.98 6 12z"/></svg>
+          </button>
+        </div>
+        <p class="muted cast-modal-sub" id="castModalSub">扫描局域网 DLNA 设备…</p>
+        <div id="castDeviceList" class="cast-device-list" role="list"></div>
+        <div class="cast-modal-actions">
+          <button type="button" id="btnCastClose" class="btn ghost" data-cast-dismiss="1">关闭</button>
+        </div>
+      </div>
+    </div>
   </div>
-  <script src="/assets/app.js?v=20260731pausereview1"></script>
+  <script src="/assets/app.js?v=20260812castmode1"></script>
 </body>
 </html>

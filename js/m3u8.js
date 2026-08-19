@@ -30,6 +30,9 @@ let currentIndex = 0;   // 本页面Index
 const _ffmpeg = params.get("ffmpeg");   // 是否发送到 ffmpeg
 const _quantity = params.get("quantity");   // 同时下载的总数
 const _taskId = params.get("taskId");   // 任务id
+/** 外部指定下载范围（时间 HH:MM:SS / 秒数，或切片序号） */
+const _rangeStartParam = params.get("rangeStart");
+const _rangeEndParam = params.get("rangeEnd");
 
 let isSendFfmpeg = false;   // 是否发送到ffmpeg
 
@@ -873,6 +876,21 @@ function parseTs(data) {
     // 范围下载所需数据 (默认使用时间格式 HH:MM:SS)
     $("#rangeStart").val(secToTime(0));
     $("#rangeEnd").val(secToTime(data.totalduration));
+    // URL 参数指定范围（如 local-media 多段下载）优先于默认全片
+    if (_rangeStartParam != null && String(_rangeStartParam).trim() !== "") {
+        $("#rangeStart").val(String(_rangeStartParam).trim());
+    }
+    if (_rangeEndParam != null && String(_rangeEndParam).trim() !== "") {
+        $("#rangeEnd").val(String(_rangeEndParam).trim());
+    }
+    // 若外部指定了范围，同步勾选对应切片（autoMerge 主要靠 range 输入；勾选状态用于 UI 一致）
+    if ((_rangeStartParam != null && String(_rangeStartParam).trim() !== "") ||
+        (_rangeEndParam != null && String(_rangeEndParam).trim() !== "")) {
+        try {
+            const range = parseRangeIndices();
+            if (range) applyRangeSelection(range.start, range.end);
+        } catch (_) { /* mediaList 未就绪时忽略 */ }
+    }
     $m3u8dlArg.val(getM3u8DlArg());
 
     if (data.live) {
@@ -887,6 +905,7 @@ function parseTs(data) {
     }
     if (autoDown) {
         // 后台委托下载：先恢复范围/选中状态；autoMerge 内会等待本 Promise
+        // 若 URL 已带 rangeStart/rangeEnd，仍允许 storage 覆盖（侧边栏委托场景）
         downloadOptionsReady = Promise.resolve(restoreDownloadOptions());
     }
     if (!_fragments.some(fragment => fragment.initSegment) && autoDown) {
