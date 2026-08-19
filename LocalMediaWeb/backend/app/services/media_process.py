@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 import shutil
 import subprocess
 import tempfile
@@ -57,6 +58,110 @@ def _run_ffmpeg(cmd: list[str], timeout: int = 600) -> None:
     if proc.returncode != 0:
         err = (proc.stderr or proc.stdout or "")[-800:]
         raise RuntimeError(f"ffmpeg failed ({proc.returncode}): {err}")
+
+
+class IosCodecError(Exception):
+    """File or stream codecs are not playable on iPhone 13 Safari (no transcode)."""
+
+
+# iPhone 13 (A15): HEVC/H.264/AAC yes; AV1/VP9/WebM/Opus no.
+_IOS_GOOD_VIDEO = re.compile(
+    r"(?:^|[,/;\s])(?:avc1|avc3|avc|h264|hvc1|hev1|hev|hvc|hevc|dvh1|dvhe)",
+    re.I,
+)
+_IOS_BAD_VIDEO = re.compile(
+    r"(?:^|[,/;\s])(?:av01|av1\.|vp09|vp08|vp9|vp8|theora|mp4v)",
+    re.I,
+)
+_IOS_BAD_VIDEO_AV1 = re.compile(r"(?:^|[,/;\s])av1(?:$|[,./;])", re.I)
+_IOS_BAD_AUDIO = re.compile(r"(?:^|[,/;\s])(?:opus|vorbis)", re.I)
+_IOS_BAD_CONTAINER = {".webm", ".mkv", ".avi", ".ogv", ".ogg"}
+
+
+def ios_codecs_declared_ok(codecs: str) -> tuple[bool, str]:
+    """
+    HLS/DASH CODECS= string. Empty = unknown (allow, probe later).
+    """
+    s = (codecs or "").strip().lower().replace(" ", "")
+    if not s:
+        return True, ""
+    if _IOS_BAD_VIDEO.search(s) or _IOS_BAD_VIDEO_AV1.search(s):
+        return False, s
+    if _IOS_BAD_AUDIO.search(s):
+        return False, s
+    if re.search(r"avc|hvc|hev|dvh|av01|av1|vp0|vp8|vp9|mp4v|theora", s):
+        if not _IOS_GOOD_VIDEO.search(s):
+            return False, s
+    return True, ""
+
+
+def ios_probe_blob_ok(blob: str) -> tuple[bool, str]:
+    """ffprobe csv (codec_name,codec_type per line). Empty blob = unknown, allow."""
+    raw = (blob or "").strip().lower()
+    if not raw:
+        return True, ""
+    videos: list[str] = []
+    audios: list[str] = []
+    for line in raw.replace(";", "\n").splitlines():
+        parts = [p.strip() for p in line.split(",") if p.strip()]
+        if not parts:
+            continue
+        name = parts[0]
+        kind = parts[1] if len(parts) > 1 else ""
+        if kind == "audio" or name in ("aac", "opus", "vorbis", "mp3", "flac", "ac3", "eac3"):
+            audios.append(name)
+        elif kind == "video" or name in (
+            "h264",
+            "hevc",
+            "av1",
+            "vp8",
+            "vp9",
+            "mpeg4",
+            "theora",
+        ):
+            videos.append(name)
+        else:
+            videos.append(name)
+    joined = ",".join(videos + audios)
+    bad_v = {"av1", "vp8", "vp9", "theora", "mpeg4", "av01"}
+    hit_v = [n for n in videos if n in bad_v]
+    if hit_v:
+        return False, ",".join(hit_v)
+    hit_a = [n for n in audios if n in ("opus", "vorbis")]
+    if hit_a:
+        return False, ",".join(hit_a)
+    if videos and not any(n in ("h264", "hevc", "mjpeg", "png", "gif") for n in videos):
+        if any(n not in ("unknown", "none", "") for n in videos):
+            # unusual video codec
+            if not _IOS_GOOD_VIDEO.search(",".join(videos)):
+                return False, joined
+    return True, ""
+
+
+def ios_reject_reason(path: Path, media_type: str = "") -> str | None:
+    """Why this file cannot play on iPhone 13, or None if ok/unknown/non-av."""
+    mt = (media_type or "").lower()
+    if mt in ("image", "gif"):
+        return None
+    if not path.is_file():
+        return None
+    suf = path.suffix.lower()
+    if suf in _IOS_BAD_CONTAINER and mt in ("", "video", "audio", "m3u8"):
+        return f"iPhone cannot play container {suf} (need mp4 H.264/HEVC + AAC)"
+    blob = _probe_codecs(path)
+    ok, detail = ios_probe_blob_ok(blob)
+    if not ok:
+        return (
+            "iPhone 13 cannot play this media "
+            f"(codec {detail}; need H.264/HEVC + AAC, not AV1/VP9/Opus)"
+        )
+    return None
+
+
+def assert_ios_playable(path: Path, media_type: str = "") -> None:
+    why = ios_reject_reason(path, media_type)
+    if why:
+        raise IosCodecError(why)
 
 
 def _probe_codecs(path: Path) -> str:
@@ -499,12 +604,16 @@ def probe_single_file_role(path: Path) -> dict[str, Any]:
         "duration_sec": None,
         "has_video": False,
         "has_audio": False,
+        "vcodec": "",
+        "acodec": "",
         "error": "",
         "summary": "",
     }
     info = probe_av_timeline(path)
     out["has_video"] = bool(info.has_video)
     out["has_audio"] = bool(info.has_audio)
+    out["vcodec"] = (info.v_codec or "").strip().lower()
+    out["acodec"] = (info.a_codec or "").strip().lower()
     out["error"] = info.error or ""
     out["summary"] = info.summary()
     if info.has_video and info.has_audio:
@@ -575,6 +684,39 @@ def _guess_mime_for_type(path: Path, media_type: str) -> str:
     return mime or "application/octet-stream"
 
 
+def _attach_ios_fields(result: dict[str, Any], path: Path | None) -> None:
+    """Fill ios_ok / ios_reason from container suffix + probed codec names."""
+    mt = (result.get("media_type") or "").lower()
+    if mt in ("image", "gif"):
+        result["ios_ok"] = True
+        result["ios_reason"] = ""
+        return
+    suf = (path.suffix.lower() if path else "") or ""
+    if suf in _IOS_BAD_CONTAINER:
+        result["ios_ok"] = False
+        result["ios_reason"] = f"iPhone cannot play container {suf}"
+        return
+    blob_lines: list[str] = []
+    vc = (result.get("vcodec") or "").strip().lower()
+    ac = (result.get("acodec") or "").strip().lower()
+    if vc:
+        blob_lines.append(f"{vc},video")
+    if ac:
+        blob_lines.append(f"{ac},audio")
+    blob = "\n".join(blob_lines)
+    if not blob:
+        result["ios_ok"] = None
+        result["ios_reason"] = ""
+        return
+    ok, detail = ios_probe_blob_ok(blob)
+    result["ios_ok"] = bool(ok)
+    result["ios_reason"] = (
+        ""
+        if ok
+        else f"iPhone 13 cannot play codec {detail or blob} (need H.264/HEVC + AAC)"
+    )
+
+
 def classify_media_file(
     path: Path,
     *,
@@ -600,6 +742,10 @@ def classify_media_file(
         "has_video": False,
         "has_audio": False,
         "duration_sec": None,
+        "vcodec": "",
+        "acodec": "",
+        "ios_ok": None,
+        "ios_reason": "",
         "mime": "",
         "method": "fallback",
         "error": "",
@@ -637,6 +783,8 @@ def classify_media_file(
         result["has_video"] = bool(role_info.get("has_video"))
         result["has_audio"] = bool(role_info.get("has_audio"))
         result["duration_sec"] = role_info.get("duration_sec")
+        result["vcodec"] = role_info.get("vcodec") or ""
+        result["acodec"] = role_info.get("acodec") or ""
         result["summary"] = role_info.get("summary") or ""
         result["error"] = role_info.get("error") or ""
         role = result["role"]
@@ -644,11 +792,13 @@ def classify_media_file(
             result["media_type"] = "audio"
             result["method"] = "ffprobe"
             result["mime"] = _guess_mime_for_type(path, "audio")
+            _attach_ios_fields(result, path)
             return result
         if role in ("video_only", "av") or result["has_video"]:
             result["media_type"] = "video"
             result["method"] = "ffprobe"
             result["mime"] = _guess_mime_for_type(path, "video")
+            _attach_ios_fields(result, path)
             return result
         # probe ran but no streams — fall through
         if not result["error"]:
@@ -676,6 +826,7 @@ def classify_media_file(
         result["media_type"] = "video"
         result["method"] = "fallback"
     result["mime"] = _guess_mime_for_type(path, result["media_type"])
+    _attach_ios_fields(result, path)
     return result
 
 
@@ -784,6 +935,8 @@ class AvTimelineInfo:
     a_duration: float | None = None
     v_start: float | None = None
     a_start: float | None = None
+    v_codec: str = ""
+    a_codec: str = ""
     format_duration: float | None = None
     delta_dur: float | None = None  # video - audio duration
     delta_start: float | None = None  # video start - audio start
@@ -876,10 +1029,12 @@ def probe_av_timeline(
             info.has_video = True
             info.v_duration = dur
             info.v_start = start
+            info.v_codec = (st.get("codec_name") or "").strip().lower()
         elif ctype == "audio" and not info.has_audio:
             info.has_audio = True
             info.a_duration = dur
             info.a_start = start
+            info.a_codec = (st.get("codec_name") or "").strip().lower()
 
     # Prefer stream duration; fall back to format for missing side
     if info.v_duration is None and info.has_video:

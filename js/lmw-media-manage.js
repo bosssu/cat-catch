@@ -807,7 +807,6 @@
                         filename: file.name,
                         media_type: guessMediaType(file),
                         tags,
-                        remux: "1",
                         restricted,
                     });
                     if (up && up.duplicate) {

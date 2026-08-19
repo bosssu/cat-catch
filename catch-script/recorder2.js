@@ -186,16 +186,24 @@
     var recorder;
     async function startRecording() {
         const buffer = [];
+        const preferMime = [
+            "video/mp4;codecs=avc1,mp4a",
+            "video/mp4;codecs=avc1",
+            "video/mp4",
+            "video/webm;codecs=h264,opus",
+            "video/webm;codecs=h264",
+            "video/webm;codecs=vp8,opus",
+        ];
         let option = {
-            mimeType: 'video/webm;codecs=vp8,opus',
+            mimeType: "video/webm;codecs=vp8,opus",
             videoBitsPerSecond: +cat.querySelector("#videoBits").value,
             audioBitsPerSecond: +cat.querySelector("#audioBits").value
         };
-
-        if (MediaRecorder.isTypeSupported('video/webm;codecs=vp9,opus')) {
-            option.mimeType = 'video/webm;codecs=vp9,opus';
-        } else if (MediaRecorder.isTypeSupported('video/webm;codecs=h264')) {
-            option.mimeType = 'video/webm;codecs=h264';
+        for (const p of preferMime) {
+            if (MediaRecorder.isTypeSupported(p)) {
+                option.mimeType = p;
+                break;
+            }
         }
         const cropTarget = await CropTarget.fromElement(catCatchRecorderinnerCropArea);
         const stream = await navigator.mediaDevices

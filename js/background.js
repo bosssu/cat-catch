@@ -633,7 +633,9 @@ async function lmwUploadBlob(s, blob, meta) {
     fd.append("title", meta.title || "");
     fd.append("source_url", meta.source_url || meta.url || "");
     fd.append("media_type", meta.media_type || "video");
-    fd.append("remux", "1");
+    const name = meta.filename || "upload.bin";
+    const remuxOff = /\.(mp4|m4v|m4a|mov)(\?|$)/i.test(name) || /mp4/i.test(blob.type || meta.media_type || "");
+    fd.append("remux", meta.remux != null ? String(meta.remux) : (remuxOff ? "0" : "1"));
     const restricted =
         meta.restricted === true ||
         meta.restricted === 1 ||
@@ -644,7 +646,6 @@ async function lmwUploadBlob(s, blob, meta) {
     if (tags.length) fd.append("tags", JSON.stringify(tags));
     // jasna demosaic: local JasnaBridge / FFmpegBridge only — do not send use_jasna to LMW
     if (restricted) fd.append("restricted", "1");
-    const name = meta.filename || "upload.bin";
     fd.append("file", blob, name);
     const headers = lmwAuthHeaders(s, false);
     const data = await lmwFetchJson(lmwBaseUrl(s) + "/api/upload", {

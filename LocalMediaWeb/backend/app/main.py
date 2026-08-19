@@ -8,12 +8,13 @@ from pathlib import Path
 
 from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse, Response
+from fastapi.responses import FileResponse, JSONResponse, Response
 from fastapi.staticfiles import StaticFiles
 from starlette.middleware.base import BaseHTTPMiddleware
 
 from app import __version__
 from app.api.routes import public_router, router
+from app.services.media_process import IosCodecError
 from app.core.config import PROJECT_ROOT, get_settings
 from app.core.db import init_db
 from app.core.logging_setup import setup_logging
@@ -182,6 +183,11 @@ app.add_middleware(NoCacheHtmlMiddleware)
 
 app.include_router(public_router)
 app.include_router(router)
+
+
+@app.exception_handler(IosCodecError)
+async def ios_codec_error_handler(request: Request, exc: IosCodecError):
+    return JSONResponse(status_code=400, content={"detail": str(exc)})
 
 
 @app.get("/")

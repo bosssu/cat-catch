@@ -885,7 +885,7 @@ $("#lmwSelect").click(function () {
 // 仅当明确关闭时隐藏；G 可能尚未从 storage 读完，延迟再判一次
 function applyLmwButtonVisibility() {
     const show = G.lmwEnable !== false;
-    $("#openLocalMedia, #openLmwManage, #parsePageImages, #lmwSelect, #lmwFloatToggle").toggle(show);
+    $("#openLocalMedia, #openLmwManage, #parsePageImages, #lmwSelect, #lmwFloatToggle, #ytdlpPage").toggle(show);
     const on = G.lmwFloatIngest !== false;
     $("#lmwFloatToggle").text(on ? "页面入库:开" : "页面入库:关")
         .attr("title", on
@@ -894,6 +894,75 @@ function applyLmwButtonVisibility() {
 }
 applyLmwButtonVisibility();
 setTimeout(applyLmwButtonVisibility, 300);
+
+async function ytdlpCurrentPage() {
+    if (typeof LMW === "undefined") {
+        Tips("LocalMediaWeb 客户端未加载", 2000);
+        return;
+    }
+    let tab;
+    try {
+        tab = await chrome.tabs.get(G.tabId);
+    } catch (e) {
+        Tips("无法读取当前标签页", 2000);
+        return;
+    }
+    const pageUrl = (tab && tab.url) || "";
+    if (!/^https?:\/\//i.test(pageUrl)) {
+        Tips("当前页不是 http(s) 地址", 2000);
+        return;
+    }
+    const hb = await LMW.ytdlpBridgeHealth();
+    if (!hb.ok) {
+        Tips((hb.message || "本机 YtDlpBridge 未启动") + " — 请先运行 YtDlpBridge\\start.bat", 4000);
+        return;
+    }
+    if (hb.ffmpeg === false) {
+        Tips("YtDlpBridge 已启动但未找到 ffmpeg（iOS 回退转码不可用）", 3000);
+    }
+    TipsHold("已提交本机 yt-dlp…");
+    $("#ytdlpPage").prop("disabled", true);
+    try {
+        const cookies = await LMW.collectYtdlpCookiesNetscape(pageUrl);
+        const job = await LMW.enqueueYtdlpBridge(pageUrl, {
+            title: tab.title || "",
+            cookies,
+        });
+        const id = job && job.id;
+        TipsHold(`yt-dlp 已入队 #${id || "?"} · ${pageUrl.slice(0, 48)}`);
+        if (!id) return;
+        let lastTip = "";
+        let lastPctShown = -1;
+        LMW.waitYtdlpBridgeJob(id, {
+            intervalMs: 2500,
+            onUpdate: (j) => {
+                const pct = j.percent != null ? Math.round(j.percent) : 0;
+                const bucket = Math.floor(pct / 5) * 5;
+                const msg = (j.message || j.error || "").replace(/\s+/g, " ").slice(0, 90);
+                const line = `yt-dlp #${id} ${j.status || ""} ${pct}%` + (msg ? ` · ${msg}` : "");
+                if (line === lastTip && bucket === lastPctShown) return;
+                lastTip = line;
+                lastPctShown = bucket;
+                TipsHold(line);
+            },
+        })
+            .then((j) => {
+                if (j.status === "error") {
+                    Tips(`yt-dlp 失败: ${(j.error || j.message || "").slice(0, 120)}`, 4000);
+                } else {
+                    Tips(`yt-dlp 完成` + (j.lmw_id ? ` · 库 #${j.lmw_id}` : ""), 3500);
+                }
+            })
+            .catch((e) => Tips("yt-dlp 轮询: " + ((e && e.message) || e), 3000));
+    } catch (e) {
+        Tips("提交失败: " + (((e && e.message) || e) + "").slice(0, 120), 4000);
+    } finally {
+        $("#ytdlpPage").prop("disabled", false);
+    }
+}
+$("#ytdlpPage").click(function () {
+    ytdlpCurrentPage();
+});
 
 $("#lmwFloatToggle").click(function () {
     const next = G.lmwFloatIngest === false;
@@ -1182,6 +1251,14 @@ function Tips(text, delay = 200) {
         .fadeIn(500)
         .delay(delay)
         .fadeOut(500);
+}
+
+/** Sticky status (no fade). For long-running progress. */
+function TipsHold(text) {
+    const $tips = $("#TipsFixed");
+    $tips.stop(true, true);
+    if ($tips.is(":visible") && $tips.html() === text) return;
+    $tips.html(text).show();
 }
 /*
 * 有资源 隐藏无资源提示

@@ -5,7 +5,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <title>LocalMediaWeb</title>
   <link rel="stylesheet" href="css/public.css" />
-  <link rel="stylesheet" href="css/local-media.css?v=20260808mergeErr" />
+  <link rel="stylesheet" href="css/local-media.css?v=20260819toolbar2" />
   <script src="js/init.js"></script>
   <script src="lib/jquery.min.js"></script>
   <script src="lib/hls.min.js"></script>
@@ -17,26 +17,16 @@
   <header class="lm-header">
     <div class="lm-title">加入本地媒体库</div>
     <div class="lm-actions">
-      <button type="button" id="btnParseImages" class="button2">解析页面媒体</button>
-      <button type="button" id="btnLoadCaught" class="button2">载入嗅探资源</button>
+      <button type="button" id="btnRefreshList" class="button2" title="重新载入当前列表（默认=猫抓嗅探到的资源）">刷新</button>
       <button type="button" id="btnSelectAll" class="button2">全选</button>
       <button type="button" id="btnInvert" class="button2">反选</button>
-      <button type="button" id="btnDeleteSelected" class="button2" title="从当前列表移除选中的项（不删服务器库内文件）">删除选中项</button>
-      <button type="button" id="btnListDedupe" class="button2" title="先内容识别（区分视频/音频，后缀与时长可能相同），再在同类型内去掉重复项；不会把可合并的音+视当成重复">一键去重</button>
-      <button type="button" id="btnDetectAvMerge" class="button2" title="在已勾选项中比对时长 + URL/捕获顺序等信号；仅唯一高置信对自动成组，歧义时请手动勾 1 视频+1 音频">检测选中中的可合并项</button>
-      <button type="button" id="btnMergeAvSelected" class="button2 primary" title="将匹配的音视频快速合并并写入媒体库；也可手动勾选 1 视频 + 1 音频后直接合并" disabled>合并选中音视频</button>
-      <button type="button" id="btnMultiMerge" class="button2 primary" title="按顺序多段合并：先检测可合并音视频，再由服务端 ffmpeg 按选择顺序拼接成一条后入库">多段合并</button>
-      <label class="lm-check" title="网格卡片边长约为现在的 2 倍，便于点选与预览">
-        <input type="checkbox" id="lmLargePreview" />
-        大预览
-      </label>
-      <label class="lm-check" title="合并或入库成功后，自动从当前列表移除对应项">
-        <input type="checkbox" id="lmAutoRemove" checked />
-        处理完后自动移除
-      </label>
-      <button type="button" id="btnOpenManage" class="button2" title="打开服务器媒体管理（已入库列表）">服务器媒体管理</button>
+      <button type="button" id="btnDeleteSelected" class="button2" title="从当前列表移除选中的项（不删服务器库内文件）">删除</button>
+      <button type="button" id="btnListDedupe" class="button2" title="同类型内去掉重复项；不会把可合并的音+视当成重复">去重</button>
+      <button type="button" id="btnDetectAvMerge" class="button2" title="在已勾选项里识别音/视频并按时长匹配可合并对">检测可合并项</button>
+      <button type="button" id="btnMergeAvSelected" class="button2" title="匹配的音+视合并入库；也可手动勾 1 视频 + 1 音频。未检测过会先自动检测" disabled>合并选中音视频</button>
+      <button type="button" id="btnMultiMerge" class="button2" title="按点击顺序把多段拼成一条后入库">多段</button>
       <select id="typeFilter" title="媒体类型">
-        <option value="">全部类型</option>
+        <option value="">类型</option>
         <option value="image">图片</option>
         <option value="gif">动图</option>
         <option value="video">视频</option>
@@ -45,7 +35,7 @@
         <option value="dash">DASH</option>
       </select>
       <select id="resFilter" title="分辨率（短边像素 / 视频高度）">
-        <option value="">全部分辨率</option>
+        <option value="">分辨率</option>
         <option value="min720">≥ 720p</option>
         <option value="min1080">≥ 1080p</option>
         <option value="min1440">≥ 1440p</option>
@@ -54,28 +44,37 @@
         <option value="unknown">分辨率未知</option>
       </select>
       <select id="longFilter" title="长边像素（适合筛大图）">
-        <option value="">全部长边</option>
-        <option value="min800">长边 ≥ 800</option>
-        <option value="min1200">长边 ≥ 1200</option>
-        <option value="min1600">长边 ≥ 1600</option>
-        <option value="min2400">长边 ≥ 2400</option>
-        <option value="lt800">长边 &lt; 800</option>
+        <option value="">长边</option>
+        <option value="min800">≥ 800</option>
+        <option value="min1200">≥ 1200</option>
+        <option value="min1600">≥ 1600</option>
+        <option value="min2400">≥ 2400</option>
+        <option value="lt800">&lt; 800</option>
       </select>
       <select id="cookieFilter" title="是否带 Cookie">
-        <option value="">Cookie 不限</option>
+        <option value="">Cookie</option>
         <option value="yes">有 Cookie</option>
         <option value="no">无 Cookie</option>
       </select>
-      <label class="lm-check" title="入库文件打上「限制级」标签；Feed 默认不展示">
+      <label class="lm-check" title="网格卡片边长约为现在的 2 倍">
+        <input type="checkbox" id="lmLargePreview" />
+        大预览
+      </label>
+      <label class="lm-check" title="合并或入库成功后，从当前列表移除">
+        <input type="checkbox" id="lmAutoRemove" checked />
+        完成后移除
+      </label>
+      <label class="lm-check" title="入库打上「限制级」；Feed 默认不展示">
         <input type="checkbox" id="lmRestricted" />
         限制级
       </label>
-      <label class="lm-check" title="提交本机 JasnaBridge（默认 8791）去码后再入库；需先启动中间件">
+      <label class="lm-check" title="入库前走本机 JasnaBridge 去码（需 8791 已启动）">
         <input type="checkbox" id="lmUseJasna" />
-        使用 jasna 去马赛克
+        jasna
       </label>
-      <button type="button" id="btnDownloadLocal" class="button2 primary" title="将选中的视频与音频下载到本机；下载前自动检测可合并项；同文件去重；音频按内容改扩展名。m3u8 走切片下载并可使用已设时间段">下载选中视频到本地</button>
-      <button type="button" id="btnIngest" class="button2 primary">入库选中媒体</button>
+      <button type="button" id="btnDownloadLocal" class="button2 primary" title="选中的视频/音频下到本机。m3u8 走切片页">下到本机</button>
+      <button type="button" id="btnIngest" class="button2 primary" title="选中媒体入库 LocalMediaWeb">入库</button>
+      <button type="button" id="btnOpenManage" class="button2" title="已入库列表：网格管理、上传、批量标签">管理库</button>
     </div>
     <div id="status" class="lm-status"></div>
   </header>
@@ -122,7 +121,7 @@
     </div>
   </div>
 
-  <script src="js/local-media.js?v=20260812avPairMatch"></script>
+  <script src="js/local-media.js?v=20260819detectAv"></script>
 </body>
 </html>
 

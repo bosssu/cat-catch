@@ -661,10 +661,41 @@
                 .filter(Boolean);
         }
 
+        peekCatchContainer(bufferList) {
+            const raw = bufferList && bufferList[0];
+            if (!raw) return "";
+            let u8 = null;
+            if (raw instanceof ArrayBuffer) u8 = new Uint8Array(raw, 0, Math.min(12, raw.byteLength));
+            else if (raw && raw.buffer) {
+                u8 = new Uint8Array(raw.buffer, raw.byteOffset || 0, Math.min(12, raw.byteLength || 0));
+            }
+            if (!u8 || u8.length < 4) return "";
+            if (u8[0] === 0x1a && u8[1] === 0x45 && u8[2] === 0xdf && u8[3] === 0xa3) return "webm";
+            if (u8.length >= 8) {
+                const tag = String.fromCharCode(u8[4], u8[5], u8[6], u8[7]);
+                if (tag === "ftyp" || tag === "moof" || tag === "mdat") return "mp4";
+            }
+            return "";
+        }
+
+        guessCatchIngestExt(mime, bufferList, major) {
+            const m = String(mime || "").toLowerCase();
+            const peek = this.peekCatchContainer(bufferList);
+            if (major === "audio") {
+                if (peek === "webm" || m.includes("webm") || m.includes("opus")) return "webm";
+                return "m4a";
+            }
+            if (peek === "mp4") return "mp4";
+            if (peek === "webm") return "webm";
+            if (m.includes("mp4") || m.includes("avc") || m.includes("m4s")) return "mp4";
+            if (m.includes("webm") && !m.includes("mp4")) return "webm";
+            return "mp4";
+        }
+
         /**
          * 整理 buffer 后上传：
          * - 音视频双轨 → 合并为 1 条媒体（解决「成功 2 项」且无法播）
-         * - 单轨 → remux 后 1 条
+         * - 单轨 → 按容器标 mp4/webm，MSE 分片按 mp4
          */
         async catchIngestLmw() {
             if (this.catchMedia.length == 0) {
@@ -712,12 +743,15 @@
                 } else {
                     // 取最大的一条（避免无意义的双轨假成功）
                     const best = (videos[0] || audios[0] || tracks[0]);
-                    const ext = best.major === "audio" ? "m4a" : (best.mime.includes("webm") ? "webm" : "mp4");
-                    const fileBlob = new Blob(best.bufferList, { type: best.mime });
+                    const ext = this.guessCatchIngestExt(best.mime, best.bufferList, best.major);
+                    const blobType = ext === "webm"
+                        ? (best.mime || "video/webm")
+                        : (best.major === "audio" ? "audio/mp4" : "video/mp4");
+                    const fileBlob = new Blob(best.bufferList, { type: blobType });
                     const res = await this.postIngestBlob(fileBlob, {
                         filename: `${baseTitle}.${ext}`,
                         title: baseTitle,
-                        media_type: "video",
+                        media_type: best.major === "audio" ? "audio" : "video",
                         tags,
                     });
                     const id = res?.media_id || res?.item?.id || "";

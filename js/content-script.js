@@ -278,7 +278,9 @@
         fd.append("title", title || document.title || "");
         fd.append("source_url", source_url || location.href || "");
         fd.append("media_type", media_type || "video");
-        fd.append("remux", "1");
+        const name = filename || `${(title || document.title || "capture").slice(0, 40)}.bin`;
+        const remuxOff = /\.(mp4|m4v|m4a|mov)(\?|$)/i.test(name) || /mp4/i.test(blob.type || media_type || "");
+        fd.append("remux", remuxOff ? "0" : "1");
         const restricted =
             payload.restricted === true ||
             payload.restricted === 1 ||
@@ -293,7 +295,6 @@
         if (cleaned.length) fd.append("tags", JSON.stringify(cleaned));
         // use_jasna not sent — demosaic via JasnaBridge / FFmpegBridge
         if (restricted) fd.append("restricted", "1");
-        const name = filename || `${(title || document.title || "capture").slice(0, 40)}.bin`;
         fd.append("file", blob, name);
         const headers = {};
         const token = (s.lmwToken || "").trim();

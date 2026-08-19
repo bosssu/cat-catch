@@ -1,0 +1,11 @@
+.venv/
+venv/
+__pycache__/
+.pytest_cache/
+.python-version
+*.pyc
+data/
+config.yaml
+*.log
+.DS_Store
+tests/_tmp_jobs/

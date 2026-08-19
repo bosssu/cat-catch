@@ -26,10 +26,17 @@ EXTINF = re.compile(r"#EXTINF:([0-9.]+)")
 
 
 class HlsError(Exception):
-    def __init__(self, message: str, http_status: int = 0, need_client: bool = False):
+    def __init__(
+        self,
+        message: str,
+        http_status: int = 0,
+        need_client: bool = False,
+        codec_reject: bool = False,
+    ):
         super().__init__(message)
         self.http_status = http_status
         self.need_client = need_client
+        self.codec_reject = codec_reject
 
 
 def _fmt_hms(sec: float) -> str:
@@ -45,22 +52,52 @@ def _is_master(text: str) -> bool:
     return "#EXT-X-STREAM-INF" in text
 
 
+_CODECS_ATTR = re.compile(r'CODECS=(?:"([^"]+)"|([^,\s]+))', re.I)
+
+
+def _stream_codecs(attrs: str) -> str:
+    m = _CODECS_ATTR.search(attrs or "")
+    if not m:
+        return ""
+    return (m.group(1) or m.group(2) or "").strip()
+
+
 def _pick_variant(text: str, base_url: str) -> str:
-    best_bw = -1
-    best_url = None
+    from app.services.media_process import ios_codecs_declared_ok
+
+    known: list[tuple[int, str, str]] = []
+    unknown: list[tuple[int, str, str]] = []
+    skipped: list[str] = []
     for m in EXT_X_STREAM.finditer(text):
         attrs, uri = m.group(1), m.group(2).strip()
         bw = 0
         bm = re.search(r"BANDWIDTH=(\d+)", attrs)
         if bm:
             bw = int(bm.group(1))
+        codecs = _stream_codecs(attrs)
         abs_url = urljoin(base_url, uri)
-        if bw >= best_bw:
-            best_bw = bw
-            best_url = abs_url
-    if not best_url:
+        ok, detail = ios_codecs_declared_ok(codecs)
+        if not ok:
+            skipped.append(detail or codecs or "unknown")
+            continue
+        row = (bw, abs_url, codecs)
+        if codecs:
+            known.append(row)
+        else:
+            unknown.append(row)
+    pool = known or unknown
+    if not pool:
+        if skipped:
+            sample = ", ".join(skipped[:4])
+            raise HlsError(
+                "iPhone 13 cannot play this HLS (no H.264/HEVC variant; "
+                f"CODECS={sample})",
+                need_client=False,
+                codec_reject=True,
+            )
         raise HlsError("No variant in master playlist")
-    return best_url
+    pool.sort(key=lambda x: x[0])
+    return pool[-1][1]
 
 
 def _parse_media_playlist(text: str, base_url: str) -> tuple[list[dict], dict | None]:

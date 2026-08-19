@@ -11,6 +11,8 @@ const LMW = {
         lmwUseJasna: false,
         /** 本机 JasnaBridge（去码中间件，默认 8791） */
         jasnaBridgeURL: "http://127.0.0.1:8791",
+        /** 本机 YtDlpBridge（页面 URL → yt-dlp，默认 8792） */
+        ytdlpBridgeURL: "http://127.0.0.1:8792",
     },
     /** No hard cap on tags per item (server normalize also unlimited). */
     MAX_TAGS: 0,
@@ -48,6 +50,15 @@ const LMW = {
                 : this.defaults.jasnaBridgeURL;
         const u = (g || "").replace(/\/+$/, "");
         return u || this.defaults.jasnaBridgeURL;
+    },
+
+    ytdlpBridgeBaseUrl() {
+        const g =
+            typeof G !== "undefined" && G.ytdlpBridgeURL
+                ? G.ytdlpBridgeURL
+                : this.defaults.ytdlpBridgeURL;
+        const u = (g || "").replace(/\/+$/, "");
+        return u || this.defaults.ytdlpBridgeURL;
     },
 
     headers(json = true) {
@@ -423,6 +434,8 @@ const LMW = {
         if (tags.length) fd.append("tags", JSON.stringify(tags));
         if (restricted) fd.append("restricted", "1");
         const name = meta.filename || "upload.bin";
+        const remuxOff = /\.(mp4|m4v|m4a|mov)(\?|$)/i.test(name) || /mp4/i.test((blob && blob.type) || meta.media_type || "");
+        fd.append("remux", meta.remux != null ? String(meta.remux) : (remuxOff ? "0" : "1"));
         fd.append("file", blob, name);
         const headers = this.headers(false);
         delete headers["Content-Type"];
@@ -526,6 +539,124 @@ const LMW = {
             );
         }
         return data || {};
+    },
+
+    async ytdlpBridgeHealth() {
+        const base = this.ytdlpBridgeBaseUrl();
+        try {
+            const res = await fetch(base + "/api/health", { method: "GET" });
+            const text = await res.text().catch(() => "");
+            let raw = null;
+            try {
+                raw = text ? JSON.parse(text) : null;
+            } catch (e) {
+                raw = null;
+            }
+            if (!res.ok) {
+                return { ok: false, message: `YtDlpBridge HTTP ${res.status}`, raw };
+            }
+            return { ok: !!(raw && raw.ok !== false), raw, ffmpeg: !!(raw && raw.ffmpeg) };
+        } catch (e) {
+            return {
+                ok: false,
+                message: `无法连接 YtDlpBridge（${base}）：${(e && e.message) || e}`,
+            };
+        }
+    },
+
+    async collectYtdlpCookiesNetscape(pageUrl) {
+        if (typeof chrome === "undefined" || !chrome.cookies || !chrome.cookies.getAll) {
+            return "";
+        }
+        const domains = new Set();
+        const addHost = (host) => {
+            const h = String(host || "").replace(/^\./, "").toLowerCase();
+            if (!h || h.indexOf(".") < 0) return;
+            domains.add(h);
+            const parts = h.split(".");
+            if (parts.length >= 2) domains.add(parts.slice(-2).join("."));
+        };
+        try {
+            addHost(new URL(pageUrl).hostname);
+        } catch (e) { /* ignore */ }
+        if (/youtu\.?be|google|googleapis/i.test(pageUrl || "")) {
+            ["youtube.com", "youtu.be", "google.com", "googleapis.com", "youtube-nocookie.com"].forEach(addHost);
+        }
+        const seen = new Map();
+        const addList = (list) => {
+            for (const c of list || []) {
+                if (!c || !c.name) continue;
+                seen.set(`${c.domain}\t${c.path || "/"}\t${c.name}`, c);
+            }
+        };
+        for (const d of domains) {
+            try {
+                addList(await chrome.cookies.getAll({ domain: d }));
+            } catch (e) { /* ignore */ }
+        }
+        if (pageUrl && /^https?:/i.test(pageUrl)) {
+            try {
+                addList(await chrome.cookies.getAll({ url: pageUrl }));
+            } catch (e) { /* ignore */ }
+        }
+        if (!seen.size) return "";
+        const lines = ["# Netscape HTTP Cookie File"];
+        for (const c of seen.values()) {
+            let domain = c.domain || "";
+            if (!c.hostOnly && domain && domain[0] !== ".") domain = "." + domain;
+            const flag = domain[0] === "." ? "TRUE" : "FALSE";
+            const secure = c.secure ? "TRUE" : "FALSE";
+            const exp = c.expirationDate ? Math.floor(c.expirationDate) : 0;
+            lines.push(
+                [domain, flag, c.path || "/", secure, String(exp), c.name, c.value || ""].join("\t")
+            );
+        }
+        return lines.join("\n");
+    },
+
+    async enqueueYtdlpBridge(url, extra = {}) {
+        const res = await fetch(this.ytdlpBridgeBaseUrl() + "/api/jobs", {
+            method: "POST",
+            headers: { "Content-Type": "application/json;charset=utf-8" },
+            body: JSON.stringify({
+                url,
+                title: extra.title || "",
+                referer: extra.referer || url,
+                cookies: extra.cookies || "",
+            }),
+        });
+        const text = await res.text().catch(() => "");
+        let data = null;
+        try {
+            data = text ? JSON.parse(text) : null;
+        } catch (e) {
+            data = null;
+        }
+        if (!res.ok) {
+            throw new Error((data && data.error) || text || res.statusText || "enqueue failed");
+        }
+        return data || {};
+    },
+
+    async getYtdlpBridgeJob(jobId) {
+        const res = await fetch(this.ytdlpBridgeBaseUrl() + `/api/jobs/${jobId}`);
+        if (!res.ok) {
+            const text = await res.text().catch(() => "");
+            throw new Error(`${res.status} ${text || res.statusText}`);
+        }
+        return res.json();
+    },
+
+    async waitYtdlpBridgeJob(jobId, { timeoutMs = 3600000, intervalMs = 2000, onUpdate } = {}) {
+        const start = Date.now();
+        while (Date.now() - start < timeoutMs) {
+            const job = await this.getYtdlpBridgeJob(jobId);
+            if (typeof onUpdate === "function") onUpdate(job);
+            const st = job && job.status;
+            if (st === "done" || st === "error" || st === "cancelled") return job;
+            await new Promise((r) => setTimeout(r, intervalMs));
+        }
+        throw new Error("YtDlpBridge 等待超时");
     },
 
     async getJasnaBridgeJob(jobId) {
@@ -958,6 +1089,7 @@ const LMW = {
     /**
      * Lightweight remote classify: server downloads only a small head (default ~4MiB)
      * + optional tail, ffprobe/magic, discards temp. Not a full-file cache for merge.
+     * Response may include vcodec, acodec, ios_ok, ios_reason.
      * @param {{ url: string, headers?: object, max_bytes?: number, tail_bytes?: number }} body
      */
     probeUrl(body = {}) {
@@ -2597,6 +2729,8 @@ const LMW = {
         if (tags.length) fd.append("tags", JSON.stringify(tags));
         if (restricted) fd.append("restricted", "1");
         const name = meta.filename || "upload.bin";
+        const remuxOff = /\.(mp4|m4v|m4a|mov)(\?|$)/i.test(name) || /mp4/i.test((blob && blob.type) || meta.media_type || "");
+        fd.append("remux", meta.remux != null ? String(meta.remux) : (remuxOff ? "0" : "1"));
         fd.append("file", blob, name);
         const headers = {};
         const token = (s.lmwToken || "").trim();

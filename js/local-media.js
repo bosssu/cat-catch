@@ -25,6 +25,8 @@
     let avPairs = [];
     /** 本次列表是否已跑过「检测可合并项」（手动或下载前自动） */
     let avDetectAttempted = false;
+    /** How the grid was filled: sniffed catch list vs DOM parse */
+    let listSource = "caught";
     /** key or id -> { pair_index, role } */
     const avPairByKey = new Map();
 
@@ -315,6 +317,292 @@
                 $("<span class='dur-badge is-pending'/>").text("…").attr("title", "正在探测时长")
             );
         }
+    }
+
+    function shortCodecName(name) {
+        const n = String(name || "").toLowerCase();
+        if (!n) return "";
+        if (/avc|h264/.test(n)) return "H.264";
+        if (/hvc|hev|hevc/.test(n)) return "HEVC";
+        if (/av01|\bav1\b/.test(n)) return "AV1";
+        if (/vp09|vp9/.test(n)) return "VP9";
+        if (/vp08|vp8/.test(n)) return "VP8";
+        if (/mp4a|aac/.test(n)) return "AAC";
+        if (/opus/.test(n)) return "Opus";
+        if (/vorbis/.test(n)) return "Vorbis";
+        if (n === "webm" || n === "mkv") return n;
+        return n.split(".")[0].slice(0, 10);
+    }
+
+    function declaredCodecsIosOk(s) {
+        const t = String(s || "").toLowerCase().replace(/\s+/g, "");
+        if (!t) return null;
+        if (/(?:^|[,/;])(?:av01|av1\.|vp09|vp08|vp9|vp8|theora|opus|vorbis)/.test("," + t)) {
+            return false;
+        }
+        if (/avc1|avc3|hvc1|hev1|h264|hevc|dvh1|dvhe/.test(t)) return true;
+        return null;
+    }
+
+    function applyCodecInfo(it, info) {
+        if (!it || !info) return;
+        if (info.vcodec) it._vcodec = String(info.vcodec);
+        if (info.acodec) it._acodec = String(info.acodec);
+        if (info.declared) it._codecDeclared = String(info.declared);
+        if (info.ios_ok === false) {
+            it._iosOk = false;
+            it._iosReason = info.ios_reason || it._iosReason || "";
+        } else if (info.ios_ok === true && it._iosOk !== false) {
+            it._iosOk = true;
+        }
+        it._codecMethod = info.method || it._codecMethod || "";
+        onCodecReady(it);
+    }
+
+    function inferCodecFromUrl(it) {
+        const path = String((it && it.url) || "")
+            .split("?")[0]
+            .toLowerCase();
+        if (!/\.(webm|mkv|avi|ogv|ogg)$/.test(path)) return false;
+        applyCodecInfo(it, {
+            vcodec: it._vcodec || (/\.webm$/.test(path) ? "webm" : path.replace(/^.*\./, "")),
+            ios_ok: false,
+            ios_reason: "iPhone cannot play this container (need mp4)",
+            method: "ext",
+        });
+        return true;
+    }
+
+    function updateCardCodecBadge($card, it) {
+        if (!$card || !$card.length || !it) return;
+        $card.find(".codec-badge").remove();
+        $card.removeClass("ios-bad");
+        const t = mediaTypeOf(it);
+        if (t === "image" || t === "gif") return;
+        const v = shortCodecName(it._vcodec);
+        const a = shortCodecName(it._acodec);
+        const label = [v, a].filter(Boolean).join("+");
+        const pending = !!it._codecProbing && !label;
+        if (!label && it._iosOk !== false && !pending) return;
+        const text =
+            it._iosOk === false ? (label ? "iOS× " + label : "iOS×") : pending ? "…" : label;
+        $card.append(
+            $("<span class='codec-badge'/>")
+                .toggleClass("is-bad", it._iosOk === false)
+                .toggleClass("is-pending", pending)
+                .text(text)
+                .attr(
+                    "title",
+                    it._iosReason ||
+                        (label
+                            ? "编码 " + [it._vcodec, it._acodec].filter(Boolean).join(" + ")
+                            : "正在探测编码")
+                )
+        );
+        if (it._iosOk === false) $card.addClass("ios-bad");
+    }
+
+    function onCodecReady(it) {
+        if (!it || !it._key) return;
+        const $card = findCardByKey(it._key);
+        if ($card.length) updateCardCodecBadge($card, it);
+    }
+
+    function parseHlsDeclaredCodecs(text) {
+        const found = [];
+        const re = /CODECS=(?:"([^"]+)"|([^,\s]+))/gi;
+        let m;
+        while ((m = re.exec(String(text || "")))) {
+            const s = (m[1] || m[2] || "").trim();
+            if (s) found.push(s);
+        }
+        return found;
+    }
+
+    function parseDashDeclaredCodecs(xml) {
+        const found = [];
+        const re = /codecs\s*=\s*"([^"]+)"/gi;
+        let m;
+        while ((m = re.exec(String(xml || "")))) {
+            if (m[1]) found.push(m[1]);
+        }
+        return found;
+    }
+
+    function pickDeclaredForIos(list) {
+        const arr = Array.isArray(list) ? list : [];
+        let any = "";
+        let good = "";
+        let bad = "";
+        let allBad = arr.length > 0;
+        for (const s of arr) {
+            any = any || s;
+            const ok = declaredCodecsIosOk(s);
+            if (ok === true && !good) good = s;
+            if (ok === false) bad = s;
+            if (ok !== false) allBad = false;
+        }
+        const split = (s) => {
+            const parts = String(s || "")
+                .split(",")
+                .map((x) => x.trim())
+                .filter(Boolean);
+            const v = parts.find((p) => !/^mp4a/i.test(p)) || parts[0] || "";
+            const a = parts.find((p) => /^mp4a|opus|aac|vorbis/i.test(p)) || "";
+            return { vcodec: v, acodec: a };
+        };
+        if (good) {
+            return Object.assign({ declared: good, ios_ok: true, method: "playlist" }, split(good));
+        }
+        if (allBad && bad) {
+            return Object.assign(
+                {
+                    declared: bad,
+                    ios_ok: false,
+                    ios_reason: "playlist CODECS=" + bad,
+                    method: "playlist",
+                },
+                split(bad)
+            );
+        }
+        if (any) {
+            const ok = declaredCodecsIosOk(any);
+            return Object.assign(
+                {
+                    declared: any,
+                    ios_ok: ok,
+                    method: "playlist",
+                    ios_reason: ok === false ? "playlist CODECS=" + any : "",
+                },
+                split(any)
+            );
+        }
+        return null;
+    }
+
+    function itemProbeHeaders(it) {
+        const headers = {};
+        const src = (it && it._headers) || {};
+        for (const [k, v] of Object.entries(src)) {
+            if (v == null || v === "") continue;
+            if (/^(referer|cookie|user-agent|origin|authorization)$/i.test(k)) {
+                headers[k] = String(v);
+            }
+        }
+        return headers;
+    }
+
+    async function probePlaylistCodecs(it) {
+        const url = it && it.url;
+        if (!url || !/^https?:/i.test(String(url))) return null;
+        const headers = itemProbeHeaders(it);
+        const t = mediaTypeOf(it);
+        try {
+            const res = await fetch(url, {
+                headers,
+                credentials: "omit",
+                cache: "no-store",
+            });
+            if (res.ok) {
+                const text = await res.text();
+                const list =
+                    t === "dash" ? parseDashDeclaredCodecs(text) : parseHlsDeclaredCodecs(text);
+                const picked = pickDeclaredForIos(list);
+                if (picked) return picked;
+            }
+        } catch (_) {}
+        return null;
+    }
+
+    async function probeCodecViaServer(it) {
+        if (!it || !it.url || typeof LMW === "undefined" || !LMW.probeUrl) return null;
+        try {
+            const r = await LMW.probeUrl({
+                url: it.url,
+                headers: itemProbeHeaders(it),
+                max_bytes: 4 * 1024 * 1024,
+            });
+            if (!r) return null;
+            applyCodecInfo(it, {
+                vcodec: r.vcodec,
+                acodec: r.acodec,
+                ios_ok: r.ios_ok,
+                ios_reason: r.ios_reason,
+                method: "server_partial",
+            });
+            if (r.media_type) {
+                it.media_type = r.media_type;
+                it._contentRole = r.role || it._contentRole;
+            }
+            if (r.duration_sec != null && Number(r.duration_sec) > 0.05 && !(it._durationSec > 0.05)) {
+                it._durationSec = Number(r.duration_sec);
+                onDurationReady(it);
+            }
+            return r;
+        } catch (e) {
+            console.warn("probe-url codec failed", it.url, e);
+            return null;
+        }
+    }
+
+    let codecProbeGen = 0;
+    const CODEC_PROBE_PARALLEL = 2;
+
+    async function ensureItemCodec(it) {
+        if (!it || it._codecDone) return;
+        const t = mediaTypeOf(it);
+        if (t === "image" || t === "gif") {
+            it._codecDone = true;
+            return;
+        }
+        if (it._iosOk === false || it._vcodec) {
+            it._codecDone = true;
+            onCodecReady(it);
+            return;
+        }
+        it._codecProbing = true;
+        onCodecReady(it);
+        try {
+            if (inferCodecFromUrl(it)) {
+                it._codecDone = true;
+                return;
+            }
+            if (t === "m3u8" || t === "dash") {
+                const info = await probePlaylistCodecs(it);
+                if (info) applyCodecInfo(it, info);
+                it._codecDone = true;
+                return;
+            }
+            await probeCodecViaServer(it);
+            it._codecDone = true;
+        } catch (_) {
+            it._codecDone = true;
+        } finally {
+            it._codecProbing = false;
+            onCodecReady(it);
+        }
+    }
+
+    function scheduleCodecProbes(list) {
+        const gen = ++codecProbeGen;
+        const queue = (list || []).filter((it) => {
+            const t = mediaTypeOf(it);
+            if (t === "image" || t === "gif") return false;
+            return !it._codecDone && !it._vcodec && it._iosOk !== false;
+        });
+        if (!queue.length) return;
+        let i = 0;
+        const workers = Array.from(
+            { length: Math.min(CODEC_PROBE_PARALLEL, queue.length) },
+            async () => {
+                while (i < queue.length && gen === codecProbeGen) {
+                    const it = queue[i++];
+                    if (!it) break;
+                    await ensureItemCodec(it);
+                }
+            }
+        );
+        Promise.all(workers).catch(() => {});
     }
 
     function findCardByKey(key) {
@@ -917,25 +1205,28 @@
         updateSelectAllBtn();
     }
 
-    /** 手动勾选恰好 2 项时，是否可作为「待合并对」启用按钮 */
-    function canManualTwoItemMerge() {
-        if (selected.size !== 2) return false;
-        const chosen = getSelectedItems();
-        if (chosen.length !== 2) return false;
-        // 排除纯图/动图；其余（含伪装成 mp4 的音频）交给合并时内容识别
-        return chosen.every((it) => {
+    function mergeableSelectedItems() {
+        return getSelectedItems().filter((it) => {
             const t = mediaTypeOf(it);
             return t !== "image" && t !== "gif";
         });
+    }
+
+    /** 手动勾选恰好 2 项时，是否可作为「待合并对」启用按钮 */
+    function canManualTwoItemMerge() {
+        return mergeableSelectedItems().length === 2 && selected.size === 2;
     }
 
     function updateMergeBtn() {
         const btn = document.getElementById("btnMergeAvSelected");
         if (!btn) return;
         const n = collectMergePairs().length;
+        const pool = mergeableSelectedItems();
         const manual = n === 0 && canManualTwoItemMerge();
+        // 已勾 ≥2 个音/视频：可点合并（未检测过会先跑检测）
+        const canRun = n > 0 || manual || pool.length >= 2;
         const count = n > 0 ? n : manual ? 1 : 0;
-        btn.disabled = count === 0;
+        btn.disabled = !canRun;
         btn.textContent = count > 0 ? `合并选中音视频 (${count})` : "合并选中音视频";
     }
 
@@ -1182,6 +1473,14 @@
                         ? Number(r.duration_sec)
                         : it._durationSec || (elInfo && elInfo.duration_sec) || null;
                 it._classifyMethod = r.method || "server_partial";
+                applyCodecInfo(it, {
+                    vcodec: r.vcodec,
+                    acodec: r.acodec,
+                    ios_ok: r.ios_ok,
+                    ios_reason: r.ios_reason,
+                    method: r.method || "server_partial",
+                });
+                if (r.vcodec || r.ios_ok === false) it._codecDone = true;
                 // Prefer client duration if server partial lost moov
                 if (!(it._durationSec > 0) && elInfo && elInfo.duration_sec > 0) {
                     it._durationSec = elInfo.duration_sec;
@@ -2035,18 +2334,22 @@
     }
 
     async function mergeSelectedAv() {
+        if (!avDetectAttempted) {
+            setStatus("合并前检测可合并项…");
+            await detectAvMergePairs();
+        }
         let pairs = collectMergePairs();
         // 无检测结果时：支持网格里手动勾选恰好 2 项直接合并
         if (!pairs.length && canManualTwoItemMerge()) {
             pairs = await buildManualMergePairsFromSelection();
             if (!pairs.length) {
-                setStatus("选中的两项无法识别为「1 视频 + 1 音频」，请先「检测选中中的可合并项」或改选");
+                setStatus("选中的两项无法识别为「1 视频 + 1 音频」，请改选或先去重");
                 updateMergeBtn();
                 return;
             }
         }
         if (!pairs.length) {
-            setStatus("请先「检测选中中的可合并项」，或在网格中手动勾选 1 视频 + 1 音频");
+            setStatus("没有可合并的音视频对。请勾选 1 视频 + 1 音频，或先去重后再试");
             return;
         }
         if (!confirmJasnaIfNeeded("合并选中音视频")) {
@@ -3388,6 +3691,7 @@
             );
             updateCardDimBadge($card, it);
             updateCardDurationBadge($card, it);
+            updateCardCodecBadge($card, it);
             updateRangeBadge($card, it);
             bindCardEvents($card, it, key);
             $grid.append($card);
@@ -3397,6 +3701,7 @@
         updateStatusCount(list.length);
         // 后台懒探测音/视频时长，填角标
         scheduleDurationProbes(list);
+        scheduleCodecProbes(list);
     }
 
     function getSelectedItems() {
@@ -4876,6 +5181,7 @@
                 items = [...m2.values()];
             }
             items.sort((a, b) => (b.score || 0) - (a.score || 0));
+            listSource = "parse";
 
             selected.clear();
             clearAvPairs();
@@ -4928,6 +5234,7 @@
                 map.set(it.url, it);
             }
             items = [...map.values()];
+            listSource = "caught";
             items.forEach((it, i) => {
                 it._key = it.url + "#" + i;
                 // Prefer network Content-Type so disguised audio is not forced to video by .mp4 URL
@@ -5406,6 +5713,27 @@
             setStatus("已取消入库（jasna 确认）");
             return;
         }
+        const iosBad = chosen.filter((it) => it._iosOk === false);
+        if (iosBad.length) {
+            const names = iosBad.slice(0, 4).map((it) => {
+                const c = [shortCodecName(it._vcodec), shortCodecName(it._acodec)]
+                    .filter(Boolean)
+                    .join("+");
+                return (c || it._iosReason || "codec") + " · " + urlHost(it.url);
+            });
+            if (
+                !confirm(
+                    iosBad.length +
+                        " 项 iPhone 13 可能无法播放（AV1/VP9/WebM/Opus）。服务端也会拒绝入库。\n\n" +
+                        names.join("\n") +
+                        (iosBad.length > 4 ? "\n…" : "") +
+                        "\n\n仍要提交？"
+                )
+            ) {
+                setStatus("已取消入库（iOS 编码）");
+                return;
+            }
+        }
         const pageUrl = await getPageUrl();
         const first = chosen[0];
         const dlg = await LMW.openIngestDialog({
@@ -5640,10 +5968,12 @@
         if (tipActiveCard) positionCardTip(tipActiveCard);
     });
 
-    $("#btnParseImages").on("click", parsePageImages);
-    $("#btnLoadCaught").on("click", loadCaught);
-    $("#btnDetectAvMerge").on("click", () => detectAvMergePairs());
+    $("#btnRefreshList").on("click", () => {
+        if (listSource === "parse") return parsePageImages();
+        return loadCaught();
+    });
     $("#btnListDedupe").on("click", () => oneClickListDedupe());
+    $("#btnDetectAvMerge").on("click", () => detectAvMergePairs());
     $("#btnMergeAvSelected").on("click", () => mergeSelectedAv());
     $("#btnMultiMerge").on("click", () => onMultiMergeBtnClick());
     $("#btnDeleteSelected").on("click", () => deleteSelectedItems());

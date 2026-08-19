@@ -1,0 +1,36 @@
+host: 127.0.0.1
+port: 8792
+
+# Download dir (relative to this folder unless absolute)
+download_dir: data/downloads
+
+# Prefer native H.264 + AAC in mp4; recode only when the result is not iOS-playable.
+ios_lock: true
+max_height: 1080
+
+# Serial queue
+concurrency: 1
+
+# Kill yt-dlp if the whole job exceeds this (seconds), or if it prints nothing.
+download_timeout: 2400
+stall_timeout: 180
+
+# Keep file after successful LMW upload
+keep_file: true
+
+# yt-dlp only (not LMW upload). Clash mixed port is often 7890 or 7897.
+proxy: "http://127.0.0.1:7897"
+
+lmw:
+  base_url: "http://192.168.10.84:8790"
+  token: ""
+  remux: false
+  upload: true
+  retries: 3
+  retry_backoff: 2.0
+
+# Optional Netscape cookies file (wins over browser).
+cookies_file: ""
+# Auto-read logged-in YouTube cookies from a local browser profile.
+# chrome | edge | firefox | brave | "" to disable.
+cookies_from_browser: edge

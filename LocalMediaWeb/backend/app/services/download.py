@@ -15,6 +15,7 @@ from app.core.db import session_scope
 from app.models.entities import DownloadJob, MediaItem
 from app.services.dash import DashError, download_dash
 from app.services.hls import HlsError, download_hls
+from app.services.media_process import IosCodecError
 from app.services.thumb import generate_thumb
 from app.services.dedupe import find_item_by_content, hash_media_file
 from app.services.util import (
@@ -320,6 +321,9 @@ async def _run_job(job_id: int) -> None:
                 start_sec=start_sec,
                 end_sec=end_sec,
             )
+    except IosCodecError as e:
+        logger.warning("job %s codec reject: %s", job_id, e)
+        _finish_fail(job_id, "failed_codec", 0, str(e)[:1000], False)
     except httpx.RequestError as e:
         logger.warning("job %s network error: %s", job_id, e)
         _finish_fail(
@@ -912,6 +916,9 @@ async def _run_m3u8(
         )
     except HlsError as e:
         err = str(e)
+        if getattr(e, "codec_reject", False):
+            _finish_fail(job_id, "failed_codec", 0, err[:1000], False)
+            return
         status = "failed_auth" if e.http_status in (401, 403) else "failed_partial"
         if "Missing" in err:
             status = "failed_partial"
@@ -1020,6 +1027,9 @@ async def _run_dash(
     try:
         meta = await download_dash(url, headers, work, out, progress_cb=progress_cb)
     except DashError as e:
+        if getattr(e, "codec_reject", False):
+            _finish_fail(job_id, "failed_codec", 0, str(e)[:1000], False)
+            return
         status = "failed_auth" if e.http_status in (401, 403) else "failed_partial"
         if e.need_client:
             _finish_fail(
@@ -1094,6 +1104,17 @@ async def _register_media(
         logger.warning("classify in _register_media: %s", e)
     if media_type == "m3u8":
         media_type = "video"
+
+    from app.services.media_process import assert_ios_playable
+
+    try:
+        assert_ios_playable(dest, media_type)
+    except IosCodecError:
+        try:
+            dest.unlink(missing_ok=True)
+        except OSError:
+            pass
+        raise
 
     chash, fsize = hash_media_file(dest)
     if not fsize and dest.is_file():
@@ -1294,6 +1315,16 @@ def register_uploaded_file(
     if media_type == "m3u8":
         media_type = "video"
     mime = (cls.get("mime") or mime or "").strip()
+    from app.services.media_process import IosCodecError, assert_ios_playable
+
+    try:
+        assert_ios_playable(dest, media_type)
+    except IosCodecError:
+        try:
+            dest.unlink(missing_ok=True)
+        except OSError:
+            pass
+        raise
     chash, hsize = hash_media_file(dest)
     if hsize:
         size = hsize

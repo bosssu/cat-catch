@@ -157,6 +157,28 @@
     }
     setTimeout(init, 500);
 
+    function pickIosRecorderMime(supported) {
+        const prefer = [
+            "video/mp4;codecs=avc1,mp4a",
+            "video/mp4;codecs=avc1",
+            "video/mp4",
+            "video/webm;codecs=h264,opus",
+            "video/webm;codecs=avc1,opus",
+            "video/webm;codecs=h264",
+            "video/webm;codecs=avc1",
+            "video/webm;codecs=vp8,opus",
+            "video/webm;codecs=vp8",
+        ];
+        const low = (supported || []).map((s) => String(s));
+        for (const p of prefer) {
+            if (typeof MediaRecorder !== "undefined" && MediaRecorder.isTypeSupported(p)) return p;
+            const hit = low.find((s) => s.toLowerCase().startsWith(p.toLowerCase()));
+            if (hit) return hit;
+        }
+        const noBad = low.filter((s) => !/vp9|av01|\bav1\b|h265|hevc/i.test(s));
+        return noBad[0] || low[0] || "video/webm";
+    }
+
     // #region 视频编码选择
     function setMimeType() {
         function getSupportedMimeTypes(media, types, codecs) {
@@ -174,13 +196,17 @@
             });
             return supported;
         };
-        const videoTypes = ["webm", "ogg", "mp4", "x-matroska"];
-        const codecs = ["should-not-be-supported", "vp9", "vp8", "avc1", "av1", "h265", "h.265", "h264", "h.264", "opus", "pcm", "aac", "mpeg", "mp4a"];
+        const videoTypes = ["mp4", "webm", "ogg", "x-matroska"];
+        const codecs = ["avc1", "h264", "h.264", "mp4a", "aac", "vp8", "opus", "pcm", "mpeg", "vp9", "av1", "h265", "h.265", "should-not-be-supported"];
         const supportedVideos = getSupportedMimeTypes("video", videoTypes, codecs);
         supportedVideos.forEach(function (type) {
             $mimeTypeList.options.add(new Option(type, type));
         });
-        option.mimeType = supportedVideos[0];
+        option.mimeType = pickIosRecorderMime(supportedVideos);
+        if (option.mimeType && ![...$mimeTypeList.options].some((o) => o.value === option.mimeType)) {
+            $mimeTypeList.options.add(new Option(option.mimeType, option.mimeType), 0);
+        }
+        $mimeTypeList.value = option.mimeType;
 
         $mimeTypeList.addEventListener('change', function (event) {
             if (recorder && recorder.state && recorder.state === 'recording') {

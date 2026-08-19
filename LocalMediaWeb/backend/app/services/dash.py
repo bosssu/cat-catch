@@ -18,10 +18,17 @@ _NS = {"mpd": "urn:mpeg:dash:schema:mpd:2011"}
 
 
 class DashError(Exception):
-    def __init__(self, message: str, http_status: int = 0, need_client: bool = False):
+    def __init__(
+        self,
+        message: str,
+        http_status: int = 0,
+        need_client: bool = False,
+        codec_reject: bool = False,
+    ):
         super().__init__(message)
         self.http_status = http_status
         self.need_client = need_client
+        self.codec_reject = codec_reject
 
 
 def _local(tag: str) -> str:
@@ -459,22 +466,36 @@ async def download_dash(
         if not videos:
             raise DashError("No video Representation with SegmentTemplate in MPD")
 
-        # Prefer AVC over AV1 for broader playback when bandwidth similar
-        def video_key(v: dict) -> tuple:
-            codecs = v.get("codecs") or ""
-            av1_pen = 1 if "av01" in codecs or "av1" in codecs else 0
-            return (v.get("bandwidth") or 0, v.get("width") or 0, -av1_pen)
+        from app.services.media_process import ios_codecs_declared_ok
 
-        videos.sort(key=video_key, reverse=True)
-        # If top is AV1 and an AVC exists within 70% bandwidth, prefer AVC
-        best_v = videos[0]
-        if "av01" in (best_v.get("codecs") or "") or "av1" in (best_v.get("codecs") or ""):
-            for v in videos:
-                c = v.get("codecs") or ""
-                if "avc" in c or "hvc" in c or "hev" in c:
-                    if (v.get("bandwidth") or 0) >= (best_v.get("bandwidth") or 0) * 0.5:
-                        best_v = v
-                        break
+        playable: list[dict] = []
+        unknown: list[dict] = []
+        skipped: list[str] = []
+        for v in videos:
+            c = v.get("codecs") or ""
+            ok, detail = ios_codecs_declared_ok(c)
+            if not ok:
+                skipped.append(detail or c)
+                continue
+            if c.strip():
+                playable.append(v)
+            else:
+                unknown.append(v)
+        pool = playable or unknown
+        if not pool:
+            sample = ", ".join(skipped[:4]) or "av1"
+            raise DashError(
+                "iPhone 13 cannot play this DASH (no H.264/HEVC representation; "
+                f"codecs={sample})",
+                need_client=False,
+                codec_reject=True,
+            )
+
+        def video_key(v: dict) -> tuple:
+            return (v.get("bandwidth") or 0, v.get("width") or 0)
+
+        pool.sort(key=video_key, reverse=True)
+        best_v = pool[0]
 
         best_a = None
         if audios:

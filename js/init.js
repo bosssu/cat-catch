@@ -177,6 +177,8 @@ G.OptionLists = {
     lmwUseJasna: false,
     /** 本机 JasnaBridge 地址 */
     jasnaBridgeURL: "http://127.0.0.1:8791",
+    /** 本机 YtDlpBridge（页面 URL 下载，默认 8792） */
+    ytdlpBridgeURL: "http://127.0.0.1:8792",
     /** 加入本地媒体库：合并/入库成功后自动从列表移除对应项（默认开） */
     lmwAutoRemoveAfterProcess: true,
     // 入库时默认打上「限制级」标签（各入库 UI 可单独勾选，会写回此偏好）

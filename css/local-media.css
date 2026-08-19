@@ -39,6 +39,22 @@ body {
   padding: 6px 12px;
   cursor: pointer;
 }
+.lm-more {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  align-items: center;
+  flex-basis: 100%;
+  margin-top: 4px;
+  padding-top: 8px;
+  border-top: 1px solid #2a2a38;
+}
+.lm-more.hide {
+  display: none;
+}
+#btnMoreTools.is-open {
+  background: #2a3350;
+}
 .lm-check {
   display: inline-flex;
   align-items: center;
@@ -286,6 +302,32 @@ body.lm-multi-merge-mode .lm-card {
 }
 .lm-card .cookie-flag.no {
   background: #555;
+}
+.lm-card .codec-badge {
+  position: absolute;
+  left: 6px;
+  top: 24px;
+  z-index: 3;
+  font-size: 10px;
+  background: rgba(20, 40, 70, 0.88);
+  padding: 1px 5px;
+  border-radius: 3px;
+  color: #dce8ff;
+  pointer-events: none;
+  max-width: 72%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.lm-card .codec-badge.is-bad {
+  background: rgba(160, 36, 36, 0.94);
+  color: #fff;
+}
+.lm-card .codec-badge.is-pending {
+  opacity: 0.7;
+}
+.lm-card.ios-bad {
+  box-shadow: inset 0 0 0 2px rgba(200, 60, 60, 0.85);
 }
 .lm-card .dim-badge {
   position: absolute;
