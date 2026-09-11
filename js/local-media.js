@@ -1127,6 +1127,43 @@
         return !el || !!el.checked;
     }
 
+    function iosBadLine(it) {
+        const c = [shortCodecName(it._vcodec), shortCodecName(it._acodec)]
+            .filter(Boolean)
+            .join("+");
+        return (c || it._iosReason || "codec") + " · " + urlHost(it.url);
+    }
+
+    /**
+     * Probe codecs first, then confirm if any item is not iOS Safari-playable.
+     * Confirm = continue ingest even when incompatible (server bypass).
+     * @returns {Promise<{ok: boolean, allow: boolean}>}
+     */
+    async function confirmIosWebIfNeeded(list, opLabel) {
+        const arr = (list || []).filter(Boolean);
+        if (!arr.length) return { ok: true, allow: false };
+        setStatus(opLabel + "：检测 iOS Web 兼容性…");
+        await Promise.all(arr.map((it) => ensureItemCodec(it)));
+        const iosBad = arr.filter((it) => it._iosOk === false);
+        if (!iosBad.length) return { ok: true, allow: false };
+        const names = iosBad.slice(0, 4).map(iosBadLine);
+        if (
+            !confirm(
+                iosBad.length +
+                    " 项 iPhone Safari 网页可能无法播放（AV1/VP9/WebM/Opus 等）。\n\n" +
+                    names.join("\n") +
+                    (iosBad.length > 4 ? "\n…" : "") +
+                    "\n\n确认后仍会" +
+                    opLabel +
+                    "（即使不兼容也会写入媒体库）。\n是否继续？"
+            )
+        ) {
+            setStatus("已取消" + opLabel + "（iOS Web 不兼容）");
+            return { ok: false, allow: false };
+        }
+        return { ok: true, allow: true };
+    }
+
     /** jasna 勾选时，入库/合并前二次确认 */
     function confirmJasnaIfNeeded(opLabel) {
         if (!isJasnaChecked()) return true;
@@ -1606,14 +1643,28 @@
         }
         const vOk = videos.filter((v) => v._durationSec > 0.05);
         const aOk = audios.filter((a) => a._durationSec > 0.05);
+        setStatus(`检测 iOS Web 兼容性… 视频 ${vOk.length} · 音频 ${aOk.length}`);
+        await Promise.all([...vOk, ...aOk].map((it) => ensureItemCodec(it)));
         const matched = matchVideoAudioPairs(vOk, aOk);
+        const kept = [];
+        let skippedIos = 0;
+        for (const p of matched.pairs || []) {
+            const v = p.video_item || vOk.find((x) => x._key === p.video_key);
+            const a = p.audio_item || aOk.find((x) => x._key === p.audio_key);
+            if ((v && v._iosOk === false) || (a && a._iosOk === false)) {
+                skippedIos++;
+                continue;
+            }
+            kept.push(p);
+        }
         return {
-            pairs: matched.pairs,
+            pairs: kept,
             videos: videos.length,
             audios: audios.length,
             probed: classified,
             vOk: vOk.length,
             aOk: aOk.length,
+            skippedIos,
             ambiguous: matched.ambiguous,
             candidateCount: matched.candidateCount,
             blockedVideos: matched.blockedVideos,
@@ -1647,12 +1698,17 @@
                 r.ambiguous > 0
                     ? ` · 跳过歧义 ${r.ambiguous}（时长接近多候选，请手动勾选 1 视频+1 音频）`
                     : "";
+            const iosHint =
+                r.skippedIos > 0
+                    ? ` · 已排除 iOS Web 不兼容 ${r.skippedIos} 对（含配套音频）`
+                    : "";
             if (r.pairs.length) {
                 setAvPairs(r.pairs);
                 setStatus(
                     `选中项中找到 ${r.pairs.length} 对可合并（已着色勾选）` +
                         ` · 内容识别后 视频 ${r.videos} · 音频 ${r.audios}` +
                         (r.vOk != null ? ` · 有效时长 V${r.vOk}/A${r.aOk}` : "") +
+                        iosHint +
                         ambHint
                 );
                 return;
@@ -1660,6 +1716,7 @@
             setStatus(
                 `选中项中未找到唯一高度匹配对（视频 ${r.videos} · 音频 ${r.audios}` +
                     (r.vOk != null ? ` · 可读时长 V${r.vOk}/A${r.aOk}` : "") +
+                    iosHint +
                     ambHint +
                     `）。可手动勾选 1 视频 + 1 音频后合并。`
             );
@@ -2195,7 +2252,7 @@
      * autoFallback=false: merge path must not silently fall back to extension fetch.
      * @returns {Promise<number>} media_id
      */
-    async function ingestOneUrlOnServer(it, role, pageUrl, onStatus) {
+    async function ingestOneUrlOnServer(it, role, pageUrl, onStatus, allowIosIncompatible) {
         const r = role || "media";
         if (!it || !it.url) {
             throw makeStageError("ingest", `${r} 无 URL`);
@@ -2214,6 +2271,7 @@
         // Prefer explicit role for library typing (audio track may look like .mp4)
         if (r === "audio") row.media_type = "audio";
         else if (r === "video") row.media_type = mt === "audio" ? "video" : mt || "video";
+        if (allowIosIncompatible) row.allow_ios_incompatible = true;
         const baseTitle = (it.title || it.name || r).replace(/\.[^.]+$/, "");
         row.title = `${baseTitle} [merge-${r}]`;
 
@@ -2223,6 +2281,7 @@
             restricted: false,
             autoFallback: false,
             wait: true,
+            allow_ios_incompatible: !!allowIosIncompatible,
             onProgress: (job) => {
                 if (!onStatus || !job) return;
                 const pct =
@@ -2275,7 +2334,7 @@
      * Page A/V pair → server ingest both URLs → /api/media/merge-av (delete_sources).
      * Uses only existing LMW APIs.
      */
-    async function mergePagePairViaServerIngest(vItem, aItem, { title, restricted, onStatus } = {}) {
+    async function mergePagePairViaServerIngest(vItem, aItem, { title, restricted, tags, onStatus, allowIosIncompatible } = {}) {
         const pageUrl =
             (await getPageUrl()) ||
             (vItem && (vItem._pageUrl || vItem.referer)) ||
@@ -2283,22 +2342,37 @@
         /** @type {number[]} */
         const tempIds = [];
         try {
-            const vId = await ingestOneUrlOnServer(vItem, "video", pageUrl, onStatus);
+            const vId = await ingestOneUrlOnServer(
+                vItem,
+                "video",
+                pageUrl,
+                onStatus,
+                allowIosIncompatible
+            );
             tempIds.push(vId);
-            const aId = await ingestOneUrlOnServer(aItem, "audio", pageUrl, onStatus);
+            const aId = await ingestOneUrlOnServer(
+                aItem,
+                "audio",
+                pageUrl,
+                onStatus,
+                allowIosIncompatible
+            );
             tempIds.push(aId);
 
             if (onStatus) onStatus(`库内 ffmpeg 合并 v#${vId}+a#${aId}…`);
-            const tags =
+            const baseTags = Array.isArray(tags) ? tags.slice() : [];
+            const tagList =
                 restricted && typeof LMW.applyRestrictedTag === "function"
-                    ? LMW.applyRestrictedTag([], true)
+                    ? LMW.applyRestrictedTag(baseTags, true)
                     : restricted
-                      ? [LMW.RESTRICTED_TAG || "限制级"]
-                      : [];
+                      ? LMW.normalizeTags
+                          ? LMW.normalizeTags(baseTags.concat([LMW.RESTRICTED_TAG || "限制级"]))
+                          : baseTags.concat([LMW.RESTRICTED_TAG || "限制级"])
+                      : baseTags;
             const r = await LMW.mergeAvLibrary({
                 pairs: [{ video_id: vId, audio_id: aId }],
                 title: title || "",
-                tags,
+                tags: tagList,
                 delete_sources: true,
             });
             if (!(r && r.merged)) {
@@ -2352,27 +2426,51 @@
             setStatus("没有可合并的音视频对。请勾选 1 视频 + 1 音频，或先去重后再试");
             return;
         }
+        const iosItems = [];
+        for (const p of pairs) {
+            const v =
+                p.video_item ||
+                (p.video_key ? items.find((x) => x._key === p.video_key) : null);
+            const a =
+                p.audio_item ||
+                (p.audio_key ? items.find((x) => x._key === p.audio_key) : null);
+            if (v) iosItems.push(v);
+            if (a) iosItems.push(a);
+        }
+        const iosGate = await confirmIosWebIfNeeded(iosItems, "合并选中音视频");
+        if (!iosGate.ok) return;
         if (!confirmJasnaIfNeeded("合并选中音视频")) {
             setStatus("已取消合并（jasna 确认）");
             return;
         }
-        const pageN = pairs.filter((p) => p.source === "page").length;
-        const libN = pairs.filter((p) => p.source === "library").length;
-        const manualN = pairs.filter((p) => p.manual).length;
-        if (
-            !confirm(
-                `合并 ${pairs.length} 对音视频并写入媒体库？\n` +
-                    (manualN ? `· 手动选中 ${manualN} 对\n` : "") +
-                    (pageN
-                        ? `· 当前列表 ${pageN} 对：由服务端拉取 URL 后库内合并，仅保留成品（中间音/视频会删除）\n`
-                        : "") +
-                    (libN
-                        ? `· 服务器库 ${libN} 对：库内合并后删除原来的分离音/视频\n`
-                        : "")
-            )
-        ) {
+        const firstV =
+            (pairs[0] &&
+                (pairs[0].video_item ||
+                    (pairs[0].video_key && items.find((x) => x._key === pairs[0].video_key)))) ||
+            {};
+        const dlg = await LMW.openIngestDialog({
+            heading: `合并 ${pairs.length} 对音视频入库`,
+            title: firstV.title || firstV.name || document.title || "merged",
+            url: firstV.url || "",
+            media_type: "video",
+            source_page: await getPageUrl(),
+            count: pairs.length,
+            okLabel: "确认合并入库",
+            skipLabel: "不打标签合并",
+        });
+        if (!dlg || !dlg.ok || dlg.cancelled) {
+            setStatus("已取消合并");
             return;
         }
+        const tags = dlg.tags || [];
+        const useJasna =
+            dlg.use_jasna === true ||
+            isJasnaChecked() ||
+            (typeof G !== "undefined" && G.lmwUseJasna === true);
+        const restricted =
+            dlg.restricted === true ||
+            !!(document.getElementById("lmRestricted") && document.getElementById("lmRestricted").checked) ||
+            (typeof G !== "undefined" && G.lmwRestricted === true);
         const btn = document.getElementById("btnMergeAvSelected");
         const detectBtn = document.getElementById("btnDetectAvMerge");
         if (btn) btn.disabled = true;
@@ -2381,8 +2479,6 @@
         let fail = 0;
         /** @type {string[]} */
         const failDetails = [];
-        const restricted = !!(document.getElementById("lmRestricted") && document.getElementById("lmRestricted").checked);
-        const useJasna = isJasnaChecked();
         /** @type {Set<string>} */
         const mergedPageKeys = new Set();
         const pushFail = (line, err) => {
@@ -2397,11 +2493,16 @@
             if (libPairs.length) {
                 setStatus(`库内合并 0/${libPairs.length}…`);
                 try {
+                    const libTags =
+                        restricted && typeof LMW.applyRestrictedTag === "function"
+                            ? LMW.applyRestrictedTag(tags, true)
+                            : tags;
                     const r = await LMW.mergeAvLibrary({
                         pairs: libPairs.map((p) => ({
                             video_id: p.video_id,
                             audio_id: p.audio_id,
                         })),
+                        tags: libTags,
                         // 合并成功后删除库内原来的分离音/视频，只留成品
                         delete_sources: true,
                     });
@@ -2455,7 +2556,9 @@
                     );
                     const serverMerged = await mergePagePairViaServerIngest(vItem, aItem, {
                         title,
+                        tags,
                         restricted: useJasna ? false : restricted,
+                        allowIosIncompatible: iosGate.allow,
                         onStatus: (msg) => setStatus(`下载合并 ${pairNo} · ${msg}`),
                     });
                     const mid = serverMerged && serverMerged.media_id;
@@ -2487,7 +2590,7 @@
                         try {
                             await LMW.enqueueJasnaBridgeBlob(blob, {
                                 title,
-                                tags: [],
+                                tags,
                                 restricted,
                                 filename: `${String(title).slice(0, 40)}.mp4`,
                             });
@@ -5709,30 +5812,11 @@
             setStatus("请先选择媒体");
             return;
         }
+        const iosGate = await confirmIosWebIfNeeded(chosen, "入库");
+        if (!iosGate.ok) return;
         if (!confirmJasnaIfNeeded("入库选中媒体")) {
             setStatus("已取消入库（jasna 确认）");
             return;
-        }
-        const iosBad = chosen.filter((it) => it._iosOk === false);
-        if (iosBad.length) {
-            const names = iosBad.slice(0, 4).map((it) => {
-                const c = [shortCodecName(it._vcodec), shortCodecName(it._acodec)]
-                    .filter(Boolean)
-                    .join("+");
-                return (c || it._iosReason || "codec") + " · " + urlHost(it.url);
-            });
-            if (
-                !confirm(
-                    iosBad.length +
-                        " 项 iPhone 13 可能无法播放（AV1/VP9/WebM/Opus）。服务端也会拒绝入库。\n\n" +
-                        names.join("\n") +
-                        (iosBad.length > 4 ? "\n…" : "") +
-                        "\n\n仍要提交？"
-                )
-            ) {
-                setStatus("已取消入库（iOS 编码）");
-                return;
-            }
         }
         const pageUrl = await getPageUrl();
         const first = chosen[0];
@@ -5771,9 +5855,14 @@
                         : [{ startSec: null, endSec: null, startStr: "", endStr: "" }];
                 for (const r of clips) {
                     const row = await LMW.itemToIngest(it, pageUrl, tags);
+                    if (iosGate.allow) row.allow_ios_incompatible = true;
                     if (it._headers) row.headers = Object.assign({}, row.headers, it._headers);
                     const hasStart = r.startSec != null && !Number.isNaN(+r.startSec);
                     const hasEnd = r.endSec != null && +r.endSec > 0;
+                    // itemToIngest copies first-range _startSec/_endSec; always replace
+                    // per clip so "to end" (null end) does not keep the previous segment's end.
+                    delete row.start_sec;
+                    delete row.end_sec;
                     if (hasStart || hasEnd) {
                         row.start_sec = hasStart ? Math.max(0, +r.startSec) : 0;
                         if (hasEnd) row.end_sec = +r.endSec;
@@ -5836,6 +5925,7 @@
                 result = await LMW.pushItems(payload, "default", {
                     tags,
                     restricted: restricted,
+                    allow_ios_incompatible: iosGate.allow,
                     onProgress: onIngestProgress,
                 });
             }

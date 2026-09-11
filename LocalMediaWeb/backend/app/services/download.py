@@ -23,6 +23,7 @@ from app.services.util import (
     guess_ext,
     is_probably_html,
     job_payload_json,
+    job_allows_ios_incompatible,
     parse_job_payload,
     safe_category,
     clip_disambiguator,
@@ -221,13 +222,20 @@ async def enqueue_jobs(
                 it.get("use_jasna") is True
                 or str(it.get("use_jasna") or "").strip().lower() in ("1", "true", "yes", "on")
             )
+            allow_ios = bool(
+                it.get("allow_ios_incompatible") is True
+                or str(it.get("allow_ios_incompatible") or "").strip().lower()
+                in ("1", "true", "yes", "on")
+            )
             job = DownloadJob(
                 category=cat,
                 url=url,
                 media_type=media_type,
                 title=(it.get("title") or "")[:512],
                 source_page=(it.get("source_page") or it.get("referer") or "")[:2048],
-                headers_json=job_payload_json(headers, start_sec, end_sec),
+                headers_json=job_payload_json(
+                    headers, start_sec, end_sec, allow_ios_incompatible=allow_ios
+                ),
                 tags_json=tags_to_json(item_tags),
                 status="queued",
                 url_hash=uh,
@@ -272,6 +280,7 @@ async def _run_job(job_id: int) -> None:
             return
         url = job.url
         headers, start_sec, end_sec = parse_job_payload(job.headers_json)
+        allow_ios = job_allows_ios_incompatible(job.headers_json)
         if "User-Agent" not in headers and "user-agent" not in headers:
             headers["User-Agent"] = settings.user_agent
         cat = job.category
@@ -295,7 +304,16 @@ async def _run_job(job_id: int) -> None:
     try:
         path_l = url.lower().split("?")[0]
         if media_type == "dash" or path_l.endswith(".mpd") or "/dash_" in path_l:
-            await _run_dash(job_id, url, headers, cat, title, uh, source_page)
+            await _run_dash(
+                job_id,
+                url,
+                headers,
+                cat,
+                title,
+                uh,
+                source_page,
+                allow_ios_incompatible=allow_ios,
+            )
         elif media_type == "m3u8" or path_l.endswith(".m3u8"):
             await _run_m3u8(
                 job_id,
@@ -307,6 +325,7 @@ async def _run_job(job_id: int) -> None:
                 source_page,
                 start_sec=start_sec,
                 end_sec=end_sec,
+                allow_ios_incompatible=allow_ios,
             )
         else:
             await _run_direct(
@@ -320,6 +339,7 @@ async def _run_job(job_id: int) -> None:
                 source_page,
                 start_sec=start_sec,
                 end_sec=end_sec,
+                allow_ios_incompatible=allow_ios,
             )
     except IosCodecError as e:
         logger.warning("job %s codec reject: %s", job_id, e)
@@ -528,6 +548,7 @@ async def _run_direct(
     source_page: str,
     start_sec: float | None = None,
     end_sec: float | None = None,
+    allow_ios_incompatible: bool = False,
 ) -> None:
     settings = get_settings()
     if bool(getattr(settings, "block_live_streams", True)):
@@ -841,6 +862,7 @@ async def _run_direct(
             mime=ct or "",
             partial=False,
             warning=warn,
+            allow_ios_incompatible=allow_ios_incompatible,
         )
         try:
             shutil.rmtree(work, ignore_errors=True)
@@ -858,12 +880,22 @@ async def _run_m3u8(
     source_page: str,
     start_sec: float | None = None,
     end_sec: float | None = None,
+    allow_ios_incompatible: bool = False,
 ) -> None:
     # Misrouted DASH (old client labeled .mpd as m3u8)
     if url.lower().split("?")[0].endswith(".mpd") or (
         "dash" in url.lower() and ".mpd" in url.lower()
     ):
-        await _run_dash(job_id, url, headers, cat, title, uh, source_page)
+        await _run_dash(
+            job_id,
+            url,
+            headers,
+            cat,
+            title,
+            uh,
+            source_page,
+            allow_ios_incompatible=allow_ios_incompatible,
+        )
         return
 
     settings = get_settings()
@@ -913,6 +945,7 @@ async def _run_m3u8(
             progress_cb=progress_cb,
             start_sec=start_sec,
             end_sec=end_sec,
+            allow_ios_incompatible=allow_ios_incompatible,
         )
     except HlsError as e:
         err = str(e)
@@ -986,6 +1019,7 @@ async def _run_m3u8(
         mime="video/mp4",
         partial=bool(meta.get("partial")),
         warning=str(meta.get("warning") or ""),
+        allow_ios_incompatible=allow_ios_incompatible,
     )
     # cleanup work dir on success
     try:
@@ -1002,6 +1036,7 @@ async def _run_dash(
     title: str,
     uh: str,
     source_page: str,
+    allow_ios_incompatible: bool = False,
 ) -> None:
     """Steam store trailers etc. — MPEG-DASH MPD with SegmentTemplate."""
     settings = get_settings()
@@ -1025,7 +1060,14 @@ async def _run_dash(
                 db.commit()
 
     try:
-        meta = await download_dash(url, headers, work, out, progress_cb=progress_cb)
+        meta = await download_dash(
+            url,
+            headers,
+            work,
+            out,
+            progress_cb=progress_cb,
+            allow_ios_incompatible=allow_ios_incompatible,
+        )
     except DashError as e:
         if getattr(e, "codec_reject", False):
             _finish_fail(job_id, "failed_codec", 0, str(e)[:1000], False)
@@ -1064,6 +1106,7 @@ async def _run_dash(
         mime="video/mp4",
         partial=bool(meta.get("partial")),
         warning=warn,
+        allow_ios_incompatible=allow_ios_incompatible,
     )
     try:
         shutil.rmtree(work, ignore_errors=True)
@@ -1083,6 +1126,7 @@ async def _register_media(
     mime: str,
     partial: bool,
     warning: str,
+    allow_ios_incompatible: bool = False,
 ) -> None:
     settings = get_settings()
     # Flat layout: rel_path is filename only (legacy rows may still be cat/name)
@@ -1107,14 +1151,15 @@ async def _register_media(
 
     from app.services.media_process import assert_ios_playable
 
-    try:
-        assert_ios_playable(dest, media_type)
-    except IosCodecError:
+    if not allow_ios_incompatible:
         try:
-            dest.unlink(missing_ok=True)
-        except OSError:
-            pass
-        raise
+            assert_ios_playable(dest, media_type)
+        except IosCodecError:
+            try:
+                dest.unlink(missing_ok=True)
+            except OSError:
+                pass
+            raise
 
     chash, fsize = hash_media_file(dest)
     if not fsize and dest.is_file():

@@ -385,6 +385,7 @@ async def download_dash(
     work_dir: Path,
     out_file: Path,
     progress_cb=None,
+    allow_ios_incompatible: bool = False,
 ) -> dict:
     """
     Download a static DASH MPD (Steam trailers) into out_file (mp4).
@@ -474,7 +475,7 @@ async def download_dash(
         for v in videos:
             c = v.get("codecs") or ""
             ok, detail = ios_codecs_declared_ok(c)
-            if not ok:
+            if not ok and not allow_ios_incompatible:
                 skipped.append(detail or c)
                 continue
             if c.strip():

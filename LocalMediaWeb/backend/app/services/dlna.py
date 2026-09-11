@@ -23,6 +23,7 @@ logger = logging.getLogger("lmw.dlna")
 
 SSDP_ADDR = ("239.255.255.250", 1900)
 AV_TRANSPORT = "urn:schemas-upnp-org:service:AVTransport:1"
+RENDERING_CONTROL = "urn:schemas-upnp-org:service:RenderingControl:1"
 MEDIA_RENDERER = "urn:schemas-upnp-org:device:MediaRenderer:1"
 
 # Cache last SSDP result until explicit force-refresh (or process restart).
@@ -45,6 +46,7 @@ class DlnaDevice:
     manufacturer: str = ""
     model: str = ""
     host: str = ""
+    rendering_control_url: str = ""
 
     def to_dict(self) -> dict[str, Any]:
         d = asdict(self)
@@ -199,12 +201,14 @@ def _parse_device_description(xml_text: str, location: str) -> DlnaDevice | None
     model = ""
     udn = ""
     control_url_rel = ""
+    rc_url_rel = ""
 
     # Prefer the device that owns AVTransport (nested device trees).
     for dev in root.iter():
         if _strip_ns(dev.tag) != "device":
             continue
-        has_av = False
+        av_rel = ""
+        rc_rel = ""
         for svc in dev.iter():
             if _strip_ns(svc.tag) != "service":
                 continue
@@ -216,12 +220,16 @@ def _parse_device_description(xml_text: str, location: str) -> DlnaDevice | None
                     stype = (c.text or "").strip()
                 elif n == "controlURL":
                     curl = (c.text or "").strip()
-            if "AVTransport" in stype and curl:
-                has_av = True
-                control_url_rel = curl
-                break
-        if not has_av:
+            if not curl:
+                continue
+            if "AVTransport" in stype:
+                av_rel = curl
+            elif "RenderingControl" in stype:
+                rc_rel = curl
+        if not av_rel:
             continue
+        control_url_rel = av_rel
+        rc_url_rel = rc_rel
         friendly = _find_child_text(dev, {"friendlyName"}) or friendly
         manufacturer = _find_child_text(dev, {"manufacturer"}) or manufacturer
         model = _find_child_text(dev, {"modelName", "modelNumber"}) or model
@@ -229,7 +237,7 @@ def _parse_device_description(xml_text: str, location: str) -> DlnaDevice | None
         break
 
     if not control_url_rel:
-        # Fallback: any AVTransport in document
+        # Fallback: any AVTransport / RenderingControl in document
         for svc in root.iter():
             if _strip_ns(svc.tag) != "service":
                 continue
@@ -241,9 +249,12 @@ def _parse_device_description(xml_text: str, location: str) -> DlnaDevice | None
                     stype = (c.text or "").strip()
                 elif n == "controlURL":
                     curl = (c.text or "").strip()
-            if "AVTransport" in stype and curl:
+            if not curl:
+                continue
+            if "AVTransport" in stype and not control_url_rel:
                 control_url_rel = curl
-                break
+            elif "RenderingControl" in stype and not rc_url_rel:
+                rc_url_rel = curl
         if not friendly:
             friendly = _find_child_text(root, {"friendlyName"})
         if not udn:
@@ -257,6 +268,7 @@ def _parse_device_description(xml_text: str, location: str) -> DlnaDevice | None
         return None
 
     control_url = urljoin(location, control_url_rel)
+    rc_url = urljoin(location, rc_url_rel) if rc_url_rel else ""
     host = urlparse(location).hostname or ""
     name = friendly or model or host or "DLNA device"
     did = _device_id(udn or control_url, control_url)
@@ -269,6 +281,7 @@ def _parse_device_description(xml_text: str, location: str) -> DlnaDevice | None
         manufacturer=manufacturer,
         model=model,
         host=host,
+        rendering_control_url=rc_url,
     )
 
 
@@ -477,11 +490,18 @@ def _soap_envelope(action: str, service_type: str, body_inner: str) -> str:
     )
 
 
-def _soap_post(control_url: str, action: str, body_inner: str, timeout: float = 8.0) -> str:
-    envelope = _soap_envelope(action, AV_TRANSPORT, body_inner)
+def _soap_post(
+    control_url: str,
+    action: str,
+    body_inner: str,
+    timeout: float = 8.0,
+    service_type: str | None = None,
+) -> str:
+    st = (service_type or AV_TRANSPORT).strip() or AV_TRANSPORT
+    envelope = _soap_envelope(action, st, body_inner)
     headers = {
         "Content-Type": 'text/xml; charset="utf-8"',
-        "SOAPACTION": f'"{AV_TRANSPORT}#{action}"',
+        "SOAPACTION": f'"{st}#{action}"',
         "User-Agent": "LocalMediaWeb-DLNA/1.0",
     }
     with httpx.Client(timeout=timeout, follow_redirects=True) as client:
@@ -659,6 +679,47 @@ def seek_position(device: DlnaDevice, position_sec: float) -> str:
         )
         _soap_post(device.control_url, "Seek", body_abs, timeout=6.0)
     return target
+
+
+def clamp_volume(value: Any) -> int:
+    """UPnP RenderingControl DesiredVolume: integer 0–100."""
+    try:
+        n = int(round(float(value)))
+    except (TypeError, ValueError):
+        n = 0
+    if n < 0:
+        return 0
+    if n > 100:
+        return 100
+    return n
+
+
+def set_volume(device: DlnaDevice, volume: Any) -> int:
+    """Set Master channel volume on the renderer. Returns clamped 0–100."""
+    rc = (device.rendering_control_url if device else "") or ""
+    if not rc.strip():
+        raise ValueError("device has no RenderingControl")
+    n = clamp_volume(volume)
+    body = (
+        "<InstanceID>0</InstanceID>"
+        "<Channel>Master</Channel>"
+        f"<DesiredVolume>{n}</DesiredVolume>"
+    )
+    _soap_post(rc, "SetVolume", body, timeout=6.0, service_type=RENDERING_CONTROL)
+    return n
+
+
+def get_volume(device: DlnaDevice) -> int:
+    """Get Master channel volume (0–100)."""
+    rc = (device.rendering_control_url if device else "") or ""
+    if not rc.strip():
+        raise ValueError("device has no RenderingControl")
+    body = "<InstanceID>0</InstanceID><Channel>Master</Channel>"
+    text = _soap_post(rc, "GetVolume", body, timeout=5.0, service_type=RENDERING_CONTROL)
+    raw = _soap_first_text(text, "CurrentVolume")
+    if raw == "":
+        raise RuntimeError("GetVolume returned no CurrentVolume")
+    return clamp_volume(raw)
 
 
 def pause_device(device: DlnaDevice) -> None:

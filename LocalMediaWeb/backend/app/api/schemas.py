@@ -22,6 +22,8 @@ class IngestItem(BaseModel):
     use_jasna: bool = False
     # Mark item with 限制级 tag on ingest
     restricted: bool = False
+    # Client confirmed: store even if iPhone Safari cannot play it
+    allow_ios_incompatible: bool = False
 
 
 class IngestRequest(BaseModel):
@@ -34,6 +36,8 @@ class IngestRequest(BaseModel):
     use_jasna: bool = False
     # Default restricted for items that omit the flag
     restricted: bool = False
+    # Default allow_ios_incompatible for items that omit the flag
+    allow_ios_incompatible: bool = False
 
 
 class CategoryCreate(BaseModel):
@@ -65,6 +69,20 @@ class MediaOut(BaseModel):
     thumb_url: str
 
     model_config = {"from_attributes": True}
+
+
+class FeedRequest(BaseModel):
+    """POST /api/feed — same fields as GET; exclude_ids as int list (random persistence)."""
+
+    mode: str = "recommend"
+    limit: int = Field(default=30, le=100, ge=1)
+    similar_to: int | None = None
+    tag: str | None = None
+    exclude_ids: list[int] = Field(default_factory=list)
+    include_seed: bool = True
+    include_restricted: bool = False
+    include_images: bool = False
+    exclude_tags: list[str] = Field(default_factory=list)
 
 
 class InteractEvent(BaseModel):
@@ -229,6 +247,7 @@ class DlnaSeekRequest(BaseModel):
 
 
 class DlnaControlRequest(BaseModel):
-    """Transport control on an active cast: pause / play / stop."""
+    """Transport / volume on an active cast: pause / play / stop / volume / get_volume."""
     device_id: str
-    action: str  # pause | play | stop
+    action: str  # pause | play | stop | volume | get_volume
+    volume: float | None = None

@@ -365,13 +365,28 @@ def job_payload_json(
     headers: dict[str, str],
     start_sec: float | None = None,
     end_sec: float | None = None,
+    allow_ios_incompatible: bool = False,
 ) -> str:
     payload: dict = {"headers": headers or {}}
     if start_sec is not None:
         payload["start_sec"] = float(start_sec)
     if end_sec is not None:
         payload["end_sec"] = float(end_sec)
+    if allow_ios_incompatible:
+        payload["allow_ios_incompatible"] = True
     return json.dumps(payload, ensure_ascii=False)
+
+
+def job_allows_ios_incompatible(raw: str | None) -> bool:
+    if not raw:
+        return False
+    try:
+        data = json.loads(raw)
+    except json.JSONDecodeError:
+        return False
+    if not isinstance(data, dict):
+        return False
+    return bool(data.get("allow_ios_incompatible"))
 
 
 def is_probably_html(content_type: str | None, sample: bytes) -> bool:

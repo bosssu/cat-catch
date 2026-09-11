@@ -120,6 +120,7 @@ const LMW = {
         };
         // use_jasna no longer sent to LMW — demosaic via local JasnaBridge / FFmpegBridge
         if (restricted) body.restricted = true;
+        if (opts && opts.allow_ios_incompatible) body.allow_ios_incompatible = true;
         return this.request("/api/ingest", {
             method: "POST",
             headers: this.headers(true),
@@ -1419,6 +1420,11 @@ const LMW = {
             const mtype = opts.media_type || "";
             const sourcePage = opts.source_page || "";
             const count = opts.count || 1;
+            const heading =
+                opts.heading ||
+                (count > 1 ? `入库 ${count} 项媒体` : "入库详情");
+            const okLabel = opts.okLabel || "确认入库";
+            const skipLabel = opts.skipLabel || "不打标签入库";
             let libraryTags = [];
             let librarySize = 0;
             let suggestions = self.normalizeTags([
@@ -1489,7 +1495,7 @@ const LMW = {
 #lmw-ingest-dlg-root .opt-stack{display:flex;flex-direction:column;gap:6px;margin:12px 0 4px}
 </style>
 <div class="card" role="dialog" aria-modal="true">
-  <h3>${count > 1 ? `入库 ${count} 项媒体` : "入库详情"}</h3>
+  <h3>${escapeHtml(heading)}</h3>
   <div class="meta">
     <div><b>标题</b> ${escapeHtml(String(title).slice(0, 120))}</div>
     <div><b>类型</b> ${escapeHtml(mtype || "—")}${count > 1 ? " · 将共用标签" : ""}</div>
@@ -1523,8 +1529,8 @@ const LMW = {
   <div class="err" id="lmwTagErr"></div>
   <div class="actions">
     <button type="button" class="btn-cancel" id="lmwDlgCancel">取消</button>
-    <button type="button" class="btn-skip" id="lmwDlgSkip">不打标签入库</button>
-    <button type="button" class="btn-ok" id="lmwDlgOk">确认入库</button>
+    <button type="button" class="btn-skip" id="lmwDlgSkip">${escapeHtml(skipLabel)}</button>
+    <button type="button" class="btn-ok" id="lmwDlgOk">${escapeHtml(okLabel)}</button>
   </div>
 </div>`;
             document.documentElement.appendChild(root);
@@ -2355,6 +2361,7 @@ const LMW = {
         if (data._endSec != null && data._endSec !== "" && !Number.isNaN(+data._endSec) && +data._endSec > 0) {
             row.end_sec = +data._endSec;
         }
+        if (data.allow_ios_incompatible) row.allow_ios_incompatible = true;
         return row;
     },
 
@@ -2495,7 +2502,7 @@ const LMW = {
      * Ingest items; optionally fallback upload on auth/network failure.
      * onProgress(jobOrNull, meta) — meta.message is preferred for UI status bars.
      */
-    async pushItems(items, category, { autoFallback, wait = true, onProgress, tags, use_jasna, restricted } = {}) {
+    async pushItems(items, category, { autoFallback, wait = true, onProgress, tags, use_jasna, restricted, allow_ios_incompatible } = {}) {
         const cat = category || (typeof G !== "undefined" && G.lmwDefaultCategory) || "default";
         const fallback = autoFallback ?? (typeof G !== "undefined" ? G.lmwAutoFallback : true) ?? true;
         const useRestricted =
@@ -2513,6 +2520,14 @@ const LMW = {
         if (useRestricted) {
             for (const it of list) {
                 it.restricted = true;
+            }
+        }
+        const allowIos =
+            allow_ios_incompatible === true ||
+            list.some((it) => it && it.allow_ios_incompatible);
+        if (allowIos) {
+            for (const it of list) {
+                if (it) it.allow_ios_incompatible = true;
             }
         }
 
@@ -2536,6 +2551,7 @@ const LMW = {
 
         const ingestRes = await this.ingest(cat, list, sharedTags, {
             restricted: !!useRestricted,
+            allow_ios_incompatible: !!allowIos,
         });
         const jobIds = ingestRes.job_ids || [];
         const dupN = (ingestRes.duplicate_media_ids || []).length;

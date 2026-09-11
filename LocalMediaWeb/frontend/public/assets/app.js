@@ -6,6 +6,53 @@
   const includeRestrictedKey = "lmw_include_restricted";
   /** include static images (media_type=image) in feed/search/grid (default off) */
   const includeImagesKey = "lmw_include_images";
+  /** comma-separated tags never pushed in feed/search/grid */
+  const excludePushTagsKey = "lmw_exclude_push_tags";
+  function parseExcludePushTags(raw) {
+    const parts = String(raw || "")
+      .replace(/，/g, ",")
+      .replace(/；/g, ",")
+      .replace(/;/g, ",")
+      .split(",");
+    const out = [];
+    const seen = new Set();
+    for (const p of parts) {
+      const t = String(p || "")
+        .trim()
+        .replace(/^#/, "")
+        .toLowerCase();
+      if (!t || seen.has(t)) continue;
+      seen.add(t);
+      out.push(t);
+    }
+    return out;
+  }
+  function loadExcludePushTags() {
+    try {
+      const raw = localStorage.getItem(excludePushTagsKey) || "";
+      if (!raw) return [];
+      if (raw.startsWith("[")) {
+        const j = JSON.parse(raw);
+        return parseExcludePushTags(Array.isArray(j) ? j.join(",") : String(j));
+      }
+      return parseExcludePushTags(raw);
+    } catch (_) {
+      return [];
+    }
+  }
+  function saveExcludePushTags(list) {
+    const tags = parseExcludePushTags(Array.isArray(list) ? list.join(",") : list);
+    localStorage.setItem(excludePushTagsKey, JSON.stringify(tags));
+    return tags;
+  }
+  function applyExcludePushTags(params) {
+    const tags = state.excludePushTags || [];
+    if (tags.length) params.set("exclude_tags", tags.join(","));
+    return params;
+  }
+  function excludePushTagsBody() {
+    return { exclude_tags: state.excludePushTags || [] };
+  }
   /** Feed: replace review button with delete (default off) */
   const editModeKey = "lmw_edit_mode";
   /** DLNA cast end behavior: once | loop (server-side; no auto-next) */
@@ -14,6 +61,8 @@
   const soundKey = "lmw_want_sound";
   /** session: browser media element unlocked for unmuted play (user gesture) */
   const audioUnlockKey = "lmw_audio_unlocked";
+  /** random mode: persisted watched ids (without-replacement until library exhausted) */
+  const randomSeenKey = "lmw_random_seen_ids";
   const state = {
     view: "feed",
     /** view before opening search (for back) */
@@ -21,6 +70,7 @@
     mode: localStorage.getItem(feedModeKey) || "random",
     includeRestricted: localStorage.getItem(includeRestrictedKey) === "1",
     includeImages: localStorage.getItem(includeImagesKey) === "1",
+    excludePushTags: loadExcludePushTags(),
     editMode: localStorage.getItem(editModeKey) === "1",
     similarTo: null,
     /** when mode=similar and set, rank by this tag (not whole media) */
@@ -79,6 +129,9 @@
      */
     feedSeenIds: [],
     feedSeenSet: new Set(),
+    /** random-only persisted seen ids (survives reload; other modes ignore this) */
+    randomSeenIds: [],
+    randomSeenSet: new Set(),
   };
 
   /** Coarse / small screens: aggressive media windowing (desktop left alone). */
@@ -1307,26 +1360,79 @@
     }
   }
 
+  function isRandomFeedMode() {
+    return (state.mode || "random") === "random" && state.feedSource !== "search";
+  }
+
+  function loadRandomSeen() {
+    try {
+      const raw = localStorage.getItem(randomSeenKey);
+      const arr = raw ? JSON.parse(raw) : [];
+      if (!Array.isArray(arr)) return;
+      const ids = arr.map(Number).filter((n) => Number.isFinite(n));
+      state.randomSeenIds = ids;
+      state.randomSeenSet = new Set(ids);
+    } catch (_) {
+      state.randomSeenIds = [];
+      state.randomSeenSet = new Set();
+    }
+  }
+
+  function persistRandomSeen() {
+    try {
+      localStorage.setItem(randomSeenKey, JSON.stringify(state.randomSeenIds));
+    } catch (_) {}
+  }
+
+  function rememberRandomSeen(id) {
+    const n = Number(id);
+    if (!Number.isFinite(n) || state.randomSeenSet.has(n)) return;
+    state.randomSeenSet.add(n);
+    state.randomSeenIds.push(n);
+    persistRandomSeen();
+  }
+
+  function resetRandomSeenCycle() {
+    state.randomSeenIds = [];
+    state.randomSeenSet = new Set();
+    persistRandomSeen();
+  }
+
+  function forgetRandomSeen(id) {
+    const n = Number(id);
+    if (!Number.isFinite(n) || !state.randomSeenSet.has(n)) return;
+    state.randomSeenSet.delete(n);
+    state.randomSeenIds = state.randomSeenIds.filter((x) => Number(x) !== n);
+    persistRandomSeen();
+  }
+
   function rememberFeedSeen(id) {
     if (id == null) return;
     const n = Number(id);
     if (!Number.isFinite(n)) return;
+    if (isRandomFeedMode()) rememberRandomSeen(n);
     if (state.feedSeenSet.has(n)) return;
     state.feedSeenSet.add(n);
     state.feedSeenIds.push(n);
-    // keep last ~180 (enough for random de-dupe without huge URLs)
+    // other modes: keep last ~180 so exclude_ids query stays reasonable
     while (state.feedSeenIds.length > 180) {
       const old = state.feedSeenIds.shift();
       state.feedSeenSet.delete(old);
     }
   }
 
-  /** Ids to exclude from next ranked batch (playlist + session history). */
+  /** Ids to exclude from next ranked batch (playlist + history). */
   function excludeFeedIds() {
     const s = new Set(playlistIds());
-    for (const id of state.feedSeenIds) s.add(id);
+    if (isRandomFeedMode()) {
+      for (const id of state.randomSeenIds) s.add(id);
+    } else {
+      for (const id of state.feedSeenIds) s.add(id);
+    }
     return [...s];
   }
+
+  loadRandomSeen();
 
   const ICO = {
     heart: `<svg viewBox="0 0 24 24" aria-hidden="true"><path fill="currentColor" d="M12 21.35l-1.45-1.32C5.4 15.36 2 12.28 2 8.5 2 5.42 4.42 3 7.5 3c1.74 0 3.41.81 4.5 2.09C13.09 3.81 14.76 3 16.5 3 19.58 3 22 5.42 22 8.5c0 3.78-3.4 6.86-8.55 11.54L12 21.35z"/></svg>`,
@@ -2083,6 +2189,7 @@
         include_restricted: state.includeRestricted ? "true" : "false",
         include_images: state.includeImages ? "true" : "false",
       });
+      applyExcludePushTags(params);
       const data = await api(`/api/media?${params}`);
       const items = data.items || [];
       if (data.total != null) state.searchTotal = data.total;
@@ -2108,12 +2215,30 @@
     if (state.feedSource === "search" && (state.searchFeedQ || "").trim()) {
       return fetchSearchFeedBatch({ limit, exclude });
     }
+    const ex = exclude != null ? exclude : excludeFeedIds();
+    if (isRandomFeedMode()) {
+      const data = await api("/api/feed", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          mode: "random",
+          limit,
+          include_restricted: !!state.includeRestricted,
+          include_images: !!state.includeImages,
+          exclude_ids: ex,
+          ...excludePushTagsBody(),
+        }),
+      });
+      if (data && data.random_cycle_reset) resetRandomSeenCycle();
+      return data.items || [];
+    }
     const q = new URLSearchParams({
       mode: state.mode || "random",
       limit: String(limit),
       include_restricted: state.includeRestricted ? "true" : "false",
       include_images: state.includeImages ? "true" : "false",
     });
+    applyExcludePushTags(q);
     if (state.mode === "similar") {
       if (state.similarTag) {
         q.set("tag", String(state.similarTag));
@@ -2123,7 +2248,6 @@
         q.set("include_seed", includeSeed ? "true" : "false");
       }
     }
-    const ex = exclude != null ? exclude : excludeFeedIds();
     if (ex.length) q.set("exclude_ids", ex.join(","));
     const data = await api(`/api/feed?${q}`);
     return data.items || [];
@@ -2136,6 +2260,7 @@
   async function loadFeed(opts = {}) {
     const keepId = opts.keepCurrentId;
     const quiet = !!opts.quiet;
+    const filterChanged = !!opts.filterChanged;
     if (!quiet) clearChromeHidden();
     // Search-playlist rebuild: restart from first page of the same query
     if (state.feedSource === "search" && (state.searchFeedQ || "").trim() && keepId == null) {
@@ -2143,9 +2268,16 @@
     }
     // Mobile: small initial playlist — large DOM of <video> dies after ~10 plays
     const batchLimit = isMobileFeedClient() ? 8 : 40;
+    // Filter changes must not reuse playlist/seen exclude, or newly-eligible
+    // items stay hidden until a full reload.
+    if (filterChanged && keepId == null) {
+      state.feedSeenIds = [];
+      state.feedSeenSet = new Set();
+    }
+    const baseEx = filterChanged && keepId == null ? [] : excludeFeedIds();
     const items = await fetchFeedBatch({
       limit: batchLimit,
-      exclude: keepId != null ? [keepId] : [],
+      exclude: keepId != null ? [...new Set([keepId, ...baseEx])] : baseEx,
       includeSeed: true,
     });
     // When keeping current, put it first then append ranked others
@@ -2164,7 +2296,7 @@
     }
     state.viewedIds = new Set();
     // keep session de-dupe across soft rebuilds; hard empty only on full logout-like reset
-    if (keepId == null && !quiet) {
+    if (keepId == null && (!quiet || filterChanged)) {
       state.feedSeenIds = [];
       state.feedSeenSet = new Set();
     }
@@ -2670,6 +2802,7 @@
         include_restricted: state.includeRestricted ? "true" : "false",
         include_images: state.includeImages ? "true" : "false",
       });
+      applyExcludePushTags(q);
       console.debug("[grid] fetching /api/media?%s", q.toString());
       const data = await api(`/api/media?${q}`);
       console.debug("[grid] got %d items (total=%d)", (data.items || []).length, data.total || 0);
@@ -2698,6 +2831,7 @@
 
   /** Persist last chosen DLNA device across reloads. */
   const CAST_LAST_DEVICE_KEY = "lmw_last_dlna_device";
+  const CAST_VOLUME_KEY = "lmw_cast_volume";
   /** Tab-session cast state (survives SPA reloads in same tab). */
   const CAST_SESSION_KEY = "lmw_cast_session";
   /**
@@ -2705,6 +2839,40 @@
    * { deviceId, mediaId, deviceName, title, paused }
    */
   let _castSession = null;
+
+  function clampCastVolume(v) {
+    const n = Number(v);
+    if (!Number.isFinite(n)) return 50;
+    return Math.max(0, Math.min(100, Math.round(n)));
+  }
+
+  function loadStoredCastVolume(deviceId) {
+    try {
+      const raw = localStorage.getItem(CAST_VOLUME_KEY);
+      if (!raw) return 50;
+      const o = JSON.parse(raw);
+      if (!o || typeof o !== "object") return 50;
+      const id = String(deviceId || "");
+      if (id && o[id] != null) return clampCastVolume(o[id]);
+      if (o._last != null) return clampCastVolume(o._last);
+    } catch (_) {}
+    return 50;
+  }
+
+  function saveStoredCastVolume(deviceId, volume) {
+    const n = clampCastVolume(volume);
+    try {
+      let o = {};
+      const raw = localStorage.getItem(CAST_VOLUME_KEY);
+      if (raw) o = JSON.parse(raw) || {};
+      if (typeof o !== "object") o = {};
+      const id = String(deviceId || "");
+      if (id) o[id] = n;
+      o._last = n;
+      localStorage.setItem(CAST_VOLUME_KEY, JSON.stringify(o));
+    } catch (_) {}
+    return n;
+  }
 
   /** once | loop — from 管理 → 设置; sent with each /api/dlna/play */
   function getCastPlayMode() {
@@ -2727,6 +2895,10 @@
   let _castSeekPendingSec = null;
   let _castSeekTimer = null;
   let _castControlBusy = false;
+  let _castVolPending = null;
+  let _castVolTimer = null;
+  let _castVolInFlight = false;
+  let _castVolFetchGen = 0;
   /** After a failed Stop, next Stop click force-clears phone session. */
   let _castStopFailOnce = false;
   /** Auto-cast on feed swipe: only latest request wins. */
@@ -2781,6 +2953,9 @@
         deviceName: o.deviceName ? String(o.deviceName) : "",
         title: o.title ? String(o.title) : "",
         paused: !!o.paused,
+        volume: o.volume != null
+          ? clampCastVolume(o.volume)
+          : loadStoredCastVolume(o.deviceId),
       };
     } catch (_) {
       _castSession = null;
@@ -2800,9 +2975,11 @@
       deviceName: deviceName || "",
       title: title || "",
       paused: false,
+      volume: loadStoredCastVolume(deviceId),
     };
     persistCastSession();
     updateCastBar();
+    fetchCastVolume();
   }
 
   function clearCastSession() {
@@ -2854,6 +3031,7 @@
     const title = (data && data.title) || media.title || "";
     saveLastCastDevice(did, name);
     setCastSession(did, media.id, name, title);
+    ensureCastSilentAudio();
     pauseActiveFeedAfterCast();
     if (!quiet) {
       const modeHint = mode === "loop" ? "循环" : "单次";
@@ -2959,22 +3137,32 @@
     bar.setAttribute("aria-hidden", "true");
     bar.innerHTML = `
       <div class="cast-bar-inner">
-        <div class="cast-bar-meta">
-          <span class="cast-bar-ico" aria-hidden="true">
-            <svg class="ico" viewBox="0 0 24 24"><path fill="currentColor" d="M21 3H3c-1.1 0-2 .9-2 2v12c0 1.1.9 2 2 2h5v2h8v-2h5c1.1 0 2-.9 2-2V5c0-1.1-.9-2-2-2zm0 14H3V5h18v12z"/></svg>
-          </span>
-          <div class="cast-bar-text">
-            <div class="cast-bar-title" id="castBarTitle">投屏中</div>
-            <div class="cast-bar-sub" id="castBarSub"></div>
+        <div class="cast-bar-row">
+          <div class="cast-bar-meta">
+            <span class="cast-bar-ico" aria-hidden="true">
+              <svg class="ico" viewBox="0 0 24 24"><path fill="currentColor" d="M21 3H3c-1.1 0-2 .9-2 2v12c0 1.1.9 2 2 2h5v2h8v-2h5c1.1 0 2-.9 2-2V5c0-1.1-.9-2-2-2zm0 14H3V5h18v12z"/></svg>
+            </span>
+            <div class="cast-bar-text">
+              <div class="cast-bar-title" id="castBarTitle">投屏中</div>
+              <div class="cast-bar-sub" id="castBarSub"></div>
+            </div>
+          </div>
+          <div class="cast-bar-actions">
+            <button type="button" class="cast-bar-btn" id="btnCastPause" title="暂停电视" aria-label="暂停电视">暂停</button>
+            <button type="button" class="cast-bar-btn ghost" id="btnCastSwitch" title="换设备" aria-label="换设备">换设备</button>
+            <button type="button" class="cast-bar-btn danger" id="btnCastStop" title="结束投屏" aria-label="结束投屏">结束</button>
           </div>
         </div>
-        <div class="cast-bar-actions">
-          <button type="button" class="cast-bar-btn" id="btnCastPause" title="暂停电视" aria-label="暂停电视">暂停</button>
-          <button type="button" class="cast-bar-btn ghost" id="btnCastSwitch" title="换设备" aria-label="换设备">换设备</button>
-          <button type="button" class="cast-bar-btn danger" id="btnCastStop" title="结束投屏" aria-label="结束投屏">结束</button>
+        <div class="cast-bar-vol" id="castBarVol">
+          <span class="cast-bar-vol-ico" aria-hidden="true">
+            <svg class="ico" viewBox="0 0 24 24"><path fill="currentColor" d="M3 10v4h4l5 5V5L7 10H3zm13.5 2c0-1.77-1.02-3.29-2.5-4.03v8.05c1.48-.73 2.5-2.25 2.5-4.02zM14 3.23v2.06c2.89.86 5 3.54 5 6.71s-2.11 5.85-5 6.71v2.06c4.01-.91 7-4.49 7-8.77s-2.99-7.86-7-8.77z"/></svg>
+          </span>
+          <input type="range" id="castVolume" class="cast-bar-vol-range" min="0" max="100" step="1" value="50" aria-label="电视音量">
+          <span class="cast-bar-vol-num" id="castVolumeNum">50</span>
         </div>
       </div>`;
     document.body.appendChild(bar);
+    bindCastVolumeSlider();
     return bar;
   }
 
@@ -2987,6 +3175,7 @@
       bar.classList.add("hide");
       bar.setAttribute("aria-hidden", "true");
       document.body.classList.remove("has-cast-bar");
+      releaseCastMediaSession();
       return;
     }
     bar.classList.remove("hide");
@@ -3022,6 +3211,109 @@
     bar.querySelectorAll(".cast-bar-btn").forEach((b) => {
       b.disabled = busy;
     });
+    syncCastVolumeUi(_castSession.volume);
+    syncCastMediaSession();
+  }
+
+  function syncCastVolumeUi(volume) {
+    const n = clampCastVolume(volume);
+    const range = document.getElementById("castVolume");
+    const num = document.getElementById("castVolumeNum");
+    if (range && document.activeElement !== range) {
+      range.value = String(n);
+    }
+    if (num) num.textContent = String(n);
+  }
+
+  function bindCastVolumeSlider() {
+    const range = document.getElementById("castVolume");
+    const volRow = document.getElementById("castBarVol");
+    if (!range || range.dataset.bound) return;
+    range.dataset.bound = "1";
+    const stopFeed = (e) => {
+      e.stopPropagation();
+    };
+    const onInput = () => {
+      const n = clampCastVolume(range.value);
+      syncCastVolumeUi(n);
+      if (_castSession) {
+        _castSession.volume = n;
+      }
+      scheduleCastVolume(n);
+    };
+    ["pointerdown", "touchstart", "mousedown"].forEach((ev) => {
+      range.addEventListener(ev, stopFeed, { passive: true });
+      if (volRow) volRow.addEventListener(ev, stopFeed, { passive: true });
+    });
+    range.addEventListener("input", onInput);
+    range.addEventListener("change", onInput);
+  }
+
+  function scheduleCastVolume(n) {
+    _castVolPending = clampCastVolume(n);
+    if (_castVolTimer) clearTimeout(_castVolTimer);
+    _castVolTimer = setTimeout(() => {
+      _castVolTimer = null;
+      flushCastVolume();
+    }, 120);
+  }
+
+  async function flushCastVolume() {
+    if (_castVolPending == null || !_castSession || !_castSession.deviceId) return;
+    if (_castVolInFlight) return;
+    const n = clampCastVolume(_castVolPending);
+    _castVolPending = null;
+    const deviceId = _castSession.deviceId;
+    _castVolInFlight = true;
+    try {
+      const data = await api("/api/dlna/control", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          device_id: deviceId,
+          action: "volume",
+          volume: n,
+        }),
+      });
+      const out = data && data.volume != null ? clampCastVolume(data.volume) : n;
+      saveStoredCastVolume(deviceId, out);
+      if (_castSession && _castSession.deviceId === deviceId) {
+        _castSession.volume = out;
+        persistCastSession();
+        syncCastVolumeUi(out);
+      }
+    } catch (e) {
+      showToast(`电视音量失败：${String(e.message || e).slice(0, 80)}`);
+    } finally {
+      _castVolInFlight = false;
+      if (_castVolPending != null) {
+        flushCastVolume().catch(() => {});
+      }
+    }
+  }
+
+  async function fetchCastVolume() {
+    if (!_castSession || !_castSession.deviceId) return;
+    const deviceId = _castSession.deviceId;
+    const gen = ++_castVolFetchGen;
+    try {
+      const data = await api("/api/dlna/control", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ device_id: deviceId, action: "get_volume" }),
+      });
+      if (gen !== _castVolFetchGen) return;
+      if (!_castSession || _castSession.deviceId !== deviceId) return;
+      if (data && data.volume != null) {
+        const n = clampCastVolume(data.volume);
+        _castSession.volume = n;
+        saveStoredCastVolume(deviceId, n);
+        persistCastSession();
+        syncCastVolumeUi(n);
+      }
+    } catch (_) {
+      // Box may lack RenderingControl; keep local slider value
+    }
   }
 
   async function castControl(action) {
@@ -3083,7 +3375,169 @@
 
   function toggleCastPause() {
     if (!_castSession) return;
+    ensureCastSilentAudio();
     castControl(_castSession.paused ? "play" : "pause").catch(() => {});
+  }
+
+  let _castMsBound = false;
+  let _castSilentAudio = null;
+  let _castMsSkipAt = 0;
+
+  function castMsApi() {
+    return (typeof window !== "undefined" && window.lmwCastMediaSession) || null;
+  }
+
+  function getCastMediaSession() {
+    try {
+      return navigator.mediaSession || null;
+    } catch (_) {
+      return null;
+    }
+  }
+
+  function ensureCastSilentAudio() {
+    const api = castMsApi();
+    if (!api || !isCastSessionActive()) return;
+    if (!_castSilentAudio) {
+      _castSilentAudio = api.createSilentEl(document);
+      if (_castSilentAudio) document.body.appendChild(_castSilentAudio);
+    }
+    if (!_castSilentAudio) return;
+    try {
+      const p = _castSilentAudio.play();
+      if (p && typeof p.catch === "function") p.catch(() => {});
+    } catch (_) {}
+  }
+
+  function stopCastSilentAudio() {
+    if (!_castSilentAudio) return;
+    try {
+      _castSilentAudio.pause();
+    } catch (_) {}
+    try {
+      _castSilentAudio.removeAttribute("src");
+      _castSilentAudio.load();
+    } catch (_) {}
+    try {
+      _castSilentAudio.remove();
+    } catch (_) {}
+    _castSilentAudio = null;
+  }
+
+  function bindCastMediaSessionHandlers() {
+    const api = castMsApi();
+    const ms = getCastMediaSession();
+    if (!api || !ms || _castMsBound) return;
+    api.bindActions(ms, {
+      play: () => {
+        if (!isCastSessionActive()) return;
+        ensureCastSilentAudio();
+        if (_castSession.paused) toggleCastPause();
+      },
+      pause: () => {
+        if (!isCastSessionActive()) return;
+        if (!_castSession.paused) toggleCastPause();
+      },
+      previoustrack: () => skipCastByDelta(-1),
+      nexttrack: () => skipCastByDelta(1),
+      seekto: (details) => {
+        if (!isCastSessionActive() || !details) return;
+        const t = Number(details.seekTime);
+        if (!Number.isFinite(t)) return;
+        syncCastSeekOnScrubEnd(_castSession.mediaId, t);
+      },
+    });
+    _castMsBound = true;
+  }
+
+  function releaseCastMediaSession() {
+    const api = castMsApi();
+    const ms = getCastMediaSession();
+    if (api && ms) api.unbindActions(ms);
+    _castMsBound = false;
+    stopCastSilentAudio();
+  }
+
+  function syncCastMediaSession() {
+    const api = castMsApi();
+    const ms = getCastMediaSession();
+    if (!api || !ms || !isCastSessionActive()) {
+      if (_castMsBound) releaseCastMediaSession();
+      return;
+    }
+    bindCastMediaSessionHandlers();
+    const item =
+      state.items.find((x) => Number(x.id) === Number(_castSession.mediaId)) ||
+      (getActiveFeedMedia() &&
+      Number(getActiveFeedMedia().id) === Number(_castSession.mediaId)
+        ? getActiveFeedMedia()
+        : null);
+    const thumb = item ? thumbUrl(item) : "";
+    api.applyMetadata(
+      ms,
+      api.buildMetadata({
+        title: (_castSession.title || (item && item.title) || "").trim(),
+        mediaId: _castSession.mediaId,
+        deviceName: _castSession.deviceName || "",
+        thumbUrl: thumb,
+        origin: location.origin,
+      })
+    );
+    try {
+      ms.playbackState = api.playbackState(!!_castSession.paused);
+    } catch (_) {}
+    const v = state._feedPlayer;
+    const vidOk =
+      v &&
+      item &&
+      Number(item.id) === Number(_castSession.mediaId) &&
+      Number.isFinite(v.duration);
+    if (vidOk) {
+      api.safePositionState(ms, v.duration, v.currentTime, 1);
+    }
+    ensureCastSilentAudio();
+  }
+
+  /**
+   * Lock-screen / headset skip: move feed like a user swipe so TV auto-casts.
+   */
+  function skipCastByDelta(delta) {
+    if (!isCastSessionActive()) return;
+    const now = Date.now();
+    if (now - _castMsSkipAt < 350) return;
+    _castMsSkipAt = now;
+    ensureCastSilentAudio();
+    const api = castMsApi();
+    const curId = Number(_castSession.mediaId);
+    let idx = state.items.findIndex((x) => Number(x.id) === curId);
+    if (idx < 0) idx = state.feedIndex | 0;
+    const nextIdx = api ? api.nextIndex(idx, delta, state.items.length) : null;
+    if (nextIdx == null) {
+      if (delta > 0) {
+        showToast("没有下一条");
+        scheduleEnsureFeedAhead();
+      } else {
+        showToast("已经是第一条");
+      }
+      return;
+    }
+    const media = state.items[nextIdx];
+    if (!media) return;
+    const slide = document.querySelector(
+      `#feedScroller .snap-slide[data-id="${media.id}"]`
+    );
+    if (state.view === "feed" && slide) {
+      try {
+        unlockFeedId();
+      } catch (_) {}
+      commitFeedId(media.id, nextIdx);
+      try {
+        slide.scrollIntoView({ block: "start", behavior: "auto" });
+      } catch (_) {}
+      activateFeedSlide(slide, { fromUser: true, force: true }).catch(() => {});
+      return;
+    }
+    autoCastSessionToMedia(media.id).catch(() => {});
   }
 
   /**
@@ -4711,6 +5165,7 @@
       state.feedSeenSet.delete(idNum);
       state.feedSeenIds = (state.feedSeenIds || []).filter((x) => Number(x) !== idNum);
     }
+    forgetRandomSeen(idNum);
     if (state.viewedIds) state.viewedIds.delete(idNum);
     if (String(state.activeFeedId) === String(idNum)) state.activeFeedId = null;
 
@@ -6475,6 +6930,7 @@
         include_restricted: state.includeRestricted ? "true" : "false",
         include_images: state.includeImages ? "true" : "false",
       });
+      applyExcludePushTags(params);
       const data = await api(`/api/media?${params}`);
       const items = data.items || [];
       const total = data.total ?? items.length;
@@ -6756,12 +7212,14 @@
       restoreCastSessionFromStorage();
       ensureCastBar();
       updateCastBar();
+      if (_castSession && _castSession.deviceId) fetchCastVolume();
       document.addEventListener("click", (e) => {
         const t = e.target;
         if (!t || !t.closest) return;
         if (t.closest("#btnCast")) {
           e.preventDefault();
           e.stopPropagation();
+          if (isCastSessionActive()) ensureCastSilentAudio();
           openCastModal();
           return;
         }
@@ -6999,6 +7457,38 @@
         }
       });
     }
+    const excludePushInput = document.getElementById("excludePushTagsInput");
+    const btnSaveExcludePush = document.getElementById("btnSaveExcludePushTags");
+    if (excludePushInput) {
+      excludePushInput.value = (state.excludePushTags || []).join(", ");
+    }
+    async function persistExcludePushTags() {
+      const tags = saveExcludePushTags(excludePushInput ? excludePushInput.value : "");
+      state.excludePushTags = tags;
+      if (excludePushInput) excludePushInput.value = tags.join(", ");
+      showToast(tags.length ? `已排除标签：${tags.join(", ")}` : "已清除排除标签");
+      try {
+        state._gridCache = null;
+        await loadFeed({ quiet: true, filterChanged: true });
+        await renderGridQuiet();
+        if (state.view === "search" && (state.searchQ || "").trim()) {
+          await runSearch(state.searchQ, { reset: true });
+        }
+      } catch (e) {
+        console.warn("exclude tags refresh", e);
+      }
+    }
+    if (btnSaveExcludePush) {
+      btnSaveExcludePush.addEventListener("click", () => persistExcludePushTags());
+    }
+    if (excludePushInput) {
+      excludePushInput.addEventListener("keydown", (e) => {
+        if (e.key === "Enter") {
+          e.preventDefault();
+          persistExcludePushTags();
+        }
+      });
+    }
     const editModeToggle = document.getElementById("editModeToggle");
     if (editModeToggle) {
       editModeToggle.checked = !!state.editMode;
@@ -7022,16 +7512,18 @@
         );
       });
     }
-    const albumIn = document.getElementById("albumUploadInput");
-    if (albumIn && albumIn.dataset.bound !== "1") {
-      albumIn.dataset.bound = "1";
-      albumIn.addEventListener("change", () => {
-        const list = albumIn.files;
+    function bindAlbumFileInput(el) {
+      if (!el || el.dataset.bound === "1") return;
+      el.dataset.bound = "1";
+      el.addEventListener("change", () => {
+        const list = el.files;
         runAlbumUpload(list).finally(() => {
-          albumIn.value = "";
+          el.value = "";
         });
       });
     }
+    bindAlbumFileInput(document.getElementById("albumUploadPhotos"));
+    bindAlbumFileInput(document.getElementById("albumUploadVideo"));
     const btnRescan = $("#btnRescan");
     if (btnRescan) {
       btnRescan.onclick = async () => {

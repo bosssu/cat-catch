@@ -62,7 +62,7 @@ def _stream_codecs(attrs: str) -> str:
     return (m.group(1) or m.group(2) or "").strip()
 
 
-def _pick_variant(text: str, base_url: str) -> str:
+def _pick_variant(text: str, base_url: str, allow_ios_incompatible: bool = False) -> str:
     from app.services.media_process import ios_codecs_declared_ok
 
     known: list[tuple[int, str, str]] = []
@@ -77,7 +77,7 @@ def _pick_variant(text: str, base_url: str) -> str:
         codecs = _stream_codecs(attrs)
         abs_url = urljoin(base_url, uri)
         ok, detail = ios_codecs_declared_ok(codecs)
-        if not ok:
+        if not ok and not allow_ios_incompatible:
             skipped.append(detail or codecs or "unknown")
             continue
         row = (bw, abs_url, codecs)
@@ -321,6 +321,7 @@ async def _download_hls_segments(
     progress_cb=None,
     start_sec: float | None = None,
     end_sec: float | None = None,
+    allow_ios_incompatible: bool = False,
 ) -> dict:
     """Segment fetch + ffmpeg concat path (one httpx client / trust_env mode)."""
     settings = get_settings()
@@ -329,7 +330,7 @@ async def _download_hls_segments(
     text, _ = await _fetch_text(client, url, headers)
     base = url
     if _is_master(text):
-        base = _pick_variant(text, url)
+        base = _pick_variant(text, url, allow_ios_incompatible=allow_ios_incompatible)
         text, _ = await _fetch_text(client, base, headers)
     segments, _ = _parse_media_playlist(text, base)
     clip_note = ""
@@ -648,6 +649,7 @@ async def download_hls(
     progress_cb=None,
     start_sec: float | None = None,
     end_sec: float | None = None,
+    allow_ios_incompatible: bool = False,
 ) -> dict:
     """
     Download HLS to out_file (mp4 via ffmpeg copy when possible).
@@ -677,6 +679,7 @@ async def download_hls(
                     progress_cb=progress_cb,
                     start_sec=start_sec,
                     end_sec=end_sec,
+                    allow_ios_incompatible=allow_ios_incompatible,
                 )
                 if mode.proxy or mode.name != "direct":
                     w = meta.get("warning") or ""

@@ -82,6 +82,10 @@ class ApiAccessLogMiddleware(BaseHTTPMiddleware):
         status = int(getattr(response, "status_code", 0) or 0)
         ms = (time.perf_counter() - t0) * 1000
         quiet_ok = (
+            status < 400
+            and path.startswith("/api/feed")
+            and method in ("GET", "POST")
+        ) or (
             method == "GET"
             and status < 400
             and any(path == p or path.startswith(p) for p in _API_QUIET_GET_PREFIXES)

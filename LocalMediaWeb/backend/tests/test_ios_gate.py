@@ -69,6 +69,28 @@ def test_attach_ios_fields_webm_and_av1():
     assert unknown["ios_ok"] is None
 
 
+def test_hls_av1_only_allow_ios_picks_variant():
+    text = """#EXTM3U
+#EXT-X-STREAM-INF:BANDWIDTH=1000000,CODECS="av01.0.04M.08,mp4a.40.2"
+a.m3u8
+#EXT-X-STREAM-INF:BANDWIDTH=3000000,CODECS="av01.0.08M.08,mp4a.40.2"
+b.m3u8
+"""
+    url = _pick_variant(
+        text, "https://cdn.example/master.m3u8", allow_ios_incompatible=True
+    )
+    assert url.endswith("b.m3u8")
+
+
+def test_job_payload_allow_ios():
+    from app.services.util import job_allows_ios_incompatible, job_payload_json
+
+    raw = job_payload_json({"Referer": "https://x"}, allow_ios_incompatible=True)
+    assert job_allows_ios_incompatible(raw)
+    raw2 = job_payload_json({"Referer": "https://x"})
+    assert not job_allows_ios_incompatible(raw2)
+
+
 def test_hls_av1_only_raises():
     text = """#EXTM3U
 #EXT-X-STREAM-INF:BANDWIDTH=1000000,CODECS="av01.0.04M.08,mp4a.40.2"

@@ -16,7 +16,7 @@
   <link rel="icon" type="image/png" sizes="192x192" href="/icons/icon-192.png" />
   <link rel="icon" type="image/png" sizes="512x512" href="/icons/icon-512.png" />
   <title>LocalMediaWeb</title>
-  <link rel="stylesheet" href="/assets/app.css?v=20260812castmode1" />
+  <link rel="stylesheet" href="/assets/app.css?v=20260824castms1" />
 </head>
 <body>
   <div id="app">
@@ -178,6 +178,13 @@
           <input type="checkbox" id="includeImagesToggle" />
         </label>
         <p class="muted tip">默认关闭：服务端不推送静态图。打开后 Feed / 搜索 / 网格才会出现 image 类型媒体。</p>
+        <label>排除推送指定标签
+          <input id="excludePushTagsInput" type="text" placeholder="多个标签用逗号分隔，例如: spoilers, work" autocomplete="off" />
+        </label>
+        <p class="muted tip">带这些标签的内容不会出现在 Feed / 搜索 / 网格。可填多个。保存后立即生效。</p>
+        <div class="row">
+          <button type="button" id="btnSaveExcludePushTags" class="btn">保存排除标签</button>
+        </div>
         <label class="switch-row" title="打开后 Feed 右下角「留言」变为「删除」，可直接删当前媒体">
           <span>编辑模式</span>
           <input type="checkbox" id="editModeToggle" />
@@ -192,11 +199,17 @@
         <p class="muted tip">投到电视时由服务端执行：单个播放播完即停；单个循环在检测到电视播完后自动重推同一条。不向电视推送列表，也无「自动下一首」。</p>
         <hr class="admin-sep" />
         <h3 class="admin-subhead">从相册上传</h3>
-        <p class="muted tip">iOS / Android 可选相册图片与视频；视频服务端默认 remux。多选后排队上传。</p>
-        <label class="btn file-label" style="display:inline-flex;align-items:center;gap:8px;cursor:pointer;">
-          选择照片或视频
-          <input type="file" id="albumUploadInput" accept="image/*,video/*" multiple hidden />
-        </label>
+        <p class="muted tip">iOS 不要把图片和视频写在同一个选择器里，否则选视频后勾号无反应。图片可多选；视频一次一条。上传后视频默认 remux。</p>
+        <div class="row" style="margin:8px 0;">
+          <label class="btn file-label">
+            选择照片
+            <input type="file" id="albumUploadPhotos" class="file-input-visually-hidden" accept="image/*" multiple />
+          </label>
+          <label class="btn file-label">
+            选择视频
+            <input type="file" id="albumUploadVideo" class="file-input-visually-hidden" accept="video/*" />
+          </label>
+        </div>
         <label>本批标签
           <input id="albumUploadTags" type="text" placeholder="逗号分隔，可选" autocomplete="off" />
         </label>
@@ -290,6 +303,7 @@
       </div>
     </div>
   </div>
-  <script src="/assets/app.js?v=20260812castmode1"></script>
+  <script src="/assets/cast-media-session.js?v=20260824castms1"></script>
+  <script src="/assets/app.js?v=20260824castms1"></script>
 </body>
 </html>

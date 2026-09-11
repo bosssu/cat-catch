@@ -292,6 +292,188 @@ def test_control_api(monkeypatch):
         assert bad.status_code == 400
 
 
+SAMPLE_DESC_RC = """<?xml version="1.0"?>
+<root xmlns="urn:schemas-upnp-org:device-1-0">
+  <device>
+    <deviceType>urn:schemas-upnp-org:device:MediaRenderer:1</deviceType>
+    <friendlyName>Volume Box</friendlyName>
+    <UDN>uuid:test-renderer-vol</UDN>
+    <serviceList>
+      <service>
+        <serviceType>urn:schemas-upnp-org:service:AVTransport:1</serviceType>
+        <serviceId>urn:upnp-org:serviceId:AVTransport</serviceId>
+        <controlURL>/upnp/control/AVTransport1</controlURL>
+      </service>
+      <service>
+        <serviceType>urn:schemas-upnp-org:service:RenderingControl:1</serviceType>
+        <serviceId>urn:upnp-org:serviceId:RenderingControl</serviceId>
+        <controlURL>/upnp/control/RenderingControl1</controlURL>
+      </service>
+    </serviceList>
+  </device>
+</root>
+"""
+
+
+def test_parse_rendering_control_url():
+    dev = _parse_device_description(
+        SAMPLE_DESC_RC, "http://192.168.1.50:49152/desc.xml"
+    )
+    assert dev is not None
+    assert dev.control_url == "http://192.168.1.50:49152/upnp/control/AVTransport1"
+    assert (
+        dev.rendering_control_url
+        == "http://192.168.1.50:49152/upnp/control/RenderingControl1"
+    )
+
+
+def test_parse_without_rendering_control():
+    dev = _parse_device_description(SAMPLE_DESC, "http://192.168.1.50:49152/desc.xml")
+    assert dev is not None
+    assert not (dev.rendering_control_url or "").strip()
+
+
+def test_clamp_volume():
+    from app.services import dlna as dlna_svc
+
+    assert dlna_svc.clamp_volume(-5) == 0
+    assert dlna_svc.clamp_volume(0) == 0
+    assert dlna_svc.clamp_volume(150) == 100
+    assert dlna_svc.clamp_volume(33.4) == 33
+    assert dlna_svc.clamp_volume("80") == 80
+
+
+def test_set_volume_soap(monkeypatch):
+    from app.services import dlna as dlna_svc
+
+    posts = []
+
+    def fake_soap(control_url, action, body_inner, timeout=8.0, service_type=None):
+        posts.append(
+            {
+                "url": control_url,
+                "action": action,
+                "body": body_inner,
+                "service": service_type,
+            }
+        )
+        return ""
+
+    monkeypatch.setattr(dlna_svc, "_soap_post", fake_soap)
+    dev = dlna_svc.DlnaDevice(
+        id="v",
+        name="Box",
+        udn="uuid:v",
+        location="http://1.2.3.4/d",
+        control_url="http://1.2.3.4/av",
+        rendering_control_url="http://1.2.3.4/rc",
+        host="1.2.3.4",
+    )
+    n = dlna_svc.set_volume(dev, 64)
+    assert n == 64
+    assert len(posts) == 1
+    assert posts[0]["url"] == "http://1.2.3.4/rc"
+    assert posts[0]["action"] == "SetVolume"
+    assert "Master" in posts[0]["body"]
+    assert "64" in posts[0]["body"]
+    assert posts[0]["service"] and "RenderingControl" in posts[0]["service"]
+
+
+def test_set_volume_requires_rc():
+    from app.services import dlna as dlna_svc
+
+    dev = dlna_svc.DlnaDevice(
+        id="v",
+        name="Box",
+        udn="uuid:v",
+        location="http://1.2.3.4/d",
+        control_url="http://1.2.3.4/av",
+        host="1.2.3.4",
+    )
+    try:
+        dlna_svc.set_volume(dev, 50)
+        assert False, "expected ValueError"
+    except ValueError:
+        pass
+
+
+def test_get_volume_soap(monkeypatch):
+    from app.services import dlna as dlna_svc
+
+    def fake_soap(control_url, action, body_inner, timeout=8.0, service_type=None):
+        assert action == "GetVolume"
+        return (
+            '<?xml version="1.0"?>'
+            '<s:Envelope xmlns:s="http://schemas.xmlsoap.org/soap/envelope/">'
+            "<s:Body>"
+            '<u:GetVolumeResponse xmlns:u="urn:schemas-upnp-org:service:RenderingControl:1">'
+            "<CurrentVolume>41</CurrentVolume>"
+            "</u:GetVolumeResponse>"
+            "</s:Body></s:Envelope>"
+        )
+
+    monkeypatch.setattr(dlna_svc, "_soap_post", fake_soap)
+    dev = dlna_svc.DlnaDevice(
+        id="v",
+        name="Box",
+        udn="uuid:v",
+        location="http://1.2.3.4/d",
+        control_url="http://1.2.3.4/av",
+        rendering_control_url="http://1.2.3.4/rc",
+        host="1.2.3.4",
+    )
+    assert dlna_svc.get_volume(dev) == 41
+
+
+def test_volume_api(monkeypatch):
+    clear_cache()
+    monkeypatch.setenv("LMW_access_token", "")
+    from app.core import config
+
+    monkeypatch.setattr(config, "_load_yaml", lambda: {})
+    config.get_settings.cache_clear()
+
+    from app.services import dlna as dlna_svc
+
+    fake = dlna_svc.DlnaDevice(
+        id="voldev",
+        name="Vol Box",
+        udn="uuid:vol",
+        location="http://7.7.7.7/d",
+        control_url="http://7.7.7.7/c",
+        rendering_control_url="http://7.7.7.7/rc",
+        host="7.7.7.7",
+    )
+    with dlna_svc._cache_lock:
+        dlna_svc._cache_devices = [fake]
+        dlna_svc._cache_scanned = True
+        dlna_svc._cache_at = 1.0
+
+    monkeypatch.setattr(dlna_svc, "set_volume", lambda d, v: 55)
+    monkeypatch.setattr(dlna_svc, "get_volume", lambda d: 41)
+
+    from fastapi.testclient import TestClient
+    from app.main import app
+
+    with TestClient(app) as client:
+        r = client.post(
+            "/api/dlna/control",
+            json={"device_id": "voldev", "action": "volume", "volume": 55},
+        )
+        assert r.status_code == 200, r.text
+        body = r.json()
+        assert body["ok"] is True
+        assert body["action"] == "volume"
+        assert body["volume"] == 55
+
+        g = client.post(
+            "/api/dlna/control",
+            json={"device_id": "voldev", "action": "get_volume"},
+        )
+        assert g.status_code == 200, g.text
+        assert g.json()["volume"] == 41
+
+
 def test_normalize_play_mode():
     from app.services import dlna as dlna_svc
 

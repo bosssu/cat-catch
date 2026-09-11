@@ -4,6 +4,7 @@ import logging
 import math
 import mimetypes
 import random
+import re
 import shutil
 import tempfile
 import time
@@ -11,7 +12,7 @@ from pathlib import Path
 
 from fastapi import APIRouter, Depends, File, Form, HTTPException, Query, Request, UploadFile
 from fastapi.responses import FileResponse
-from sqlalchemy import asc, desc, func, select
+from sqlalchemy import asc, desc, func, select, text
 
 logger = logging.getLogger("lmw.api")
 
@@ -25,6 +26,7 @@ from app.api.schemas import (
     DlnaControlRequest,
     DlnaPlayRequest,
     DlnaSeekRequest,
+    FeedRequest,
     IngestRequest,
     InteractEvent,
     JasnaJobOut,
@@ -324,6 +326,48 @@ def _exclude_restricted_sql():
     return ~MediaItem.tags_json.like(needle)
 
 
+def _parse_tag_list(raw) -> list[str]:
+    """Comma-separated tag names as stored (no synonym aliases)."""
+    if raw is None:
+        return []
+    if isinstance(raw, (list, tuple)):
+        parts = [str(x) for x in raw]
+    else:
+        parts = str(raw).replace("，", ",").replace("；", ",").replace(";", ",").split(",")
+    out: list[str] = []
+    seen: set[str] = set()
+    for p in parts:
+        t = str(p or "").strip().lower().lstrip("#")
+        t = re.sub(r"\s+", "-", t)
+        if not t or t in seen:
+            continue
+        seen.add(t)
+        out.append(t)
+    return out
+
+
+def _exclude_tags_clauses(names: list[str]):
+    """Hide rows whose tags_json JSON array contains an exact tag string.
+
+    Uses json_each (not LIKE): empty/NULL tags stay visible; substring / alias
+    tags are not treated as a match.
+    """
+    clauses = []
+    for i, t in enumerate(names or []):
+        if not t:
+            continue
+        key = f"excl_tag_{i}"
+        clauses.append(
+            text(
+                "NOT EXISTS ("
+                "SELECT 1 FROM json_each(COALESCE(media_items.tags_json, '[]')) "
+                f"WHERE CAST(json_each.value AS TEXT) = :{key}"
+                ")"
+            ).bindparams(**{key: t})
+        )
+    return clauses
+
+
 def _exclude_static_images_sql():
     """SQL filter: hide static images (media_type=image). GIFs stay."""
     return MediaItem.media_type != "image"
@@ -366,6 +410,7 @@ def list_media(
     include_restricted: bool = True,
     # True: include static images; False: hide media_type=image. Default True for manage UIs.
     include_images: bool = True,
+    exclude_tags: str | None = None,
     offset: int = Query(default=0, ge=0),
     limit: int = Query(default=48, ge=1, le=100),
     db=Depends(get_db),
@@ -407,6 +452,8 @@ def list_media(
         filters.append(_exclude_restricted_sql())
     if not include_images:
         filters.append(_exclude_static_images_sql())
+    for c in _exclude_tags_clauses(_parse_tag_list(exclude_tags)):
+        filters.append(c)
 
     count_stmt = select(func.count()).select_from(MediaItem)
     list_stmt = select(MediaItem)
@@ -436,6 +483,36 @@ def _parse_id_set(raw: str | None) -> set[int]:
     return out
 
 
+def _eligible_media_ids(db, stmt) -> list[int]:
+    id_stmt = stmt.with_only_columns(MediaItem.id)
+    return [int(i) for i in db.scalars(id_stmt).all()]
+
+
+def _load_media_in_order(db, ids: list[int]) -> list:
+    if not ids:
+        return []
+    rows = list(db.scalars(select(MediaItem).where(MediaItem.id.in_(ids))).all())
+    by_id = {int(m.id): m for m in rows}
+    return [by_id[i] for i in ids if i in by_id]
+
+
+def _random_feed_rows(db, stmt, exclude: set[int], limit: int, settings):
+    """Without-replacement sample from remaining ids. Empty remaining → new cycle."""
+    pool_mult = max(1, int(getattr(settings, "feed_random_pool_mult", 3) or 3))
+    sample_n = min(800, max(limit * pool_mult, limit + 10))
+    all_ids = _eligible_media_ids(db, stmt)
+    remain = [i for i in all_ids if i not in exclude]
+    cycle_reset = False
+    if not remain and all_ids:
+        cycle_reset = True
+        remain = list(all_ids)
+    random.shuffle(remain)
+    pick = remain[:sample_n]
+    rows = _load_media_in_order(db, pick)
+    rows = diversify_sequence(rows, limit=min(limit, len(rows)))
+    return rows[:limit], cycle_reset
+
+
 @router.get("/feed", dependencies=[Depends(require_token)])
 def feed(
     mode: str = "recommend",
@@ -448,6 +525,7 @@ def feed(
     include_restricted: bool = False,
     # Default False: do not push static images unless client opts in
     include_images: bool = False,
+    exclude_tags: str | None = None,
     db=Depends(get_db),
 ):
     """
@@ -464,6 +542,7 @@ def feed(
     tag: when mode=similar, only items carrying this tag (recommend-ranked within).
     include_restricted: when False (default), hide items tagged 限制级.
     include_images: when False (default), hide static images (media_type=image).
+    exclude_tags: comma-separated tags; items carrying any of them are hidden.
     """
     exclude = _parse_id_set(exclude_ids)
     # over-fetch then filter so exclude does not shrink the page too much
@@ -476,6 +555,8 @@ def feed(
         stmt = stmt.where(_exclude_restricted_sql())
     if not include_images:
         stmt = stmt.where(_exclude_static_images_sql())
+    for c in _exclude_tags_clauses(_parse_tag_list(exclude_tags)):
+        stmt = stmt.where(c)
     if mode == "liked":
         stmt = stmt.where(MediaItem.liked.is_(True))
         rows = list(
@@ -491,27 +572,14 @@ def feed(
             ).all()
         )
     elif mode == "random":
-        # True full-library random (not "latest N then shuffle").
-        pool_mult = max(1, int(getattr(settings, "feed_random_pool_mult", 3) or 3))
-        sample_n = min(800, max(limit * pool_mult, limit + len(exclude) + 10))
-        q = stmt
-        if exclude:
-            q = q.where(~MediaItem.id.in_(list(exclude)))
-        # SQLite: RANDOM(); other dialects: func.random()
-        rows = list(
-            db.scalars(q.order_by(func.random()).limit(sample_n)).all()
-        )
-        if not rows and exclude:
-            # fallback if exclude wiped the pool (tiny library)
-            rows = list(db.scalars(stmt.order_by(func.random()).limit(sample_n)).all())
-        random.shuffle(rows)
-        rows = diversify_sequence(rows, limit=min(limit, len(rows)))
-        # already excluded in SQL when possible; skip post-filter for this branch
+        # Without replacement from remaining library; empty remaining starts a new cycle.
+        rows, cycle_reset = _random_feed_rows(db, stmt, exclude, limit, settings)
         return {
             "mode": mode,
             "similar_to": similar_to,
             "tag": focus_tag or None,
-            "items": [_media_out(m) for m in rows[:limit]],
+            "random_cycle_reset": cycle_reset,
+            "items": [_media_out(m) for m in rows],
         }
     elif mode == "similar" or similar_to:
         # Same mixed pool as recommend (recent + random), not "latest N only"
@@ -623,8 +691,28 @@ def feed(
         "mode": mode,
         "similar_to": similar_to,
         "tag": focus_tag or None,
+        "random_cycle_reset": False,
         "items": [_media_out(m) for m in rows],
     }
+
+
+@router.post("/feed", dependencies=[Depends(require_token)])
+def feed_post(body: FeedRequest, db=Depends(get_db)):
+    """Same as GET /feed; exclude_ids as JSON list (random mode persistence)."""
+    raw_ex = ",".join(str(int(x)) for x in (body.exclude_ids or []) if x is not None)
+    return feed(
+        mode=body.mode or "recommend",
+        limit=body.limit,
+        similar_to=body.similar_to,
+        tag=body.tag,
+        exclude_ids=raw_ex or None,
+        include_seed=body.include_seed,
+        include_restricted=body.include_restricted,
+        include_images=body.include_images,
+        exclude_tags=",".join(_parse_tag_list(body.exclude_tags)) or None,
+        db=db,
+    )
+
 
 @router.get("/media/{media_id}", dependencies=[Depends(require_token)])
 def get_media(media_id: int, db=Depends(get_db)):
@@ -912,6 +1000,8 @@ async def ingest(body: IngestRequest):
         d = it.model_dump()
         if body.use_jasna and not d.get("use_jasna"):
             d["use_jasna"] = True
+        if body.allow_ios_incompatible and not d.get("allow_ios_incompatible"):
+            d["allow_ios_incompatible"] = True
         item_restricted = bool(d.pop("restricted", False) or body.restricted)
         raw = d.get("tags") or body.tags or []
         d["tags"] = apply_restricted_flag(raw, item_restricted)
@@ -2288,8 +2378,8 @@ def dlna_control(body: DlnaControlRequest):
     from app.services import dlna as dlna_svc
 
     action = (body.action or "").strip().lower()
-    if action not in ("pause", "play", "stop"):
-        raise HTTPException(400, "action must be pause, play, or stop")
+    if action not in ("pause", "play", "stop", "volume", "get_volume"):
+        raise HTTPException(400, "action must be pause, play, stop, volume, or get_volume")
 
     device = dlna_svc.resolve_device(body.device_id)
     if not device:
@@ -2302,10 +2392,30 @@ def dlna_control(body: DlnaControlRequest):
         elif action == "play":
             dlna_svc.play_device(device)
             dlna_svc.set_cast_session_paused(device.id, False)
+        elif action == "volume":
+            vol = dlna_svc.set_volume(device, body.volume)
+            return {
+                "ok": True,
+                "device_id": device.id,
+                "action": action,
+                "volume": vol,
+                "device": device.to_dict(),
+            }
+        elif action == "get_volume":
+            vol = dlna_svc.get_volume(device)
+            return {
+                "ok": True,
+                "device_id": device.id,
+                "action": action,
+                "volume": vol,
+                "device": device.to_dict(),
+            }
         else:
             # Clear loop session before Stop so watcher does not re-cast
             dlna_svc.clear_cast_session(device.id)
             dlna_svc.stop_device(device)
+    except ValueError as e:
+        raise HTTPException(400, str(e)) from e
     except Exception as e:
         logger.exception("dlna control failed device=%s action=%s", body.device_id, action)
         if action == "stop":
