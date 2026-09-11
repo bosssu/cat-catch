@@ -183,6 +183,8 @@ G.OptionLists = {
     lmwAutoRemoveAfterProcess: true,
     // 入库时默认打上「限制级」标签（各入库 UI 可单独勾选，会写回此偏好）
     lmwRestricted: false,
+    /** 站点标题规则：[{ host, selector, regex }]，host 匹配当前页；selector 为 CSS */
+    lmwTitleRules: [],
 
     popup: false,
     popupMode: 0, // 0:preview.html 1:popup.html 2:window preview.html 3: window popup.html
@@ -452,6 +454,9 @@ chrome.storage.onChanged.addListener(function (changes, namespace) {
             continue;
         }
         G[key] = newValue;
+        if (key === "lmwTitleRules" && typeof TitleRules !== "undefined") {
+            TitleRules.invalidate();
+        }
     }
 });
 

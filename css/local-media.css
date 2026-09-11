@@ -581,6 +581,7 @@ body.lm-multi-merge-mode .lm-card {
 .lm-modal-card.lm-range-card {
   width: min(460px, 100%);
 }
+
 .lm-modal-head {
   font-size: 15px;
   font-weight: 600;

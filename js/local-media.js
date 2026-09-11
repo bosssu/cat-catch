@@ -4068,6 +4068,19 @@
         }
     }
 
+    async function resolvePageTitle() {
+        if (typeof TitleRules === "undefined" || !tabId) {
+            return { title: "", source: "", docTitle: "", pageUrl: await getPageUrl() };
+        }
+        return TitleRules.resolveForTab(tabId);
+    }
+
+    async function enrichItemTitles() {
+        const resolved = await resolvePageTitle();
+        if (typeof TitleRules !== "undefined") TitleRules.applyToItems(items, resolved);
+        return resolved;
+    }
+
     /**
      * 同一媒体的去重键：跨 CDN / 不同 query / 缩略尺寸变体视为同一项。
      * （PAGE_IMAGE_FN 内有同名逻辑，需两边保持一致）
@@ -5085,10 +5098,24 @@
                 source: x.source || "dom",
             }));
 
+        let pageTitle = "";
+        try {
+            pageTitle =
+                document.querySelector('meta[property="og:title"]')?.getAttribute("content") ||
+                document.querySelector('meta[name="twitter:title"]')?.getAttribute("content") ||
+                "";
+            pageTitle = String(pageTitle || "").replace(/\s+/g, " ").trim();
+            if (!pageTitle) {
+                const h1 = document.querySelector("h1");
+                pageTitle = String((h1 && h1.textContent) || "").replace(/\s+/g, " ").trim();
+            }
+        } catch (_) {}
+        if (!pageTitle) pageTitle = document.title || "";
+
         return {
             images,
             probePages: [...probePages].slice(0, 20),
-            pageTitle: document.title || "",
+            pageTitle,
             pageUrl: location.href,
             isTop: window === window.top,
             mediaBases: mediaBases.slice(0, 8),
@@ -5295,6 +5322,7 @@
             });
             const pageUrl = (await getPageUrl()) || pageUrlHint;
             await enrichHeaders(items, pageUrl);
+            await enrichItemTitles();
             render();
             const srcStat = {};
             for (const it of items) {
@@ -5349,6 +5377,7 @@
             clearAvPairs();
             avDetectAttempted = false;
             await enrichHeaders(items, pageUrl);
+            await enrichItemTitles();
             render();
             const audioN = items.filter((x) => mediaTypeOf(x) === "audio").length;
             setStatus(
@@ -5821,7 +5850,7 @@
         const pageUrl = await getPageUrl();
         const first = chosen[0];
         const dlg = await LMW.openIngestDialog({
-            title: first.title || first.name || document.title || "media",
+            title: first.title || first.name || (await resolvePageTitle()).title || document.title || "media",
             url: first.url || "",
             media_type: LMW.normalizeMediaType(first),
             source_page: pageUrl,

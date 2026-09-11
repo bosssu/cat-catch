@@ -1,4 +1,4 @@
-importScripts("/js/function.js", "/js/templates.js", "/js/init.js");
+importScripts("/js/function.js", "/js/templates.js", "/js/init.js", "/js/title-rules.js");
 
 // Service Worker 5分钟后会强制终止扩展
 // https://bugs.chromium.org/p/chromium/issues/detail?id=1271154
@@ -241,10 +241,21 @@ function findMedia(data, isRegex = false, filter = false, timer = false) {
         if (info.initiator == undefined || info.initiator == "null") {
             info.initiator = info.requestHeaders?.referer ?? webInfo?.url;
         }
-        // 装载页面信息
+        // 装载页面信息（标题：站点规则 / og / JSON-LD，否则页签标题）
         info.title = webInfo?.title ?? "NULL";
         info.favIconUrl = webInfo?.favIconUrl;
         info.webUrl = webInfo?.url;
+        try {
+            if (typeof TitleRules !== "undefined") {
+                const extra = [];
+                if (info.initiator) extra.push(info.initiator);
+                const resolved = await TitleRules.resolveForTab(data.tabId, webInfo, extra);
+                if (resolved && resolved.title && (resolved.source !== "document" || TitleRules.isWeak(info.title))) {
+                    info.title = resolved.title;
+                    info._titleSource = resolved.source || "";
+                }
+            }
+        } catch (_) {}
         // 屏蔽资源
         if (!isRegex && G.blackList.has(data.requestId)) {
             G.blackList.delete(data.requestId);
@@ -1105,6 +1116,28 @@ chrome.runtime.onMessage.addListener(function (Message, sender, sendResponse) {
         sendResponse(cacheData[Message.tabId]);
         return true;
     }
+    if (Message.Message == "applyTitleRules") {
+        const tabId = Message.tabId;
+        if (typeof TitleRules === "undefined" || !tabId) {
+            sendResponse({ ok: false });
+            return true;
+        }
+        TitleRules.invalidate(tabId);
+        TitleRules.resolveForTab(tabId).then((resolved) => {
+            const list = cacheData[tabId] || [];
+            const n = TitleRules.applyToItems(list, resolved);
+            sendResponse({
+                ok: true,
+                n,
+                title: (resolved && resolved.title) || "",
+                source: (resolved && resolved.source) || "",
+                docTitle: (resolved && resolved.docTitle) || "",
+            });
+        }).catch((e) => {
+            sendResponse({ ok: false, error: String((e && e.message) || e) });
+        });
+        return true;
+    }
     /**
      * 获取各按钮状态
      * 模拟手机 自动下载 启用 以及各种脚本状态
@@ -1342,6 +1375,7 @@ chrome.windows.onFocusChanged.addListener(function (activeInfo) {
  * 检查 是否在屏蔽列表中
  */
 chrome.tabs.onUpdated.addListener(function (tabId, changeInfo, tab) {
+    if (changeInfo.url && typeof TitleRules !== "undefined") TitleRules.invalidate(tabId);
     if (isSpecialPage(tab.url) || tabId <= 0 || !G.initSyncComplete) { return; }
     // console.log('onUpdated', tabId, changeInfo, tab);
     if (changeInfo.status && changeInfo.status == "loading" && G.autoClearMode == 2) {

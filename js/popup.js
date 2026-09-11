@@ -882,6 +882,128 @@ async function lmwIngestChecked() {
 $("#lmwSelect").click(function () {
     lmwIngestChecked();
 });
+
+function renderTitleRuleList() {
+    const $ul = $("#titleRuleList");
+    $ul.empty();
+    if (typeof TitleRules === "undefined") {
+        $ul.append($("<li/>").text("TitleRules 未加载"));
+        return;
+    }
+    const rules = TitleRules.getRules();
+    if (!rules.length) {
+        $ul.append($("<li/>").css("opacity", ".7").text("暂无规则"));
+        return;
+    }
+    rules.forEach((r, idx) => {
+        const $li = $("<li/>");
+        $li.append($("<span class='hp'/>").text(r.host + (r.path || "")));
+        $li.append($("<span class='sel'/>").text(r.selector));
+        $("<button type='button' class='button2'/>")
+            .text("删除")
+            .on("click", () => {
+                TitleRules.persist(TitleRules.getRules().filter((_, i) => i !== idx));
+                renderTitleRuleList();
+            })
+            .appendTo($li);
+        $ul.append($li);
+    });
+}
+
+async function fillTitleRuleFromTab() {
+    if (typeof TitleRules === "undefined") return;
+    let url = "";
+    try {
+        const tab = await chrome.tabs.get(G.tabId);
+        url = (tab && tab.url) || "";
+    } catch (_) {}
+    const host = TitleRules.hostFromUrl(url);
+    const path = TitleRules.defaultPathPrefix(url);
+    if (host) $("#titleRuleHost").val(host);
+    $("#titleRulePath").val(path);
+    const rule = TitleRules.matchRule(url);
+    if (rule) {
+        $("#titleRuleSel").val(rule.selector);
+        $("#titleRuleRe").val(rule.regex || "");
+        if (rule.path) $("#titleRulePath").val(rule.path);
+    }
+    $("#titleRuleTryOut").text(
+        host ? "当前 " + host + (path || "/") + (url ? "\n" + url : "") : "无法读取当前标签页"
+    );
+}
+
+function openTitleRuleModal() {
+    $("#titleRuleModal").removeClass("hide").attr("aria-hidden", "false");
+    renderTitleRuleList();
+    fillTitleRuleFromTab();
+}
+function closeTitleRuleModal() {
+    $("#titleRuleModal").addClass("hide").attr("aria-hidden", "true");
+}
+$("#titleRules").click(() => openTitleRuleModal());
+$("#titleRuleClose").click(() => closeTitleRuleModal());
+$("#titleRuleFromTab").click(() => fillTitleRuleFromTab());
+$("#titleRuleTry").click(async () => {
+    if (typeof TitleRules === "undefined") return;
+    const selector = String($("#titleRuleSel").val() || "").trim();
+    const regex = String($("#titleRuleRe").val() || "").trim();
+    try {
+        const r = await TitleRules.extractOnTab(G.tabId, { selector, regex });
+        $("#titleRuleTryOut").text(
+            r && r.title
+                ? `抓到（${r.source}）：${r.title}`
+                : "未抓到标题" + (selector ? "（检查 selector）" : "")
+        );
+    } catch (e) {
+        $("#titleRuleTryOut").text("试抓失败: " + ((e && e.message) || e));
+    }
+});
+$("#titleRuleSave").click(async () => {
+    if (typeof TitleRules === "undefined") return;
+    let host = TitleRules.hostFromUrl($("#titleRuleHost").val());
+    const path = String($("#titleRulePath").val() || "").trim();
+    const selector = String($("#titleRuleSel").val() || "").trim();
+    const regex = String($("#titleRuleRe").val() || "").trim();
+    if (!host) {
+        try {
+            const tab = await chrome.tabs.get(G.tabId);
+            host = TitleRules.hostFromUrl(tab && tab.url);
+        } catch (_) {}
+    }
+    if (!host) {
+        $("#titleRuleTryOut").text("请填写站点或点「用当前页」");
+        return;
+    }
+    if (!selector) {
+        $("#titleRuleTryOut").text("请粘贴 CSS selector");
+        return;
+    }
+    const pathNorm = (TitleRules.cleanRule({ host, path, selector }) || {}).path || "";
+    const next = TitleRules.getRules().filter((r) => !(r.host === host && (r.path || "") === pathNorm));
+    next.push({ host, path, selector, regex });
+    TitleRules.persist(next);
+    renderTitleRuleList();
+    chrome.runtime.sendMessage({ Message: "applyTitleRules", tabId: G.tabId }, (res) => {
+        const t = (res && res.title) || "";
+        $("#titleRuleTryOut").text(
+            "已保存 " + host + (path || "") + (t ? " · 已应用到列表: " + t : "")
+        );
+        if (t) Tips("标题规则: " + t.slice(0, 60), 2500);
+        const map = allData.get(true);
+        if (map && t && typeof TitleRules !== "undefined") {
+            const list = [];
+            map.forEach((data) => list.push(data));
+            TitleRules.applyToItems(list, {
+                title: t,
+                source: (res && res.source) || "selector",
+                docTitle: (res && res.docTitle) || "",
+            });
+        }
+    });
+});
+$(document).on("keydown", (e) => {
+    if (e.key === "Escape" && !$("#titleRuleModal").hasClass("hide")) closeTitleRuleModal();
+});
 // 仅当明确关闭时隐藏；G 可能尚未从 storage 读完，延迟再判一次
 function applyLmwButtonVisibility() {
     const show = G.lmwEnable !== false;

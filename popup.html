@@ -132,16 +132,47 @@
     <button id="openLocalMedia" class="button2" title="打开媒体库浏览页">媒体库</button>
     <button id="openLmwManage" class="button2" title="服务器媒体库：网格管理、本地上传、批量标签/删除">管理</button>
     <button id="lmwSelect" class="button2" title="将已勾选资源直接入库到 LocalMediaWeb（无需打开库页）">入库</button>
+    <button id="titleRules" class="button2" title="为当前页设置标题 CSS selector（host+路径）；未配置时用 og:title / JSON-LD / 页标题">标题规则</button>
     <button id="more" class="button2" panel="features" data-i18n="moreFeatures" title="Show more features"></button>
     <button id="enable" class="button2" data-i18n="pause" title="Pause/Resume capturing"></button>
     <button id="Options" go="options.html" class="button2" data-i18n="settings" title="Open settings"></button>
     <button id="popup" class="button2" data-i18n="popup" title="Open in popup window"></button>
     <button id="currentPage" class="hide" data-i18n="currentPage" title="Switch to current page"></button>
   </div>
+  <div id="titleRuleModal" class="title-rule-modal hide" aria-hidden="true">
+    <div class="title-rule-card">
+      <div class="title-rule-head">站点标题规则</div>
+      <div class="title-rule-hint">
+        匹配 host + 路径前缀（默认第一段，如 /watch）。F12 复制 selector 后粘贴。未命中走 og:title / JSON-LD / h1。
+      </div>
+      <label>站点
+        <input type="text" id="titleRuleHost" spellcheck="false" placeholder="example.com 或完整网址" />
+      </label>
+      <label>路径前缀（可空=整站）
+        <input type="text" id="titleRulePath" spellcheck="false" placeholder="/watch" />
+      </label>
+      <label>CSS selector
+        <input type="text" id="titleRuleSel" spellcheck="false" placeholder="h1.video-title" />
+      </label>
+      <label>可选正则
+        <input type="text" id="titleRuleRe" spellcheck="false" placeholder="(.+) - SiteName" />
+      </label>
+      <p id="titleRuleTryOut" class="title-rule-out"></p>
+      <div class="title-rule-actions">
+        <button type="button" id="titleRuleFromTab" class="button2">用当前页</button>
+        <button type="button" id="titleRuleTry" class="button2">试一下</button>
+        <button type="button" id="titleRuleSave" class="button2">保存</button>
+        <button type="button" id="titleRuleClose" class="button2">关闭</button>
+      </div>
+      <div class="title-rule-list-head">已保存</div>
+      <ul id="titleRuleList" class="title-rule-list"></ul>
+    </div>
+  </div>
   <!-- <script src="js/firefox.js"></script> -->
   <script src="lib/base64.js"></script>
   <script src="lib/mqtt.min.js"></script>
   <script src="js/popup-utils.js"></script>
+  <script src="js/title-rules.js"></script>
   <script src="js/local-media-web.js"></script>
   <script src="js/popup.js"></script>
   <script src="js/media-control.js"></script>
