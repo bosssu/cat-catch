@@ -1122,8 +1122,7 @@ chrome.runtime.onMessage.addListener(function (Message, sender, sendResponse) {
             sendResponse({ ok: false });
             return true;
         }
-        TitleRules.invalidate(tabId);
-        TitleRules.resolveForTab(tabId).then((resolved) => {
+        const finish = (resolved) => {
             const list = cacheData[tabId] || [];
             const n = TitleRules.applyToItems(list, resolved);
             sendResponse({
@@ -1133,7 +1132,17 @@ chrome.runtime.onMessage.addListener(function (Message, sender, sendResponse) {
                 source: (resolved && resolved.source) || "",
                 docTitle: (resolved && resolved.docTitle) || "",
             });
-        }).catch((e) => {
+        };
+        if (Message.title) {
+            finish({
+                title: Message.title,
+                source: Message.source || "selector",
+                docTitle: Message.docTitle || "",
+            });
+            return true;
+        }
+        TitleRules.invalidate(tabId);
+        TitleRules.resolveForTab(tabId).then(finish).catch((e) => {
             sendResponse({ ok: false, error: String((e && e.message) || e) });
         });
         return true;

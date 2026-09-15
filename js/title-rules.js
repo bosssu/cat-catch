@@ -199,12 +199,137 @@ var TitleRules = (function () {
             } catch (_) {}
             return "";
         };
+        const collectSel = (root, sel, out) => {
+            try {
+                const nodes = root.querySelectorAll(sel);
+                for (let i = 0; i < nodes.length; i++) out.push(nodes[i]);
+            } catch (_) {}
+        };
+        const pageItemId = (() => {
+            try {
+                const u = new URL(location.href);
+                return (
+                    u.searchParams.get("modal_id") ||
+                    u.searchParams.get("aweme_id") ||
+                    u.searchParams.get("item_id") ||
+                    ""
+                );
+            } catch (_) {
+                return "";
+            }
+        })();
+        const ancestorHasId = (el, id) => {
+            if (!el || !id) return false;
+            let n = el;
+            let depth = 0;
+            while (n && n !== document && depth < 28) {
+                if (n.getAttribute) {
+                    const attrs = n.attributes;
+                    if (attrs) {
+                        for (let i = 0; i < attrs.length; i++) {
+                            if (String(attrs[i].value || "").indexOf(id) >= 0) return true;
+                        }
+                    }
+                    if (String(n.id || "").indexOf(id) >= 0) return true;
+                }
+                n = n.parentElement || (n.getRootNode && n.getRootNode().host) || null;
+                depth++;
+            }
+            return false;
+        };
+        const isShown = (el) => {
+            const r = el.getBoundingClientRect && el.getBoundingClientRect();
+            if (!r || r.width < 2 || r.height < 2) return false;
+            const vw = window.innerWidth || 1;
+            const vh = window.innerHeight || 1;
+            if (r.bottom < 0 || r.right < 0 || r.top > vh || r.left > vw) return false;
+            const st = window.getComputedStyle ? window.getComputedStyle(el) : null;
+            if (st && (st.display === "none" || st.visibility === "hidden" || st.opacity === "0")) return false;
+            return true;
+        };
+        const stackZ = (el) => {
+            let z = 0;
+            let n = el;
+            let depth = 0;
+            while (n && n !== document && depth < 20) {
+                const st = window.getComputedStyle ? window.getComputedStyle(n) : null;
+                const zi = st ? parseInt(st.zIndex, 10) : NaN;
+                if (!isNaN(zi)) z = Math.max(z, zi);
+                n = n.parentElement;
+                depth++;
+            }
+            return z;
+        };
+        const queryDeep = (sel) => {
+            sel = String(sel || "").replace(/#([A-Za-z_][\w-]*)/g, '[id="$1"]');
+            const found = [];
+            collectSel(document, sel, found);
+            const all = document.querySelectorAll("*");
+            for (let i = 0; i < all.length; i++) {
+                if (all[i].shadowRoot) collectSel(all[i].shadowRoot, sel, found);
+            }
+            if (!found.length) return null;
+            if (pageItemId) {
+                for (let i = found.length - 1; i >= 0; i--) {
+                    if (ancestorHasId(found[i], pageItemId) && textOf(found[i])) return found[i];
+                }
+            }
+            let best = null;
+            let bestZ = -1;
+            let bestI = -1;
+            for (let i = 0; i < found.length; i++) {
+                if (!isShown(found[i])) continue;
+                const z = stackZ(found[i]);
+                if (z > bestZ || (z === bestZ && i >= bestI)) {
+                    bestZ = z;
+                    bestI = i;
+                    best = found[i];
+                }
+            }
+            if (best) return best;
+            return found[found.length - 1];
+        };
+        const selectorCandidates = (sel) => {
+            const s = String(sel || "").trim();
+            if (!s) return [];
+            const out = [];
+            const push = (x) => {
+                const t = String(x || "")
+                    .replace(/\s+/g, " ")
+                    .replace(/\s*>\s*/g, " > ")
+                    .replace(/>\s*>/g, ">")
+                    .trim();
+                if (t && out.indexOf(t) < 0) out.push(t);
+                const alt = t.replace(/#([A-Za-z_][\w-]*)/g, '[id="$1"]');
+                if (alt && alt !== t && out.indexOf(alt) < 0) out.push(alt);
+            };
+            push(s);
+            push(s.replace(/:nth-(?:child|of-type)\(\d+\)/gi, ""));
+            push(
+                s.replace(/:nth-(?:child|of-type)\(\d+\)/gi, "").replace(/\.[A-Z][A-Za-z0-9_-]{4,}\b/g, "")
+            );
+            const parts = s.split(/\s*>\s*/);
+            if (parts.length > 1) {
+                for (let n = parts.length - 1; n >= 1; n--) {
+                    push(parts.slice(0, n).join(" > "));
+                    const head = parts[n - 1] || "";
+                    if (/#/.test(head) || /\.title\b/i.test(head) || /video-info|data-e2e/i.test(head)) break;
+                }
+            }
+            return out;
+        };
         let source = "";
         let title = "";
         if (selector) {
             try {
-                title = textOf(document.querySelector(selector));
-                if (title) source = "selector";
+                const cands = selectorCandidates(selector);
+                for (let i = 0; i < cands.length; i++) {
+                    title = textOf(queryDeep(cands[i]));
+                    if (title) {
+                        source = "selector";
+                        break;
+                    }
+                }
             } catch (_) {
                 source = "selector-error";
             }
@@ -255,8 +380,9 @@ var TitleRules = (function () {
     function pickExtract(frames, pageUrl) {
         const list = (frames || []).filter(Boolean);
         const top = list.find((f) => f.isTop) || list[0];
-        const selHit = list.find((f) => f.source === "selector" && f.title);
-        const best = selHit || top || list[0];
+        const selHits = list.filter((f) => f.source === "selector" && f.title);
+        const topSel = selHits.find((f) => f.isTop);
+        const best = topSel || selHits[selHits.length - 1] || top || list[0];
         if (!best) return { title: "", source: "", docTitle: "", pageUrl: pageUrl || "" };
         return {
             title: best.title || "",
@@ -279,17 +405,38 @@ var TitleRules = (function () {
         );
     }
 
+    async function hydrateRules() {
+        if (getRules().length) return;
+        try {
+            const st = await chrome.storage.sync.get("lmwTitleRules");
+            if (st && Array.isArray(st.lmwTitleRules) && typeof G !== "undefined") {
+                G.lmwTitleRules = st.lmwTitleRules;
+            }
+        } catch (_) {}
+    }
+
     async function resolveForTab(tabId, webInfo, extraUrls) {
+        await hydrateRules();
         let pageUrl = (webInfo && webInfo.url) || "";
-        if (!pageUrl && tabId) {
+        if (tabId) {
             try {
                 const tab = await chrome.tabs.get(tabId);
-                pageUrl = (tab && tab.url) || "";
-                webInfo = webInfo || tab;
+                if (tab && tab.url) {
+                    if (!pageUrl || /modal_id=|aweme_id=/.test(tab.url)) pageUrl = tab.url;
+                    webInfo = webInfo || tab;
+                }
             } catch (_) {}
         }
         const cached = cache.get(tabId);
-        if (cached && cached.pageUrl === pageUrl && cached.title) return cached;
+        const rulePeek = matchRule(pageUrl, extraUrls);
+        if (
+            cached &&
+            cached.pageUrl === pageUrl &&
+            cached.title &&
+            (!rulePeek || cached.source === "selector")
+        ) {
+            return cached;
+        }
         const extra = [];
         if (webInfo && webInfo.pendingUrl) extra.push(webInfo.pendingUrl);
         if (extraUrls && extraUrls.length) {
@@ -309,7 +456,8 @@ var TitleRules = (function () {
         }
         if (rule) picked.ruleHost = rule.host;
         if (rule) picked.rulePath = rule.path;
-        cache.set(tabId, picked);
+        if (!rule || picked.source === "selector") cache.set(tabId, picked);
+        else cache.delete(tabId);
         return picked;
     }
 
@@ -320,15 +468,11 @@ var TitleRules = (function () {
 
     function applyToItems(list, resolved) {
         if (!list || !list.length || !resolved || !resolved.title) return 0;
-        const incoming = sourceRank(resolved.source);
         let n = 0;
         for (let i = 0; i < list.length; i++) {
             const it = list[i];
-            const cur = String(it.title || it.name || "");
-            const weak = isWeak(cur, resolved.docTitle);
-            const have = sourceRank(it._titleSource);
-            if (!weak && incoming <= have) continue;
-            if (!weak && incoming <= 10) continue;
+            const cur = String(it.title || it._title || it.name || "");
+            if (!isWeak(cur, resolved.docTitle)) continue;
             it.title = resolved.title;
             if (it._title !== undefined) it._title = resolved.title;
             it._titleSource = resolved.source || "page";
@@ -350,6 +494,7 @@ var TitleRules = (function () {
         PAGE_TITLE_FN: PAGE_TITLE_FN,
         extractOnTab: extractOnTab,
         resolveForTab: resolveForTab,
+        hydrateRules: hydrateRules,
         invalidate: invalidate,
         applyToItems: applyToItems,
     };

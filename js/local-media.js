@@ -36,6 +36,12 @@
     let multiMergeOrder = [];
     let multiMergeBusy = false;
 
+    /** 手动视音频：先点画面轨再点音轨（无视后缀） */
+    let manualAvMode = false;
+    let manualAvVideoKey = "";
+    let manualAvAudioKey = "";
+    let manualAvBusy = false;
+
     function setStatus(msg, opts) {
         const $el = $("#status");
         $el.text(msg || "");
@@ -97,14 +103,96 @@
         return out;
     }
 
-    function isLargePreviewOn() {
-        const el = document.getElementById("lmLargePreview");
-        return !!(el && el.checked);
+    function normalizePreviewMode(raw) {
+        const v = String(raw || "").toLowerCase();
+        if (v === "large" || v === "detail" || v === "normal") return v;
+        return "";
     }
 
-    function applyLargePreview(on) {
-        $("#grid").toggleClass("lm-grid-large", !!on);
-        document.body.classList.toggle("lm-large-preview", !!on);
+    function resolvePreviewMode() {
+        const fromG = typeof G !== "undefined" ? normalizePreviewMode(G.lmwPreviewMode) : "";
+        if (fromG) return fromG;
+        if (typeof G !== "undefined" && G.lmwLargePreview) return "large";
+        return "normal";
+    }
+
+    function getPreviewMode() {
+        const el = document.getElementById("lmPreviewMode");
+        return normalizePreviewMode(el && el.value) || "normal";
+    }
+
+    function applyPreviewMode(mode) {
+        const m = normalizePreviewMode(mode) || getPreviewMode();
+        const $grid = $("#grid");
+        $grid.toggleClass("lm-grid-large", m === "large");
+        $grid.toggleClass("lm-grid-detail", m === "detail");
+        document.body.classList.toggle("lm-large-preview", m === "large");
+        document.body.classList.toggle("lm-detail-preview", m === "detail");
+        const el = document.getElementById("lmPreviewMode");
+        if (el && el.value !== m) el.value = m;
+    }
+
+    function persistPreviewMode(mode) {
+        const m = normalizePreviewMode(mode) || "normal";
+        if (typeof G !== "undefined") {
+            G.lmwPreviewMode = m;
+            G.lmwLargePreview = m === "large";
+        }
+        try {
+            chrome.storage.sync.set({ lmwPreviewMode: m, lmwLargePreview: m === "large" });
+            chrome.storage.local.set({ lmwPreviewMode: m, lmwLargePreview: m === "large" });
+        } catch (e) { /* ignore */ }
+    }
+
+    function itemDisplayName(it) {
+        return String((it && (it.title || it.downFileName || it.name || it.url)) || "").trim();
+    }
+
+    function formatItemSize(it) {
+        const n = Number((it && (it._size || it.fileSize || it.contentLength)) || 0);
+        if (!n) return "";
+        if (n < 1024) return n + " B";
+        if (n < 1024 * 1024) return (n / 1024).toFixed(1) + " KB";
+        if (n < 1024 * 1024 * 1024) return (n / (1024 * 1024)).toFixed(1) + " MB";
+        return (n / (1024 * 1024 * 1024)).toFixed(2) + " GB";
+    }
+
+    function itemDetailMetaText(it) {
+        const type = mediaTypeOf(it);
+        const bits = ["类型 " + type];
+        const d = Number(it && it._durationSec);
+        if (Number.isFinite(d) && d > 0.05) bits.push("时长 " + formatSecHms(d));
+        else if (it && it._durationProbing) bits.push("时长 …");
+        if (it && it._w && it._h) bits.push(it._w + "×" + it._h);
+        const v = shortCodecName(it && it._vcodec);
+        const a = shortCodecName(it && it._acodec);
+        const codec = [v, a].filter(Boolean).join("+");
+        if (codec) bits.push("编码 " + codec);
+        else if (it && it._codecProbing) bits.push("编码 …");
+        const sz = formatItemSize(it);
+        if (sz) bits.push(sz);
+        if (it && it._iosOk === false) bits.push("iOS 不兼容");
+        if (type === "video" && !v && a) bits.push("可能是伪装音频");
+        return bits.join(" · ");
+    }
+
+    function refreshCardDetail($card, it) {
+        if (!$card || !$card.length || !it) return;
+        let $d = $card.find(".lm-card-detail");
+        if (!$d.length) {
+            $d = $("<div class='lm-card-detail'/>");
+            $card.append($d);
+        }
+        const name = itemDisplayName(it) || "(无标题)";
+        let $name = $d.find(".lm-detail-name");
+        if (!$name.length) $name = $("<div class='lm-detail-name'/>").appendTo($d);
+        $name.text(name).attr("title", name);
+        let $meta = $d.find(".lm-detail-meta");
+        if (!$meta.length) $meta = $("<div class='lm-detail-meta'/>").appendTo($d);
+        $meta.text(itemDetailMetaText(it));
+        let $url = $d.find(".lm-detail-url");
+        if (!$url.length) $url = $("<div class='lm-detail-url'/>").appendTo($d);
+        $url.text(it.url || "");
     }
 
     function updateMultiMergeBtn() {
@@ -148,12 +236,140 @@
     }
 
     function enterMultiMergeMode() {
+        if (manualAvMode) exitManualAvMode();
         multiMergeMode = true;
         multiMergeOrder = [];
         document.body.classList.add("lm-multi-merge-mode");
         applyMmOrderMarks();
         updateMultiMergeBtn();
         setStatus("多段合并：请按拼接顺序依次点击卡片（再点取消）；选完后点「开始合并」。Esc 取消。");
+    }
+
+    function updateManualAvBtn() {
+        const btn = document.getElementById("btnManualAvMerge");
+        if (!btn) return;
+        if (manualAvBusy) {
+            btn.disabled = true;
+            btn.textContent = "合并中…";
+            return;
+        }
+        btn.disabled = false;
+        if (!manualAvMode) {
+            btn.textContent = "手动视音频合并";
+            btn.classList.remove("lm-mm-active");
+            return;
+        }
+        const n = (manualAvVideoKey ? 1 : 0) + (manualAvAudioKey ? 1 : 0);
+        btn.textContent = n >= 2 ? "提交合并" : `选画面/音轨 (${n}/2)`;
+        btn.classList.add("lm-mm-active");
+    }
+
+    function applyManualAvMarks() {
+        $("#grid .lm-card").each(function () {
+            const $card = $(this);
+            const key = $card.attr("data-key");
+            $card.removeClass("lm-mav-v lm-mav-a");
+            $card.find(".lm-mav-badge").remove();
+            if (key && key === manualAvVideoKey) {
+                $card.addClass("lm-mav-v");
+                $card.append($("<span class='lm-mav-badge' aria-hidden='true'/>").text("V"));
+            } else if (key && key === manualAvAudioKey) {
+                $card.addClass("lm-mav-a");
+                $card.append($("<span class='lm-mav-badge' aria-hidden='true'/>").text("A"));
+            }
+        });
+    }
+
+    function exitManualAvMode() {
+        manualAvMode = false;
+        manualAvVideoKey = "";
+        manualAvAudioKey = "";
+        document.body.classList.remove("lm-manual-av-mode");
+        applyManualAvMarks();
+        updateManualAvBtn();
+    }
+
+    function enterManualAvMode() {
+        if (multiMergeMode) exitMultiMergeMode();
+        manualAvMode = true;
+        manualAvVideoKey = "";
+        manualAvAudioKey = "";
+        document.body.classList.add("lm-manual-av-mode");
+        applyManualAvMarks();
+        updateManualAvBtn();
+        setStatus("手动视音频：先点画面轨（V），再点音轨（A）。后缀不当视频也没关系。Esc 取消。");
+    }
+
+    function toggleManualAvPick(key) {
+        if (!key) return;
+        const it = items.find((x) => x._key === key);
+        if (!it) return;
+        const t = mediaTypeOf(it);
+        if (t === "image" || t === "gif") {
+            setStatus("手动合并只支持视频/音频（含伪装成视频后缀的音频）");
+            return;
+        }
+        if (key === manualAvVideoKey) {
+            manualAvVideoKey = "";
+        } else if (key === manualAvAudioKey) {
+            manualAvAudioKey = "";
+        } else if (!manualAvVideoKey) {
+            manualAvVideoKey = key;
+        } else if (!manualAvAudioKey) {
+            manualAvAudioKey = key;
+        } else {
+            manualAvAudioKey = key;
+        }
+        applyManualAvMarks();
+        updateManualAvBtn();
+        const v = manualAvVideoKey ? "已选 V" : "未选 V";
+        const a = manualAvAudioKey ? "已选 A" : "未选 A";
+        setStatus(
+            "手动视音频：" +
+                v +
+                " · " +
+                a +
+                (manualAvVideoKey && manualAvAudioKey ? " · 点「提交合并」" : " · 再点另一条")
+        );
+    }
+
+    async function onManualAvBtnClick() {
+        if (manualAvBusy) return;
+        if (!manualAvMode) {
+            enterManualAvMode();
+            return;
+        }
+        if (!manualAvVideoKey || !manualAvAudioKey) {
+            setStatus("请先点画面轨再点音轨（共 2 条），或 Esc 取消");
+            return;
+        }
+        const v = items.find((x) => x._key === manualAvVideoKey);
+        const a = items.find((x) => x._key === manualAvAudioKey);
+        if (!v || !a) {
+            setStatus("所选条目已不在列表中");
+            exitManualAvMode();
+            return;
+        }
+        manualAvBusy = true;
+        updateManualAvBtn();
+        try {
+            await mergeSelectedAv([
+                {
+                    source: "page",
+                    video_key: v._key,
+                    audio_key: a._key,
+                    video_item: v,
+                    audio_item: a,
+                    pair_index: 0,
+                    score: 1,
+                    manual: true,
+                },
+            ]);
+        } finally {
+            manualAvBusy = false;
+            exitManualAvMode();
+            updateManualAvBtn();
+        }
     }
 
     /**
@@ -405,7 +621,10 @@
     function onCodecReady(it) {
         if (!it || !it._key) return;
         const $card = findCardByKey(it._key);
-        if ($card.length) updateCardCodecBadge($card, it);
+        if ($card.length) {
+            updateCardCodecBadge($card, it);
+            refreshCardDetail($card, it);
+        }
     }
 
     function parseHlsDeclaredCodecs(text) {
@@ -617,7 +836,10 @@
     function onDurationReady(it) {
         if (!it || !it._key) return;
         const $card = findCardByKey(it._key);
-        if ($card.length) updateCardDurationBadge($card, it);
+        if ($card.length) {
+            updateCardDurationBadge($card, it);
+            refreshCardDetail($card, it);
+        }
     }
 
     /**
@@ -731,7 +953,10 @@
     function onDimsReady(it) {
         if (!it || !it._key) return;
         const $card = findCardByKey(it._key);
-        if ($card.length) updateCardDimBadge($card, it);
+        if ($card.length) {
+            updateCardDimBadge($card, it);
+            refreshCardDetail($card, it);
+        }
         const res = $("#resFilter").val();
         const long = $("#longFilter").val();
         if ((res || long) && !getFilteredItems().some((x) => x._key === it._key)) {
@@ -2407,19 +2632,22 @@
         }
     }
 
-    async function mergeSelectedAv() {
-        if (!avDetectAttempted) {
-            setStatus("合并前检测可合并项…");
-            await detectAvMergePairs();
-        }
-        let pairs = collectMergePairs();
-        // 无检测结果时：支持网格里手动勾选恰好 2 项直接合并
-        if (!pairs.length && canManualTwoItemMerge()) {
-            pairs = await buildManualMergePairsFromSelection();
-            if (!pairs.length) {
-                setStatus("选中的两项无法识别为「1 视频 + 1 音频」，请改选或先去重");
-                updateMergeBtn();
-                return;
+    async function mergeSelectedAv(forcedPairs) {
+        let pairs = Array.isArray(forcedPairs) && forcedPairs.length ? forcedPairs : null;
+        if (!pairs) {
+            if (!avDetectAttempted) {
+                setStatus("合并前检测可合并项…");
+                await detectAvMergePairs();
+            }
+            pairs = collectMergePairs();
+            // 无检测结果时：支持网格里手动勾选恰好 2 项直接合并
+            if (!pairs.length && canManualTwoItemMerge()) {
+                pairs = await buildManualMergePairsFromSelection();
+                if (!pairs.length) {
+                    setStatus("选中的两项无法识别为「1 视频 + 1 音频」，请改选或先去重");
+                    updateMergeBtn();
+                    return;
+                }
             }
         }
         if (!pairs.length) {
@@ -3094,6 +3322,10 @@
     }
 
     async function toggle(key, $card) {
+        if (manualAvMode) {
+            toggleManualAvPick(key);
+            return;
+        }
         if (multiMergeMode) {
             toggleMultiMergePick(key, $card);
             return;
@@ -3742,6 +3974,7 @@
         posterQueue.length = 0;
         const list = getFilteredItems();
         const $grid = $("#grid").empty();
+        applyPreviewMode(getPreviewMode());
         list.forEach((it) => {
             const key = it._key;
             const type = mediaTypeOf(it);
@@ -3796,11 +4029,13 @@
             updateCardDurationBadge($card, it);
             updateCardCodecBadge($card, it);
             updateRangeBadge($card, it);
+            refreshCardDetail($card, it);
             bindCardEvents($card, it, key);
             $grid.append($card);
         });
         applyPairMarks();
         applyMmOrderMarks();
+        applyManualAvMarks();
         updateStatusCount(list.length);
         // 后台懒探测音/视频时长，填角标
         scheduleDurationProbes(list);
@@ -4068,16 +4303,41 @@
         }
     }
 
+    async function waitSyncOptions() {
+        for (let i = 0; i < 80; i++) {
+            if (G && G.initSyncComplete) return;
+            await new Promise((r) => setTimeout(r, 50));
+        }
+    }
+
     async function resolvePageTitle() {
         if (typeof TitleRules === "undefined" || !tabId) {
             return { title: "", source: "", docTitle: "", pageUrl: await getPageUrl() };
         }
+        await waitSyncOptions();
         return TitleRules.resolveForTab(tabId);
     }
 
     async function enrichItemTitles() {
-        const resolved = await resolvePageTitle();
-        if (typeof TitleRules !== "undefined") TitleRules.applyToItems(items, resolved);
+        await waitSyncOptions();
+        if (typeof TitleRules !== "undefined" && TitleRules.hydrateRules) {
+            await TitleRules.hydrateRules();
+        }
+        const pageUrl = await getPageUrl();
+        let resolved = null;
+        if (typeof TitleRules !== "undefined") {
+            const rule = TitleRules.matchRule(pageUrl);
+            if (rule && rule.selector) {
+                resolved = await TitleRules.extractOnTab(tabId, {
+                    selector: rule.selector,
+                    regex: rule.regex || "",
+                    pageUrl: pageUrl,
+                });
+            } else {
+                resolved = await resolvePageTitle();
+            }
+            TitleRules.applyToItems(items, resolved);
+        }
         return resolved;
     }
 
@@ -6077,7 +6337,10 @@
     $(document).on("keydown", (e) => {
         if (e.key === "Escape") {
             if (!$("#lmPreview").hasClass("hide")) closePreview();
-            else if (multiMergeMode && !multiMergeBusy) {
+            else if (manualAvMode && !manualAvBusy) {
+                exitManualAvMode();
+                setStatus("已取消手动视音频合并");
+            } else if (multiMergeMode && !multiMergeBusy) {
                 exitMultiMergeMode();
                 setStatus("已取消多段合并");
             } else hideCardTip();
@@ -6094,6 +6357,7 @@
     $("#btnListDedupe").on("click", () => oneClickListDedupe());
     $("#btnDetectAvMerge").on("click", () => detectAvMergePairs());
     $("#btnMergeAvSelected").on("click", () => mergeSelectedAv());
+    $("#btnManualAvMerge").on("click", () => onManualAvBtnClick());
     $("#btnMultiMerge").on("click", () => onMultiMergeBtnClick());
     $("#btnDeleteSelected").on("click", () => deleteSelectedItems());
     $("#btnOpenManage").on("click", () => {
@@ -6155,36 +6419,27 @@
         });
     }
 
-    // 大预览：列宽/卡片约 2 倍
-    const $largePv = $("#lmLargePreview");
-    if ($largePv.length) {
-        let largeOn = false;
-        if (typeof G !== "undefined" && G.lmwLargePreview != null) {
-            largeOn = !!G.lmwLargePreview;
-        } else {
-            try {
-                // sync 可能尚未写入 G；再读 local 兜底
-                chrome.storage.local.get(["lmwLargePreview"], (r) => {
-                    if (r && r.lmwLargePreview != null) {
-                        $largePv.prop("checked", !!r.lmwLargePreview);
-                        applyLargePreview(!!r.lmwLargePreview);
-                    }
-                });
-            } catch (_) {}
-        }
-        $largePv.prop("checked", largeOn);
-        applyLargePreview(largeOn);
-        $largePv.on("change", function () {
-            const on = !!this.checked;
-            applyLargePreview(on);
-            if (typeof G !== "undefined") G.lmwLargePreview = on;
-            try {
-                chrome.storage.sync.set({ lmwLargePreview: on });
-                chrome.storage.local.set({ lmwLargePreview: on });
-            } catch (e) { /* ignore */ }
+    const $previewMode = $("#lmPreviewMode");
+    if ($previewMode.length) {
+        let mode = resolvePreviewMode();
+        applyPreviewMode(mode);
+        try {
+            chrome.storage.local.get(["lmwPreviewMode", "lmwLargePreview"], (r) => {
+                if (!r) return;
+                const stored = normalizePreviewMode(r.lmwPreviewMode);
+                if (stored) mode = stored;
+                else if (r.lmwLargePreview) mode = "large";
+                applyPreviewMode(mode);
+            });
+        } catch (_) {}
+        $previewMode.on("change", function () {
+            const m = normalizePreviewMode(this.value) || "normal";
+            applyPreviewMode(m);
+            persistPreviewMode(m);
         });
     }
     updateMultiMergeBtn();
+    updateManualAvBtn();
 
     const $restricted = $("#lmRestricted");
     if ($restricted.length) {

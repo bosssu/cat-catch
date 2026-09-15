@@ -943,6 +943,62 @@ function closeTitleRuleModal() {
 $("#titleRules").click(() => openTitleRuleModal());
 $("#titleRuleClose").click(() => closeTitleRuleModal());
 $("#titleRuleFromTab").click(() => fillTitleRuleFromTab());
+function overlayPopupTitles(resolved) {
+    if (typeof TitleRules === "undefined" || !resolved || !resolved.title) return;
+    const maps = [allData.get(true), allData.get(false)];
+    const tSafe = stringModify(resolved.title);
+    for (let m = 0; m < maps.length; m++) {
+        const map = maps[m];
+        if (!map || !map.size) continue;
+        map.forEach((data) => {
+            const prev = String(data._title || data.title || "");
+            if (!TitleRules.isWeak(prev, resolved.docTitle)) return;
+            data._title = resolved.title;
+            data.title = tSafe;
+            data._titleSource = resolved.source || "selector";
+            const ext = data.ext ? "." + data.ext : "";
+            const prevMod = stringModify(prev);
+            const nameNow = String(data.name || "");
+            const nameBase = nameNow.replace(/\.[^.]+$/, "");
+            const prevBase = prevMod.replace(/\.[^.]+$/, "");
+            if (!nameNow || nameBase === prevBase || nameNow === prevMod || nameNow === prev + ext) {
+                data.name = tSafe + ext;
+                let trimName = data.name;
+                if (trimName.length >= 50 && !_tabId) {
+                    trimName = trimName.substr(0, 20) + "..." + trimName.substr(-30);
+                }
+                if (data.html && data.html.find) data.html.find("span.name").text(trimName);
+            }
+            if (data.html && data.html.find) {
+                const $info = data.html.find("#mediaInfo");
+                if ($info.length) {
+                    const mime = data.type ? `<br><b>MIME:</b>  ${data.type}` : "";
+                    $info.html(`<b>${i18n.title}:</b> ${tSafe}${mime}`);
+                }
+            }
+        });
+    }
+}
+
+function pullTitleRulesOntoList(resolved) {
+    const payload = { Message: "applyTitleRules", tabId: G.tabId };
+    if (resolved && resolved.title) {
+        payload.title = resolved.title;
+        payload.source = resolved.source || "selector";
+        payload.docTitle = resolved.docTitle || "";
+        overlayPopupTitles(resolved);
+    }
+    chrome.runtime.sendMessage(payload, (res) => {
+        if (resolved && resolved.title) return;
+        if (!res || !res.title) return;
+        overlayPopupTitles({
+            title: res.title,
+            source: res.source || "selector",
+            docTitle: res.docTitle || "",
+        });
+    });
+}
+
 $("#titleRuleTry").click(async () => {
     if (typeof TitleRules === "undefined") return;
     const selector = String($("#titleRuleSel").val() || "").trim();
@@ -954,6 +1010,7 @@ $("#titleRuleTry").click(async () => {
                 ? `抓到（${r.source}）：${r.title}`
                 : "未抓到标题" + (selector ? "（检查 selector）" : "")
         );
+        if (r && r.title && TitleRules.invalidate) TitleRules.invalidate(G.tabId);
     } catch (e) {
         $("#titleRuleTryOut").text("试抓失败: " + ((e && e.message) || e));
     }
@@ -989,11 +1046,8 @@ $("#titleRuleSave").click(async () => {
             "已保存 " + host + (path || "") + (t ? " · 已应用到列表: " + t : "")
         );
         if (t) Tips("标题规则: " + t.slice(0, 60), 2500);
-        const map = allData.get(true);
-        if (map && t && typeof TitleRules !== "undefined") {
-            const list = [];
-            map.forEach((data) => list.push(data));
-            TitleRules.applyToItems(list, {
+        if (t) {
+            overlayPopupTitles({
                 title: t,
                 source: (res && res.source) || "selector",
                 docTitle: (res && res.docTitle) || "",
@@ -1197,6 +1251,7 @@ const interval = setInterval(async function () {
         }
         $mediaList.append($current);
         UItoggle();
+        pullTitleRulesOntoList();
     });
     // 监听资源数据
     chrome.runtime.onMessage.addListener(function (Message, sender, sendResponse) {
