@@ -495,7 +495,7 @@
   </div>
   <div class="mm-card-body">
     <div class="mm-card-title" title="${escapeHtml(m.title || "")}">${escapeHtml(m.title || "(无标题)")}</div>
-    <div class="mm-card-meta">${liked}#${m.id} · ${escapeHtml(typeLabel(mtype))} · ${formatSize(m.file_size)}${dur ? " · " + dur : ""}</div>
+    <div class="mm-card-meta">${liked}#${m.id} · ${escapeHtml(typeLabel(mtype))} · ${formatSize(m.file_size)}${dur ? " · " + dur : ""}${m.has_subtitle ? " · 字幕" : ""}</div>
     <div class="mm-card-detail-tech">${escapeHtml(tech || "无更多技术信息")}</div>
     <div class="mm-card-tags">${escapeHtml(tags || "无标签")}</div>
     <label class="mm-card-restricted" title="切换「限制级」标签">
@@ -508,6 +508,11 @@
       ${
           mtype === "video" || mtype === "m3u8"
               ? `<button type="button" data-act="fix" data-id="${m.id}" title="服务端 H.264/AAC 标准化转码并自动替换">修复</button>`
+              : ""
+      }
+      ${
+          mtype === "video" || mtype === "m3u8"
+              ? `<button type="button" data-act="subtitle" data-id="${m.id}" title="本机 ASR，按扩展设置可选翻译，字幕写回此条目">字幕</button>`
               : ""
       }
       ${
@@ -1220,6 +1225,71 @@
                 if (btn) {
                     btn.disabled = false;
                     btn.textContent = "修复";
+                }
+            }
+            return;
+        }
+        if (act === "subtitle") {
+            const m = state.items.find((x) => x.id === id);
+            const mtype = (m && m.media_type) || "";
+            if (!m || (mtype !== "video" && mtype !== "m3u8")) {
+                setStatus("仅视频可生成字幕");
+                return;
+            }
+            const cfg = LMW.subtitleSettings();
+            if (!cfg.asrUrl) {
+                setStatus("未配置字幕 ASR 地址（扩展设置）");
+                return;
+            }
+            if (!cfg.asrOnly && (!cfg.aiUrl || !cfg.model || !cfg.key)) {
+                setStatus("要翻译请在扩展设置填写接口、模型 id 和 API Key，或打开「只识别」");
+                return;
+            }
+            const mode = cfg.asrOnly ? "只识别" : "识别并翻译";
+            if (
+                !confirm(
+                    `对 #${id} 生成字幕（${mode}）？\n` +
+                        `字幕写回该条目，视频文件不变。\n` +
+                        `识别可能较久，请勿关闭页面。`
+                )
+            ) {
+                return;
+            }
+            const card = $("mmGrid").querySelector(`.mm-card[data-id="${id}"]`);
+            const btn = card && card.querySelector('[data-act="subtitle"]');
+            if (btn) {
+                btn.disabled = true;
+                btn.textContent = "字幕中…";
+            }
+            setStatus(`#${id} 字幕：下载原文件…`);
+            try {
+                const blob = await LMW.fetchMediaFileBlob(id);
+                await LMW.generateSubtitle(id, blob, {
+                    filename: `${String(m.title || "video").slice(0, 60)}.mp4`,
+                    onUpdate: (msg) => setStatus(`#${id} 字幕：${msg}`),
+                });
+                const fresh = await LMW.getMedia(id);
+                const idx = state.items.findIndex((x) => x.id === id);
+                if (idx >= 0 && fresh) state.items[idx] = { ...state.items[idx], ...fresh };
+                const live = $("mmGrid").querySelector(`.mm-card[data-id="${id}"]`);
+                if (live && fresh) {
+                    const wrap = document.createElement("div");
+                    wrap.innerHTML = cardHtml(state.items[idx] || fresh);
+                    const next = wrap.firstElementChild;
+                    if (next) {
+                        live.replaceWith(next);
+                        observeThumbs($("mmGrid"));
+                        updateSelUi();
+                    }
+                } else {
+                    await loadList({ reset: true });
+                }
+                setStatus(`已写入字幕 #${id}`);
+            } catch (e) {
+                setStatus(`字幕 #${id} 失败：` + (e.message || e));
+                if (btn && btn.isConnected) {
+                    btn.disabled = false;
+                    btn.textContent = "字幕";
                 }
             }
             return;

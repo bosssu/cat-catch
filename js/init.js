@@ -179,6 +179,15 @@ G.OptionLists = {
     jasnaBridgeURL: "http://127.0.0.1:8791",
     /** 本机 YtDlpBridge（页面 URL 下载，默认 8792） */
     ytdlpBridgeURL: "http://127.0.0.1:8792",
+    /** 字幕：本机 ASR（encode=true 由识别服务自己解码） */
+    lmwAsrUrl: "http://127.0.0.1:9000/asr?encode=true&task=transcribe&output=srt",
+    /** 只识别，不翻译 */
+    lmwSubtitleAsrOnly: false,
+    /** OpenAI 兼容 chat completions */
+    lmwSubtitleAiUrl: "",
+    lmwSubtitleAiModel: "",
+    lmwSubtitleAiKey: "",
+    lmwSubtitlePrompt: "把下面的 SRT 翻译成简体中文。保留序号和时间轴，只翻译台词。不要解释，不要用代码块包裹。",
     /** 加入本地媒体库：合并/入库成功后自动从列表移除对应项（默认开） */
     lmwAutoRemoveAfterProcess: true,
     /** 网格预览：normal | large | detail（加入页 / 管理页共用） */

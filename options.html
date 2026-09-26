@@ -425,6 +425,42 @@
             <input id="ytdlpBridgeURL" save="input" type="text" class="width100" placeholder="http://127.0.0.1:8792">
           </div>
           <div class="item">
+            <div><span>字幕 ASR 地址</span>
+              <p class="explain" style="margin:4px 0 0;font-size:12px;opacity:.85;">管理页「字幕」把视频 POST 到此地址（表单字段 audio_file），取回 SRT。默认本机 faster-whisper 兼容接口，encode=true 表示由识别服务解码。</p>
+            </div>
+            <input id="lmwAsrUrl" save="input" type="text" class="width100" placeholder="http://127.0.0.1:9000/asr?encode=true&task=transcribe&output=srt">
+          </div>
+          <div class="item">
+            <div>
+              <span>字幕只识别（不翻译）</span>
+              <p class="explain" style="margin:4px 0 0;font-size:12px;opacity:.85;">关闭时，识别完成后按下面的接口把 SRT 译成简体中文，再写回同一媒体编号。</p>
+            </div>
+            <div class="switch">
+              <label class="switchLabel switchRadius">
+                <input type="checkbox" id="lmwSubtitleAsrOnly" save="click" class="switchInput" />
+                <span class="switchRound switchRadius"><em class="switchRoundBtn switchRadius"></em></span>
+              </label>
+            </div>
+          </div>
+          <div class="item">
+            <div><span>字幕翻译接口 URL</span>
+              <p class="explain" style="margin:4px 0 0;font-size:12px;opacity:.85;">OpenAI 兼容的 chat completions 地址。密钥只存在本扩展里，不发给媒体库。</p>
+            </div>
+            <input id="lmwSubtitleAiUrl" save="input" type="text" class="width100" placeholder="https://example/v1/chat/completions" autocomplete="off">
+          </div>
+          <div class="item">
+            <div><span>字幕翻译模型 id</span></div>
+            <input id="lmwSubtitleAiModel" save="input" type="text" class="width100" placeholder="model-id" autocomplete="off">
+          </div>
+          <div class="item">
+            <div><span>字幕翻译 API Key</span></div>
+            <input id="lmwSubtitleAiKey" save="input" type="password" class="width100" autocomplete="off">
+          </div>
+          <div class="item">
+            <div><span>字幕翻译提示词</span></div>
+            <textarea id="lmwSubtitlePrompt" save="input" class="width100" rows="4"></textarea>
+          </div>
+          <div class="item">
             <div><span>Token（可选，对应 X-LMW-Token）</span></div>
             <input id="lmwToken" save="input" type="password" class="width100" autocomplete="off">
           </div>

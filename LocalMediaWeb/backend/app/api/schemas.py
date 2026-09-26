@@ -67,6 +67,8 @@ class MediaOut(BaseModel):
     created_at: datetime | None = None
     file_url: str
     thumb_url: str
+    has_subtitle: bool = False
+    subtitle_rev: int = 0
     series_id: int | None = None
     series_title: str = ""
     episode_index: int | None = None

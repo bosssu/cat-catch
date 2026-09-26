@@ -13,6 +13,13 @@ const LMW = {
         jasnaBridgeURL: "http://127.0.0.1:8791",
         /** 本机 YtDlpBridge（页面 URL → yt-dlp，默认 8792） */
         ytdlpBridgeURL: "http://127.0.0.1:8792",
+        lmwAsrUrl: "http://127.0.0.1:9000/asr?encode=true&task=transcribe&output=srt",
+        lmwSubtitleAsrOnly: false,
+        lmwSubtitleAiUrl: "",
+        lmwSubtitleAiModel: "",
+        lmwSubtitleAiKey: "",
+        lmwSubtitlePrompt:
+            "把下面的 SRT 翻译成简体中文。保留序号和时间轴，只翻译台词。不要解释，不要用代码块包裹。",
     },
     /** No hard cap on tags per item (server normalize also unlimited). */
     MAX_TAGS: 0,
@@ -1236,6 +1243,134 @@ const LMW = {
     getMedia(id) {
         return this.request(`/api/media/${id}`, {
             headers: this.headers(false),
+        });
+    },
+
+    subtitleSettings() {
+        const src = (typeof G !== "undefined" && G) || {};
+        const d = this.defaults || {};
+        const pick = (k) => (src[k] != null && src[k] !== "" ? src[k] : d[k]);
+        return {
+            asrUrl: String(pick("lmwAsrUrl") || d.lmwAsrUrl || "").trim(),
+            asrOnly: !!(src.lmwSubtitleAsrOnly != null ? src.lmwSubtitleAsrOnly : d.lmwSubtitleAsrOnly),
+            aiUrl: String(pick("lmwSubtitleAiUrl") || "").trim(),
+            model: String(pick("lmwSubtitleAiModel") || "").trim(),
+            key: String(src.lmwSubtitleAiKey != null ? src.lmwSubtitleAiKey : d.lmwSubtitleAiKey || ""),
+            prompt: String(pick("lmwSubtitlePrompt") || d.lmwSubtitlePrompt || "").trim(),
+        };
+    },
+
+    _splitSrt(srt, maxBytes) {
+        const blocks = String(srt || "")
+            .replace(/\r\n/g, "\n")
+            .replace(/\r/g, "\n")
+            .trim()
+            .split(/\n\s*\n/);
+        const enc = new TextEncoder();
+        const chunks = [];
+        let cur = [];
+        let size = 0;
+        for (const block of blocks) {
+            if (!block.trim()) continue;
+            const n = enc.encode(block).length + 2;
+            if (cur.length && size + n > maxBytes) {
+                chunks.push(cur.join("\n\n"));
+                cur = [];
+                size = 0;
+            }
+            cur.push(block.trim());
+            size += n;
+        }
+        if (cur.length) chunks.push(cur.join("\n\n"));
+        return chunks.length ? chunks : [String(srt || "").trim()];
+    },
+
+    _stripFence(text) {
+        let s = String(text || "").trim();
+        if (s.startsWith("```")) {
+            s = s.replace(/^```[a-zA-Z]*\n?/, "").replace(/\n?```$/, "").trim();
+        }
+        return s;
+    },
+
+    async _translateSrt(srt, cfg, onUpdate) {
+        if (!cfg.aiUrl || !cfg.model || !cfg.key) {
+            throw new Error("要翻译请在扩展设置里填写翻译接口、模型 id 和 API Key，或打开「只识别」");
+        }
+        if (!cfg.prompt) throw new Error("翻译提示词为空");
+        const chunks = this._splitSrt(srt, 10000);
+        const out = [];
+        for (let i = 0; i < chunks.length; i++) {
+            if (onUpdate) onUpdate(`翻译 ${i + 1}/${chunks.length}`);
+            const res = await fetch(cfg.aiUrl, {
+                method: "POST",
+                headers: {
+                    "Content-Type": "application/json",
+                    Authorization: "Bearer " + cfg.key,
+                },
+                body: JSON.stringify({
+                    model: cfg.model,
+                    temperature: 0.2,
+                    messages: [
+                        { role: "system", content: cfg.prompt },
+                        { role: "user", content: chunks[i] },
+                    ],
+                }),
+            });
+            const raw = await res.text();
+            if (!res.ok) {
+                throw new Error(`翻译失败 HTTP ${res.status}: ${raw.slice(0, 240)}`);
+            }
+            let data;
+            try {
+                data = JSON.parse(raw);
+            } catch (e) {
+                throw new Error("翻译接口没有返回 JSON");
+            }
+            const content =
+                data &&
+                data.choices &&
+                data.choices[0] &&
+                data.choices[0].message &&
+                data.choices[0].message.content;
+            const piece = this._stripFence(content);
+            if (!piece || piece.indexOf("-->") < 0) {
+                throw new Error("翻译结果不是 SRT");
+            }
+            out.push(piece);
+        }
+        return out.join("\n\n") + "\n";
+    },
+
+    /**
+     * ASR (+ optional translate) then store SRT on the same media id.
+     * Video bytes are not replaced.
+     */
+    async generateSubtitle(id, blob, { filename = "media.bin", onUpdate } = {}) {
+        const cfg = this.subtitleSettings();
+        if (!cfg.asrUrl) throw new Error("未配置字幕 ASR 地址");
+        if (onUpdate) onUpdate("识别中…");
+        const fd = new FormData();
+        fd.append("audio_file", blob, filename || "media.bin");
+        const asrRes = await fetch(cfg.asrUrl, { method: "POST", body: fd });
+        const asrText = await asrRes.text();
+        if (!asrRes.ok) {
+            throw new Error(`ASR 失败 HTTP ${asrRes.status}: ${asrText.slice(0, 240)}`);
+        }
+        if (!asrText.trim() || asrText.indexOf("-->") < 0) {
+            throw new Error("ASR 没有返回 SRT");
+        }
+        let finalText = asrText;
+        if (!cfg.asrOnly) {
+            finalText = await this._translateSrt(asrText, cfg, onUpdate);
+        }
+        if (onUpdate) onUpdate("写回字幕…");
+        const headers = this.headers(false);
+        headers["Content-Type"] = "text/plain; charset=utf-8";
+        return this.request(`/api/media/${id}/subtitle`, {
+            method: "PUT",
+            headers,
+            body: finalText,
         });
     },
 

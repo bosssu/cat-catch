@@ -11,7 +11,7 @@ import time
 from pathlib import Path
 
 from fastapi import APIRouter, Depends, File, Form, HTTPException, Query, Request, UploadFile
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, PlainTextResponse
 from sqlalchemy import asc, desc, func, select, text
 
 logger = logging.getLogger("lmw.api")
@@ -73,6 +73,15 @@ from app.services.media_process import (
 )
 from app.services.reencode import ReencodeError, reencode_replace_h264
 from app.services.replace_file import ReplaceFileError, replace_library_video
+from app.services.subtitle_store import (
+    SubtitleStoreError,
+    delete_subtitle,
+    has_subtitle,
+    read_srt,
+    subtitle_rev,
+    save_srt,
+    srt_to_vtt,
+)
 from app.services.scan import ensure_category, list_categories, purge_missing_media, rescan_medias
 from app.services.tags import (
     RESTRICTED_TAG,
@@ -165,6 +174,8 @@ def _media_out(m: MediaItem, series: dict | None = None) -> MediaOut:
         # ?v= changes after demosaic / re-encode so blob cache + browser revalidate
         file_url=f"/api/media/{m.id}/file?v={ver}",
         thumb_url=f"/api/media/{m.id}/thumb?v={ver}",
+        has_subtitle=has_subtitle(int(m.id)),
+        subtitle_rev=subtitle_rev(int(m.id)),
         series_id=series.get("series_id"),
         series_title=series.get("series_title") or "",
         episode_index=series.get("episode_index"),
@@ -1009,6 +1020,39 @@ def get_media(media_id: int, db=Depends(get_db)):
     return _media_out_one(db, m)
 
 
+@router.get("/media/{media_id}/subtitle", dependencies=[Depends(require_token)])
+def media_subtitle(media_id: int, format: str = "vtt"):
+    """Sidecar subtitle. format=vtt (player) or srt (download)."""
+    try:
+        srt = read_srt(int(media_id))
+    except SubtitleStoreError as e:
+        raise HTTPException(e.status_code, str(e)) from e
+    fmt = (format or "vtt").lower()
+    if fmt == "srt":
+        return PlainTextResponse(srt, media_type="application/x-subrip; charset=utf-8")
+    return PlainTextResponse(srt_to_vtt(srt), media_type="text/vtt; charset=utf-8")
+
+
+@router.put("/media/{media_id}/subtitle", dependencies=[Depends(require_token)])
+async def media_subtitle_put(media_id: int, request: Request, db=Depends(get_db)):
+    """Store an SRT for this id. The video file is unchanged."""
+    m = db.get(MediaItem, int(media_id))
+    if not m:
+        raise HTTPException(404, "Not found")
+    raw = await request.body()
+    if len(raw) > 2_000_000:
+        raise HTTPException(400, "subtitle too large")
+    try:
+        text = raw.decode("utf-8-sig")
+    except UnicodeDecodeError as e:
+        raise HTTPException(400, "字幕须为 UTF-8") from e
+    try:
+        save_srt(int(media_id), text)
+    except SubtitleStoreError as e:
+        raise HTTPException(e.status_code, str(e)) from e
+    return {"ok": True, "media_id": int(media_id), "has_subtitle": True}
+
+
 @router.get("/media/{media_id}/file", dependencies=[Depends(require_token)])
 def media_file(media_id: int):
     """
@@ -1110,6 +1154,7 @@ def _delete_media_row(db, m: MediaItem) -> None:
         path.unlink(missing_ok=True)
     tpath = thumb_path_for(m.id)
     tpath.unlink(missing_ok=True)
+    delete_subtitle(int(m.id))
     db.delete(m)
 
 

@@ -55,6 +55,8 @@
   }
   /** Feed: replace review button with delete (default off) */
   const editModeKey = "lmw_edit_mode";
+  /** Feed subtitle overlay (default on) */
+  const showSubtitlesKey = "lmw_show_subtitles";
   /** DLNA cast end behavior: once | loop (server-side; no auto-next) */
   const castPlayModeKey = "lmw_cast_play_mode";
   /** session: once user unmutes, keep sound on for later videos in this tab */
@@ -72,6 +74,7 @@
     includeImages: localStorage.getItem(includeImagesKey) === "1",
     excludePushTags: loadExcludePushTags(),
     editMode: localStorage.getItem(editModeKey) === "1",
+    showSubtitles: localStorage.getItem(showSubtitlesKey) !== "0",
     similarTo: null,
     /** when mode=similar and set, rank by this tag (not whole media) */
     similarTag: null,
@@ -1707,6 +1710,106 @@
 
   function fileUrl(item) {
     return withAuthQuery(item.file_url);
+  }
+
+  function parseVttCues(text) {
+    const lines = String(text || "").replace(/\r/g, "").split("\n");
+    const cues = [];
+    const timeRe =
+      /(\d{2}):(\d{2}):(\d{2})\.(\d{3})\s*-->\s*(\d{2}):(\d{2}):(\d{2})\.(\d{3})/;
+    const toSec = (h, m, s, ms) => +h * 3600 + +m * 60 + +s + +ms / 1000;
+    for (let i = 0; i < lines.length; i++) {
+      const match = lines[i].match(timeRe);
+      if (!match) continue;
+      const start = toSec(match[1], match[2], match[3], match[4]);
+      const end = toSec(match[5], match[6], match[7], match[8]);
+      const buf = [];
+      i += 1;
+      while (i < lines.length && lines[i].trim() !== "") {
+        buf.push(lines[i].replace(/<[^>]+>/g, ""));
+        i += 1;
+      }
+      const cueText = buf.join("\n").trim();
+      if (cueText) cues.push({ start, end, text: cueText });
+    }
+    return cues;
+  }
+
+  function subtitleBox(media) {
+    const stage = (media && media.closest && media.closest(".media-stage")) || null;
+    if (!stage) return null;
+    let el = stage.querySelector(":scope > .lmw-sub");
+    if (!el) {
+      el = document.createElement("div");
+      el.className = "lmw-sub";
+      stage.appendChild(el);
+    }
+    return el;
+  }
+
+  function paintSubtitle(media) {
+    const box = media && media._lmwSubBox;
+    if (!box) return;
+    const cues = media._lmwCues;
+    if (!state.showSubtitles || !cues || !cues.length) {
+      box.textContent = "";
+      box.classList.remove("is-on");
+      return;
+    }
+    const t = media.currentTime || 0;
+    let text = "";
+    for (let i = 0; i < cues.length; i++) {
+      const c = cues[i];
+      if (t >= c.start && t < c.end) {
+        text = c.text;
+        break;
+      }
+    }
+    if (box.textContent !== text) box.textContent = text;
+    box.classList.toggle("is-on", !!text);
+  }
+
+  function bindSubtitleClock(media) {
+    if (!media || media.dataset.subClock === "1") return;
+    media.dataset.subClock = "1";
+    const tick = () => paintSubtitle(media);
+    media.addEventListener("timeupdate", tick);
+    media.addEventListener("seeked", tick);
+  }
+
+  /** Overlay above the progress bar. Native cues sit on the bottom edge. */
+  function syncSubtitleTrack(media, id) {
+    if (!media) return;
+    media.querySelectorAll("track[data-lmw-sub]").forEach((n) => n.remove());
+    const box = subtitleBox(media);
+    media._lmwSubBox = box;
+    bindSubtitleClock(media);
+    const item = (state.items || []).find((x) => x && String(x.id) === String(id));
+    if (!state.showSubtitles || !item || !item.has_subtitle) {
+      media._lmwCues = null;
+      media.dataset.subKey = "";
+      paintSubtitle(media);
+      return;
+    }
+    const key = `${id}:${item.subtitle_rev || 0}`;
+    if (media.dataset.subKey === key && media._lmwCues) {
+      paintSubtitle(media);
+      return;
+    }
+    media.dataset.subKey = key;
+    media._lmwCues = null;
+    paintSubtitle(media);
+    const src = withAuthQuery(
+      `/api/media/${id}/subtitle?format=vtt&v=${encodeURIComponent(item.subtitle_rev || 0)}`
+    );
+    fetch(src)
+      .then((res) => (res.ok ? res.text() : ""))
+      .then((body) => {
+        if (media.dataset.subKey !== key) return;
+        media._lmwCues = parseVttCues(body);
+        paintSubtitle(media);
+      })
+      .catch(() => {});
   }
   function thumbUrl(item) {
     return withAuthQuery(item.thumb_url);
@@ -5884,6 +5987,7 @@
       applyMediaStageFit(media);
       media.classList.add("is-ready");
       setSlideLoading(slideEl, false);
+      syncSubtitleTrack(media, id);
       return;
     }
 
@@ -5907,6 +6011,7 @@
       applyMediaStageFit(media);
       media.classList.add("is-ready");
       setSlideLoading(slideEl, false);
+      syncSubtitleTrack(media, id);
       holdFeedPausedForCast();
       return;
     }
@@ -5974,6 +6079,7 @@
           applyMediaStageFit(media);
           if (media.readyState >= 1) media.classList.add("is-ready");
           setSlideLoading(slideEl, false);
+          syncSubtitleTrack(media, id);
         }
       } catch (_) {
         if (epoch === state.playEpoch && state.activeFeedId === id) {
@@ -6022,6 +6128,7 @@
         applyMediaStageFit(media);
         media.classList.add("is-ready");
         setSlideLoading(slideEl, false);
+        syncSubtitleTrack(media, id);
         holdFeedPausedForCast();
         releaseActivating();
         return;
@@ -6032,6 +6139,7 @@
       }
 
       applyMediaStageFit(media);
+      syncSubtitleTrack(media, id);
       try {
         const mid = parseInt(String(id), 10);
         if (Number.isFinite(mid)) tryResumeWatchPosition(media, mid);
@@ -7699,6 +7807,18 @@
           e.preventDefault();
           persistExcludePushTags();
         }
+      });
+    }
+    const showSubToggle = document.getElementById("showSubtitlesToggle");
+    if (showSubToggle) {
+      showSubToggle.checked = !!state.showSubtitles;
+      showSubToggle.addEventListener("change", () => {
+        state.showSubtitles = !!showSubToggle.checked;
+        localStorage.setItem(showSubtitlesKey, state.showSubtitles ? "1" : "0");
+        const player = getFeedPlayer(false);
+        const id = state.activeFeedId;
+        if (player && id != null) syncSubtitleTrack(player, id);
+        showToast(state.showSubtitles ? "已显示字幕" : "已隐藏字幕");
       });
     }
     const editModeToggle = document.getElementById("editModeToggle");

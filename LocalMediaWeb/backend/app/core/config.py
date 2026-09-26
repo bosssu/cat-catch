@@ -124,6 +124,9 @@ class Settings(BaseSettings):
     def thumbs_path(self) -> Path:
         return self.data_path() / "thumbs"
 
+    def subtitles_path(self) -> Path:
+        return self.data_path() / "subtitles"
+
     def tmp_path(self) -> Path:
         raw = (self.tmp_dir or "").strip()
         if raw:

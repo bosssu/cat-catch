@@ -978,6 +978,30 @@ body.search-open .topnav { display: none; }
 #lmwFeedPlayer.is-ready {
   opacity: 1;
 }
+.lmw-sub {
+  position: absolute;
+  left: 50%;
+  right: auto;
+  width: max-content;
+  max-width: min(84vw, 720px);
+  transform: translateX(-50%);
+  z-index: 6;
+  bottom: calc(var(--feed-progress-bottom) + 28px);
+  text-align: center;
+  color: #fff;
+  font-size: 1.05rem;
+  line-height: 1.35;
+  white-space: pre-wrap;
+  pointer-events: none;
+  text-shadow: 0 1px 2px rgba(0, 0, 0, 0.9), 0 0 8px rgba(0, 0, 0, 0.65);
+  opacity: 0;
+}
+.lmw-sub.is-on {
+  opacity: 1;
+}
+body.is-chrome-hidden .lmw-sub {
+  bottom: max(64px, calc(var(--safe-bottom) + 48px));
+}
 /* Loading spinner while single-stream buffer is empty */
 .media-loading {
   position: absolute;
