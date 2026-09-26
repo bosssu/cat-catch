@@ -780,9 +780,19 @@ body.mm-series-picking .mm-card {
   background: rgba(59, 130, 246, 0.18);
 }
 
-.mm-card-actions button[data-act="fix"]:disabled {
+.mm-card-actions button[data-act="fix"]:disabled,
+.mm-card-actions button[data-act="demosaic"]:disabled {
   opacity: 0.65;
   cursor: wait;
+}
+
+.mm-card-actions button[data-act="demosaic"] {
+  border-color: rgba(251, 191, 36, 0.4);
+  color: #fcd34d;
+}
+
+.mm-card-actions button[data-act="demosaic"]:hover {
+  background: rgba(245, 158, 11, 0.18);
 }
 
 .mm-footer {

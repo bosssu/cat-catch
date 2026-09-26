@@ -510,6 +510,11 @@
               ? `<button type="button" data-act="fix" data-id="${m.id}" title="服务端 H.264/AAC 标准化转码并自动替换">修复</button>`
               : ""
       }
+      ${
+          restricted && (mtype === "video" || mtype === "m3u8")
+              ? `<button type="button" data-act="demosaic" data-id="${m.id}" title="本机 JasnaBridge 去马赛克，完成后原地替换此条目">去马赛克</button>`
+              : ""
+      }
       <button type="button" data-act="del" data-id="${m.id}">删除</button>
     </div>
   </div>
@@ -1215,6 +1220,84 @@
                 if (btn) {
                     btn.disabled = false;
                     btn.textContent = "修复";
+                }
+            }
+            return;
+        }
+        if (act === "demosaic") {
+            const m = state.items.find((x) => x.id === id);
+            const mtype = (m && m.media_type) || "";
+            if (!m || !isRestricted(m) || (mtype !== "video" && mtype !== "m3u8")) {
+                setStatus("仅限制级视频可去马赛克");
+                return;
+            }
+            if (
+                !confirm(
+                    `对 #${id} 调用本机 JasnaBridge 去马赛克？\n` +
+                        `成功后原地替换该条目的文件，编号不变。\n` +
+                        `失败则保留原文件。处理可能很久，请勿关闭页面。`
+                )
+            ) {
+                return;
+            }
+            const card = $("mmGrid").querySelector(`.mm-card[data-id="${id}"]`);
+            const btn = card && card.querySelector('[data-act="demosaic"]');
+            if (btn) {
+                btn.disabled = true;
+                btn.textContent = "去码中…";
+            }
+            setStatus(`#${id} 去马赛克：检查 JasnaBridge…`);
+            try {
+                const hb = await LMW.jasnaBridgeHealth();
+                if (!hb.ok) throw new Error(hb.message || "JasnaBridge 不可用");
+                setStatus(`#${id} 去马赛克：下载原文件…`);
+                const blob = await LMW.fetchMediaFileBlob(id);
+                const enq = await LMW.enqueueJasnaBridgeBlob(blob, {
+                    title: m.title || "",
+                    tags: m.tags || [],
+                    restricted: true,
+                    category: m.category || "default",
+                    filename: `${String(m.title || "video").slice(0, 60)}.mp4`,
+                    replace_media_id: id,
+                });
+                const jobId = enq.job_id || (enq.job && enq.job.id);
+                if (!jobId) throw new Error("JasnaBridge 未返回任务编号");
+                const jobs = await LMW.waitJasnaBridgeJobs([jobId], {
+                    onUpdate: (msg) => setStatus(`#${id} ${msg}`),
+                });
+                const job = jobs && jobs[0];
+                const st = job && job.status;
+                if (st !== "done") {
+                    throw new Error((job && job.message) || st || "去马赛克失败");
+                }
+                if (typeof LMW.invalidateBlobCacheForMedia === "function") {
+                    LMW.invalidateBlobCacheForMedia(id);
+                }
+                const fresh = await LMW.getMedia(id);
+                const idx = state.items.findIndex((x) => x.id === id);
+                if (idx >= 0 && fresh) state.items[idx] = { ...state.items[idx], ...fresh };
+                const live = $("mmGrid").querySelector(`.mm-card[data-id="${id}"]`);
+                if (live && fresh) {
+                    const wrap = document.createElement("div");
+                    wrap.innerHTML = cardHtml(state.items[idx] || fresh);
+                    const next = wrap.firstElementChild;
+                    if (next) {
+                        live.replaceWith(next);
+                        observeThumbs($("mmGrid"));
+                        updateSelUi();
+                    }
+                } else {
+                    await loadList({ reset: true });
+                }
+                setStatus(
+                    `已去马赛克 #${id}` +
+                        (fresh && fresh.file_size ? ` · ${formatSize(fresh.file_size)}` : "")
+                );
+            } catch (e) {
+                setStatus(`去马赛克 #${id} 失败：` + (e.message || e));
+                if (btn) {
+                    btn.disabled = false;
+                    btn.textContent = "去马赛克";
                 }
             }
             return;

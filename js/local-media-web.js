@@ -518,6 +518,8 @@ const LMW = {
         if (restricted) fd.append("restricted", "1");
         const srcMid = meta.source_media_id != null ? parseInt(meta.source_media_id, 10) : 0;
         if (srcMid > 0) fd.append("source_media_id", String(srcMid));
+        const repMid = meta.replace_media_id != null ? parseInt(meta.replace_media_id, 10) : 0;
+        if (repMid > 0) fd.append("replace_media_id", String(repMid));
         const name = meta.filename || `${(meta.title || "video").slice(0, 40)}.mp4`;
         fd.append("file", blob, name);
         const res = await fetch(this.jasnaBridgeBaseUrl() + "/api/jobs", {
@@ -1227,6 +1229,12 @@ const LMW = {
 
     getSeries(id) {
         return this.request(`/api/series/${Number(id)}`, {
+            headers: this.headers(false),
+        });
+    },
+
+    getMedia(id) {
+        return this.request(`/api/media/${id}`, {
             headers: this.headers(false),
         });
     },

@@ -72,6 +72,7 @@ from app.services.media_process import (
     write_temp_bytes,
 )
 from app.services.reencode import ReencodeError, reencode_replace_h264
+from app.services.replace_file import ReplaceFileError, replace_library_video
 from app.services.scan import ensure_category, list_categories, purge_missing_media, rescan_medias
 from app.services.tags import (
     RESTRICTED_TAG,
@@ -2396,6 +2397,40 @@ def cancel_jasna_job(job_id: int, db=Depends(get_db)):
         db.commit()
         db.refresh(j)
     return _jasna_job_out(j)
+
+
+@router.post("/media/{media_id}/file", dependencies=[Depends(require_token)])
+async def media_replace_file(media_id: int, file: UploadFile = File(...)):
+    """
+    Replace the on-disk file for an existing video. Same media id.
+    Used after local JasnaBridge demosaic. Tags, likes, series, and
+    playback position are left on the row.
+    """
+    settings = get_settings()
+    work = settings.tmp_path() / "replace" / str(int(media_id))
+    work.mkdir(parents=True, exist_ok=True)
+    raw_name = file.filename or "replace.mp4"
+    dest = work / "incoming.bin"
+    if dest.exists():
+        dest.unlink(missing_ok=True)
+    max_bytes = int(settings.max_file_bytes or 0)
+    written = 0
+    try:
+        with dest.open("wb") as out:
+            while True:
+                chunk = await file.read(1024 * 1024)
+                if not chunk:
+                    break
+                written += len(chunk)
+                if max_bytes and written > max_bytes:
+                    raise HTTPException(400, "File too large")
+                out.write(chunk)
+        item = replace_library_video(int(media_id), dest, upload_name=raw_name)
+    except ReplaceFileError as e:
+        raise HTTPException(e.status_code, str(e)) from e
+    finally:
+        dest.unlink(missing_ok=True)
+    return {"ok": True, "media_id": item.id, "item": _media_out(item)}
 
 
 @router.post("/media/{media_id}/reencode", dependencies=[Depends(require_token)])
