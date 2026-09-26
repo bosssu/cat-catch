@@ -181,6 +181,10 @@ G.OptionLists = {
     ytdlpBridgeURL: "http://127.0.0.1:8792",
     /** 加入本地媒体库：合并/入库成功后自动从列表移除对应项（默认开） */
     lmwAutoRemoveAfterProcess: true,
+    /** 网格预览：normal | large | detail（加入页 / 管理页共用） */
+    lmwPreviewMode: "normal",
+    /** @deprecated 由 lmwPreviewMode=large 替代 */
+    lmwLargePreview: false,
     // 入库时默认打上「限制级」标签（各入库 UI 可单独勾选，会写回此偏好）
     lmwRestricted: false,
     /** 站点标题规则：[{ host, selector, regex }]，host 匹配当前页；selector 为 CSS */

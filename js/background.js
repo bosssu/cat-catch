@@ -249,10 +249,23 @@ function findMedia(data, isRegex = false, filter = false, timer = false) {
             if (typeof TitleRules !== "undefined") {
                 const extra = [];
                 if (info.initiator) extra.push(info.initiator);
-                const resolved = await TitleRules.resolveForTab(data.tabId, webInfo, extra);
+                const hintCid = TitleRules.cidFromMedia
+                    ? TitleRules.cidFromMedia(info.name, info.url)
+                    : "";
+                const resolved = await TitleRules.resolveForTab(data.tabId, webInfo, extra, hintCid);
                 if (resolved && resolved.title && (resolved.source !== "document" || TitleRules.isWeak(info.title))) {
                     info.title = resolved.title;
                     info._titleSource = resolved.source || "";
+                }
+                if (TitleRules.dbg && String(info.ext || "").toLowerCase() === "m4s") {
+                    TitleRules.dbg("catch", {
+                        ext: info.ext,
+                        name: String(info.name || "").slice(0, 80),
+                        title: String(info.title || "").slice(0, 80),
+                        src: info._titleSource || (resolved && resolved.source) || "",
+                        hint: hintCid || "",
+                        page: String((resolved && resolved.pageUrl) || webInfo?.url || "").slice(0, 120),
+                    });
                 }
             }
         } catch (_) {}

@@ -39,6 +39,7 @@ from app.api.schemas import (
     MediaPatch,
     MediaReclassifyRequest,
     ProbeUrlRequest,
+    SeriesCreate,
     TagSuggestRequest,
     TagsBatchUpdate,
     TagsUpdate,
@@ -50,7 +51,7 @@ from app.core.config import (
     jasna_binary_available,
 )
 from app.core.db import get_db
-from app.models.entities import DownloadJob, JasnaJob, MediaItem
+from app.models.entities import DownloadJob, JasnaJob, MediaItem, MediaSeries, SeriesEpisode
 from app.services.dedupe import dedupe_identical_media
 from app.services.download import enqueue_jobs, register_uploaded_file, request_cancel
 from app.services.jasna import enqueue_jasna_for_media, request_cancel as jasna_request_cancel
@@ -103,8 +104,39 @@ def _media_cache_ver(m: MediaItem) -> str:
     return f"{size}-{t}"
 
 
-def _media_out(m: MediaItem) -> MediaOut:
+def _series_info_by_media(db, media_ids: list[int]) -> dict[int, dict]:
+    """media_id -> series fields for MediaOut."""
+    ids = [int(i) for i in media_ids if i is not None]
+    if not ids:
+        return {}
+    eps = list(db.scalars(select(SeriesEpisode).where(SeriesEpisode.media_id.in_(ids))).all())
+    if not eps:
+        return {}
+    sids = list({int(e.series_id) for e in eps})
+    series_rows = list(db.scalars(select(MediaSeries).where(MediaSeries.id.in_(sids))).all())
+    series_by_id = {int(s.id): s for s in series_rows}
+    counts: dict[int, int] = {}
+    for sid in sids:
+        n = db.scalar(
+            select(func.count()).select_from(SeriesEpisode).where(SeriesEpisode.series_id == sid)
+        )
+        counts[sid] = int(n or 0)
+    out: dict[int, dict] = {}
+    for e in eps:
+        s = series_by_id.get(int(e.series_id))
+        out[int(e.media_id)] = {
+            "series_id": int(e.series_id),
+            "series_title": (s.title if s else "") or "",
+            "episode_index": int(e.episode_index),
+            "episode_count": counts.get(int(e.series_id), 0),
+            "series_current_index": int(s.current_episode_index) if s else int(e.episode_index),
+        }
+    return out
+
+
+def _media_out(m: MediaItem, series: dict | None = None) -> MediaOut:
     ver = _media_cache_ver(m)
+    series = series or {}
     return MediaOut(
         id=m.id,
         category=getattr(m, "category", None) or "default",
@@ -132,7 +164,93 @@ def _media_out(m: MediaItem) -> MediaOut:
         # ?v= changes after demosaic / re-encode so blob cache + browser revalidate
         file_url=f"/api/media/{m.id}/file?v={ver}",
         thumb_url=f"/api/media/{m.id}/thumb?v={ver}",
+        series_id=series.get("series_id"),
+        series_title=series.get("series_title") or "",
+        episode_index=series.get("episode_index"),
+        episode_count=series.get("episode_count"),
+        series_current_index=series.get("series_current_index"),
     )
+
+
+def _media_outs(db, rows: list) -> list[MediaOut]:
+    infos = _series_info_by_media(db, [int(m.id) for m in rows])
+    return [_media_out(m, infos.get(int(m.id))) for m in rows]
+
+
+def _media_out_one(db, m: MediaItem) -> MediaOut:
+    infos = _series_info_by_media(db, [int(m.id)])
+    return _media_out(m, infos.get(int(m.id)))
+
+
+def _detach_media_from_series(db, media_id: int) -> None:
+    ep = db.scalar(select(SeriesEpisode).where(SeriesEpisode.media_id == int(media_id)))
+    if not ep:
+        return
+    sid = int(ep.series_id)
+    db.delete(ep)
+    db.flush()
+    rest = list(
+        db.scalars(
+            select(SeriesEpisode)
+            .where(SeriesEpisode.series_id == sid)
+            .order_by(SeriesEpisode.episode_index.asc())
+        ).all()
+    )
+    if len(rest) < 2:
+        for r in rest:
+            db.delete(r)
+        s = db.get(MediaSeries, sid)
+        if s:
+            db.delete(s)
+        return
+    for i, r in enumerate(rest, start=1):
+        r.episode_index = i
+    s = db.get(MediaSeries, sid)
+    if s and int(s.current_media_id or 0) == int(media_id):
+        s.current_media_id = int(rest[0].media_id)
+        s.current_episode_index = 1
+
+
+def _touch_series_cursor(db, m: MediaItem) -> None:
+    ep = db.scalar(select(SeriesEpisode).where(SeriesEpisode.media_id == int(m.id)))
+    if not ep:
+        return
+    s = db.get(MediaSeries, int(ep.series_id))
+    if not s:
+        return
+    s.current_media_id = int(m.id)
+    s.current_episode_index = int(ep.episode_index)
+
+
+def _series_episodes_out(db, series: MediaSeries) -> list[MediaOut]:
+    eps = list(
+        db.scalars(
+            select(SeriesEpisode)
+            .where(SeriesEpisode.series_id == int(series.id))
+            .order_by(SeriesEpisode.episode_index.asc())
+        ).all()
+    )
+    ids = [int(e.media_id) for e in eps]
+    rows = _load_media_in_order(db, ids)
+    infos = _series_info_by_media(db, [int(m.id) for m in rows])
+    return [_media_out(m, infos.get(int(m.id))) for m in rows]
+
+
+def _series_representative(db, series: MediaSeries) -> MediaItem | None:
+    mid = int(series.current_media_id or 0)
+    if mid:
+        m = db.get(MediaItem, mid)
+        if m:
+            return m
+    ep = db.scalar(
+        select(SeriesEpisode)
+        .where(SeriesEpisode.series_id == int(series.id))
+        .order_by(SeriesEpisode.episode_index.asc())
+        .limit(1)
+    )
+    if not ep:
+        return None
+    return db.get(MediaItem, int(ep.media_id))
 
 
 def _job_out(j: DownloadJob) -> JobOut:
@@ -465,7 +583,12 @@ def list_media(
 
     total = int(db.scalar(count_stmt) or 0)
     page = list(db.scalars(list_stmt.offset(offset).limit(limit)).all())
-    return {"total": total, "offset": offset, "limit": limit, "items": [_media_out(m) for m in page]}
+    return {
+        "total": total,
+        "offset": offset,
+        "limit": limit,
+        "items": _media_outs(db, page),
+    }
 
 
 def _parse_id_set(raw: str | None) -> set[int]:
@@ -557,6 +680,40 @@ def feed(
         stmt = stmt.where(_exclude_static_images_sql())
     for c in _exclude_tags_clauses(_parse_tag_list(exclude_tags)):
         stmt = stmt.where(c)
+    if mode == "series":
+        series_rows = list(
+            db.scalars(
+                select(MediaSeries).order_by(
+                    desc(MediaSeries.updated_at), desc(MediaSeries.id)
+                )
+            ).all()
+        )
+        remain = [s for s in series_rows if int(s.id) not in exclude]
+        cycle_reset = False
+        if not remain and series_rows:
+            cycle_reset = True
+            remain = list(series_rows)
+        hide_tags = set(_parse_tag_list(exclude_tags))
+        picked: list = []
+        for s in remain:
+            m = _series_representative(db, s)
+            if m is None:
+                continue
+            tags = set(tags_from_json(getattr(m, "tags_json", None)))
+            if not include_restricted and RESTRICTED_TAG in tags:
+                continue
+            if hide_tags and (tags & hide_tags):
+                continue
+            picked.append(m)
+            if len(picked) >= limit:
+                break
+        return {
+            "mode": "series",
+            "similar_to": similar_to,
+            "tag": focus_tag or None,
+            "random_cycle_reset": cycle_reset,
+            "items": _media_outs(db, picked),
+        }
     if mode == "liked":
         stmt = stmt.where(MediaItem.liked.is_(True))
         rows = list(
@@ -579,7 +736,7 @@ def feed(
             "similar_to": similar_to,
             "tag": focus_tag or None,
             "random_cycle_reset": cycle_reset,
-            "items": [_media_out(m) for m in rows],
+            "items": _media_outs(db, rows),
         }
     elif mode == "similar" or similar_to:
         # Same mixed pool as recommend (recent + random), not "latest N only"
@@ -692,7 +849,7 @@ def feed(
         "similar_to": similar_to,
         "tag": focus_tag or None,
         "random_cycle_reset": False,
-        "items": [_media_out(m) for m in rows],
+        "items": _media_outs(db, rows),
     }
 
 
@@ -714,12 +871,141 @@ def feed_post(body: FeedRequest, db=Depends(get_db)):
     )
 
 
+@router.post("/series", dependencies=[Depends(require_token)])
+def create_series(body: SeriesCreate, db=Depends(get_db)):
+    ids: list[int] = []
+    seen: set[int] = set()
+    for raw in body.ids or []:
+        try:
+            mid = int(raw)
+        except (TypeError, ValueError):
+            continue
+        if mid <= 0 or mid in seen:
+            continue
+        seen.add(mid)
+        ids.append(mid)
+    if len(ids) < 2:
+        raise HTTPException(400, "至少选择 2 条媒体")
+    rows = _load_media_in_order(db, ids)
+    if len(rows) != len(ids):
+        missing = [i for i in ids if i not in {int(m.id) for m in rows}]
+        raise HTTPException(404, f"媒体不存在: {missing[:8]}")
+    taken = list(
+        db.scalars(select(SeriesEpisode).where(SeriesEpisode.media_id.in_(ids))).all()
+    )
+    if taken:
+        raise HTTPException(400, "部分媒体已属于其他剧集")
+    title = (body.title or "").strip()
+    if not title:
+        title = (rows[0].title or "").strip() or f"剧集 #{rows[0].id}"
+    s = MediaSeries(title=title[:512], current_media_id=int(rows[0].id), current_episode_index=1)
+    db.add(s)
+    db.flush()
+    for i, m in enumerate(rows, start=1):
+        db.add(SeriesEpisode(series_id=int(s.id), media_id=int(m.id), episode_index=i))
+    db.commit()
+    db.refresh(s)
+    episodes = _series_episodes_out(db, s)
+    return {
+        "id": int(s.id),
+        "title": s.title,
+        "current_media_id": s.current_media_id,
+        "current_episode_index": int(s.current_episode_index or 1),
+        "episode_count": len(episodes),
+        "episodes": episodes,
+    }
+
+
+@router.get("/series", dependencies=[Depends(require_token)])
+def list_series(
+    offset: int = Query(default=0, ge=0),
+    limit: int = Query(default=48, ge=1, le=100),
+    include_restricted: bool = False,
+    exclude_tags: str | None = None,
+    db=Depends(get_db),
+):
+    """One card per series for the picker grid (cover = resume / first episode)."""
+    hide_tags = set(_parse_tag_list(exclude_tags))
+    series_rows = list(
+        db.scalars(
+            select(MediaSeries).order_by(
+                desc(MediaSeries.updated_at), desc(MediaSeries.id)
+            )
+        ).all()
+    )
+    picked: list[MediaSeries] = []
+    for s in series_rows:
+        m = _series_representative(db, s)
+        if m is None:
+            continue
+        tags = set(tags_from_json(getattr(m, "tags_json", None)))
+        if not include_restricted and RESTRICTED_TAG in tags:
+            continue
+        if hide_tags and (tags & hide_tags):
+            continue
+        picked.append(s)
+    total = len(picked)
+    page = picked[offset : offset + limit]
+    items = []
+    for s in page:
+        m = _series_representative(db, s)
+        n = int(
+            db.scalar(
+                select(func.count())
+                .select_from(SeriesEpisode)
+                .where(SeriesEpisode.series_id == int(s.id))
+            )
+            or 0
+        )
+        cover = _media_out_one(db, m) if m is not None else None
+        items.append(
+            {
+                "id": int(s.id),
+                "title": s.title or "",
+                "episode_count": n,
+                "current_media_id": s.current_media_id,
+                "current_episode_index": int(s.current_episode_index or 1),
+                "cover": cover,
+            }
+        )
+    return {"total": total, "offset": offset, "limit": limit, "items": items}
+
+
+@router.get("/series/{series_id}", dependencies=[Depends(require_token)])
+def get_series(series_id: int, db=Depends(get_db)):
+    s = db.get(MediaSeries, series_id)
+    if not s:
+        raise HTTPException(404, "剧集不存在")
+    episodes = _series_episodes_out(db, s)
+    return {
+        "id": int(s.id),
+        "title": s.title,
+        "current_media_id": s.current_media_id,
+        "current_episode_index": int(s.current_episode_index or 1),
+        "episode_count": len(episodes),
+        "episodes": episodes,
+    }
+
+
+@router.delete("/series/{series_id}", dependencies=[Depends(require_token)])
+def delete_series(series_id: int, db=Depends(get_db)):
+    s = db.get(MediaSeries, series_id)
+    if not s:
+        raise HTTPException(404, "剧集不存在")
+    eps = list(db.scalars(select(SeriesEpisode).where(SeriesEpisode.series_id == series_id)).all())
+    for e in eps:
+        db.delete(e)
+    db.delete(s)
+    db.commit()
+    return {"ok": True}
+
+
 @router.get("/media/{media_id}", dependencies=[Depends(require_token)])
 def get_media(media_id: int, db=Depends(get_db)):
     m = db.get(MediaItem, media_id)
     if not m:
         raise HTTPException(404, "Not found")
-    return _media_out(m)
+    return _media_out_one(db, m)
 
 
 @router.get("/media/{media_id}/file", dependencies=[Depends(require_token)])
@@ -817,6 +1103,7 @@ def media_thumb(media_id: int):
 
 def _delete_media_row(db, m: MediaItem) -> None:
     """Remove media file, thumb, and DB row (caller commits)."""
+    _detach_media_from_series(db, int(m.id))
     path = get_settings().medias_path() / m.rel_path
     if path.is_file():
         path.unlink(missing_ok=True)
@@ -982,9 +1269,11 @@ def interact(media_id: int, body: InteractEvent, db=Depends(get_db)):
             m.last_position_sec = 0.0
     else:
         raise HTTPException(400, "event must be view|dwell|skip|progress|ended")
+    if ev in ("view", "progress", "ended", "dwell"):
+        _touch_series_cursor(db, m)
     db.commit()
     db.refresh(m)
-    return _media_out(m)
+    return _media_out_one(db, m)
 
 
 def _short(s: str | None, n: int = 120) -> str:

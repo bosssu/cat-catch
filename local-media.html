@@ -5,7 +5,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <title>LocalMediaWeb</title>
   <link rel="stylesheet" href="css/public.css" />
-  <link rel="stylesheet" href="css/local-media.css?v=20260819titleRules" />
+  <link rel="stylesheet" href="css/local-media.css?v=20260911previewMode2" />
   <script src="js/init.js"></script>
   <script src="lib/jquery.min.js"></script>
   <script src="lib/hls.min.js"></script>
@@ -24,6 +24,7 @@
       <button type="button" id="btnListDedupe" class="button2" title="同类型内去掉重复项；不会把可合并的音+视当成重复">去重</button>
       <button type="button" id="btnDetectAvMerge" class="button2" title="在已勾选项里识别音/视频并按时长匹配可合并对">检测可合并项</button>
       <button type="button" id="btnMergeAvSelected" class="button2" title="匹配的音+视合并入库；也可手动勾 1 视频 + 1 音频。未检测过会先自动检测" disabled>合并选中音视频</button>
+      <button type="button" id="btnManualAvMerge" class="button2" title="无视后缀：先点画面轨再点音轨，提交后强制合并入库">手动视音频合并</button>
       <button type="button" id="btnMultiMerge" class="button2" title="按点击顺序把多段拼成一条后入库">多段</button>
       <select id="typeFilter" title="媒体类型">
         <option value="">类型</option>
@@ -56,10 +57,11 @@
         <option value="yes">有 Cookie</option>
         <option value="no">无 Cookie</option>
       </select>
-      <label class="lm-check" title="网格卡片边长约为现在的 2 倍">
-        <input type="checkbox" id="lmLargePreview" />
-        大预览
-      </label>
+      <select id="lmPreviewMode" title="网格预览模式">
+        <option value="normal">普通</option>
+        <option value="large">大预览</option>
+        <option value="detail">详细信息</option>
+      </select>
       <label class="lm-check" title="合并或入库成功后，从当前列表移除">
         <input type="checkbox" id="lmAutoRemove" checked />
         完成后移除
@@ -122,7 +124,7 @@
   </div>
 
   <script src="js/title-rules.js"></script>
-  <script src="js/local-media.js?v=20260819titleRules"></script>
+  <script src="js/local-media.js?v=20260911previewMode"></script>
 </body>
 </html>
 

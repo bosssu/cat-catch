@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from datetime import datetime, timezone
 
-from sqlalchemy import Boolean, DateTime, Float, Integer, String, Text
+from sqlalchemy import Boolean, DateTime, Float, Integer, String, Text, UniqueConstraint
 from sqlalchemy.orm import Mapped, mapped_column
 
 from app.core.db import Base
@@ -50,6 +50,36 @@ class MediaItem(Base):
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), default=_utcnow, onupdate=_utcnow
     )
+
+
+class MediaSeries(Base):
+    """A named ordered group of library items (episodes)."""
+
+    __tablename__ = "media_series"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    title: Mapped[str] = mapped_column(String(512), default="")
+    current_media_id: Mapped[int | None] = mapped_column(Integer, nullable=True, default=None)
+    current_episode_index: Mapped[int] = mapped_column(Integer, default=1)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=_utcnow, onupdate=_utcnow
+    )
+
+
+class SeriesEpisode(Base):
+    """One media item in a series; click-order becomes episode_index (1-based)."""
+
+    __tablename__ = "series_episodes"
+    __table_args__ = (
+        UniqueConstraint("media_id", name="uq_series_episodes_media_id"),
+        UniqueConstraint("series_id", "episode_index", name="uq_series_episodes_order"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    series_id: Mapped[int] = mapped_column(Integer, index=True)
+    media_id: Mapped[int] = mapped_column(Integer, index=True)
+    episode_index: Mapped[int] = mapped_column(Integer, default=1)
 
 
 class DownloadJob(Base):

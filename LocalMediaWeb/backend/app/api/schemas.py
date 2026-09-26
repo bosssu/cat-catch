@@ -67,8 +67,20 @@ class MediaOut(BaseModel):
     created_at: datetime | None = None
     file_url: str
     thumb_url: str
+    series_id: int | None = None
+    series_title: str = ""
+    episode_index: int | None = None
+    episode_count: int | None = None
+    series_current_index: int | None = None
 
     model_config = {"from_attributes": True}
+
+
+class SeriesCreate(BaseModel):
+    """Create a series from media ids in click order."""
+
+    ids: list[int] = Field(default_factory=list)
+    title: str = ""
 
 
 class FeedRequest(BaseModel):

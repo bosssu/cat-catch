@@ -60,6 +60,24 @@ function AddMedia(data, currentTab = true) {
     data.title = stringModify(data.title);
     //文件名
     data.name = isEmpty(data.name) ? data.title + '.' + data.ext : decodeURIComponent(stringModify(data.name));
+    data._dumpName = data.name;
+    if (
+        typeof TitleRules !== "undefined" &&
+        TitleRules.isWeak(data.name) &&
+        !TitleRules.isWeak(data._title)
+    ) {
+        data.name = TitleRules.titledFileName
+            ? TitleRules.titledFileName(data.title, data._dumpName, data.ext)
+            : data.title + (data.ext ? "." + data.ext : "");
+    }
+    if (typeof TitleRules !== "undefined" && TitleRules.dbg && String(data.ext || "").toLowerCase() === "m4s") {
+        TitleRules.dbg("add", {
+            ext: data.ext,
+            name: String(data.name || "").slice(0, 80),
+            title: String(data._title || "").slice(0, 80),
+            src: data._titleSource || "",
+        });
+    }
     //截取文件名长度
     let trimName = data.name;
     if (data.name && data.name.length >= 50 && !_tabId) {
@@ -952,24 +970,61 @@ function overlayPopupTitles(resolved) {
         if (!map || !map.size) continue;
         map.forEach((data) => {
             const prev = String(data._title || data.title || "");
-            if (!TitleRules.isWeak(prev, resolved.docTitle)) return;
-            data._title = resolved.title;
-            data.title = tSafe;
-            data._titleSource = resolved.source || "selector";
             const ext = data.ext ? "." + data.ext : "";
-            const prevMod = stringModify(prev);
             const nameNow = String(data.name || "");
-            const nameBase = nameNow.replace(/\.[^.]+$/, "");
-            const prevBase = prevMod.replace(/\.[^.]+$/, "");
-            if (!nameNow || nameBase === prevBase || nameNow === prevMod || nameNow === prev + ext) {
-                data.name = tSafe + ext;
-                let trimName = data.name;
+            const titleWeak = TitleRules.isWeak(prev, resolved.docTitle);
+            const nameWeak = TitleRules.isWeak(nameNow, resolved.docTitle);
+            if (TitleRules.dbg && String(data.ext || "").toLowerCase() === "m4s") {
+                TitleRules.dbg("overlay", {
+                    titleWeak,
+                    nameWeak,
+                    willName: !!(nameWeak || titleWeak),
+                    prev: prev.slice(0, 80),
+                    name: nameNow.slice(0, 80),
+                    resolved: String(resolved.title || "").slice(0, 80),
+                    source: resolved.source || "",
+                });
+            }
+            if (!titleWeak && !nameWeak) return;
+            const setSpanName = (full) => {
+                data.name = full;
+                let trimName = full;
                 if (trimName.length >= 50 && !_tabId) {
                     trimName = trimName.substr(0, 20) + "..." + trimName.substr(-30);
                 }
                 if (data.html && data.html.find) data.html.find("span.name").text(trimName);
+            };
+            if (nameWeak && !titleWeak) {
+                const dump = data._dumpName || nameNow;
+                setSpanName(
+                    TitleRules.titledFileName
+                        ? TitleRules.titledFileName(prev, dump, data.ext)
+                        : stringModify(prev) + ext
+                );
+                return;
             }
-            if (data.html && data.html.find) {
+            if (titleWeak) {
+                data._title = resolved.title;
+                data.title = tSafe;
+                data._titleSource = resolved.source || "selector";
+            }
+            const prevMod = stringModify(prev);
+            const nameBase = nameNow.replace(/\.[^.]+$/, "");
+            const prevBase = prevMod.replace(/\.[^.]+$/, "");
+            const nameFollowsTitle =
+                !nameNow ||
+                nameBase === prevBase ||
+                nameNow === prevMod ||
+                nameNow === prev + ext;
+            if (nameWeak || (titleWeak && nameFollowsTitle)) {
+                const dump = data._dumpName || nameNow;
+                setSpanName(
+                    TitleRules.titledFileName
+                        ? TitleRules.titledFileName(tSafe, dump, data.ext)
+                        : tSafe + ext
+                );
+            }
+            if (titleWeak && data.html && data.html.find) {
                 const $info = data.html.find("#mediaInfo");
                 if ($info.length) {
                     const mime = data.type ? `<br><b>MIME:</b>  ${data.type}` : "";

@@ -1364,6 +1364,56 @@
     return (state.mode || "random") === "random" && state.feedSource !== "search";
   }
 
+  function isSeriesFeedMode() {
+    return (state.mode || "") === "series" && state.feedSource !== "search";
+  }
+
+  function excludeSeriesIds() {
+    const s = new Set();
+    for (const it of state.items || []) {
+      if (it && it.series_id != null) s.add(Number(it.series_id));
+    }
+    return [...s].filter((n) => Number.isFinite(n));
+  }
+
+  const _seriesExpanding = new Set();
+  async function expandSeriesIfNeeded(item) {
+    if (!isSeriesFeedMode() || !item || item.series_id == null) return false;
+    const sid = Number(item.series_id);
+    const same = (state.items || []).filter((x) => x && Number(x.series_id) === sid);
+    if (same.length > 1) return false;
+    if (_seriesExpanding.has(sid)) return false;
+    _seriesExpanding.add(sid);
+    try {
+      const data = await api(`/api/series/${sid}`);
+      const eps = data.episodes || [];
+      if (eps.length < 2) return false;
+      const idx = state.items.findIndex((x) => x && Number(x.id) === Number(item.id));
+      if (idx < 0) return false;
+      const before = state.items.slice(0, idx);
+      const after = state.items.slice(idx + 1);
+      state.items = [...before, ...eps, ...after];
+      const resumeId = data.current_media_id || item.id;
+      let ni = state.items.findIndex((x) => Number(x.id) === Number(resumeId));
+      if (ni < 0) ni = idx;
+      state.feedIndex = ni;
+      renderFeed();
+      requestAnimationFrame(() => {
+        const cur = state.items[ni];
+        const id = cur && cur.id;
+        const slide = document.querySelector(`.snap-slide[data-id="${id}"]`);
+        if (slide) slide.scrollIntoView({ block: "nearest", behavior: "auto" });
+        kickFeedAutoplay(id);
+      });
+      return true;
+    } catch (e) {
+      console.debug("expand series", e);
+      return false;
+    } finally {
+      _seriesExpanding.delete(sid);
+    }
+  }
+
   function loadRandomSeen() {
     try {
       const raw = localStorage.getItem(randomSeenKey);
@@ -1798,7 +1848,13 @@
   function syncFeedModeSelects() {
     // Search playlist uses a virtual mode label; not persisted to localStorage
     const v =
-      state.feedSource === "search" ? "search" : state.mode && state.mode !== "search" ? state.mode : "random";
+      state.view === "series"
+        ? "series"
+        : state.feedSource === "search"
+          ? "search"
+          : state.mode && state.mode !== "search"
+            ? state.mode
+            : "random";
     for (const sel of feedModeSelects()) {
       // ensure option exists (older cached HTML may lack it)
       if (v === "search" && ![...sel.options].some((o) => o.value === "search")) {
@@ -2216,6 +2272,21 @@
       return fetchSearchFeedBatch({ limit, exclude });
     }
     const ex = exclude != null ? exclude : excludeFeedIds();
+    if (isSeriesFeedMode()) {
+      const data = await api("/api/feed", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          mode: "series",
+          limit,
+          include_restricted: !!state.includeRestricted,
+          include_images: !!state.includeImages,
+          exclude_ids: excludeSeriesIds(),
+          ...excludePushTagsBody(),
+        }),
+      });
+      return data.items || [];
+    }
     if (isRandomFeedMode()) {
       const data = await api("/api/feed", {
         method: "POST",
@@ -2491,7 +2562,11 @@
           <div class="hud">
             <div class="meta">
               <div class="type">${typeChip(item)}</div>
-              <div class="title">${escapeHtml(item.title || item.source_url || "未命名")}</div>
+              <div class="title">${escapeHtml(
+                item.series_id && item.episode_index && item.episode_count
+                  ? `${item.series_title || item.title || "剧集"} · ${item.episode_index}/${item.episode_count}`
+                  : item.title || item.source_url || "未命名"
+              )}</div>
               <div class="stats">
                 <span>${ICO.heart} ${item.like_count || 0}</span>
                 <span>${ICO.eye} ${item.view_count || 0}</span>
@@ -2733,6 +2808,10 @@
       syncFeedModeSelects();
       return;
     }
+    if (next === "series") {
+      await openSeriesPicker();
+      return;
+    }
     if (next === "similar") {
       // dropdown "相似": media-based if no active tag focus
       if (state.similarTag) {
@@ -2750,6 +2829,7 @@
       recommend: "推荐",
       recent: "最新",
       liked: "已喜欢",
+      series: "剧集",
     };
     await softModeSwitch(next, {
       toast: `${labels[next] || next} · 下一条起生效`,
@@ -3974,6 +4054,7 @@
     state.dwellStart = Date.now();
     const item = state.items[state.feedIndex];
     if (!item) return;
+    if (await expandSeriesIfNeeded(item)) return;
     rememberFeedSeen(item.id);
     if (!state.viewedIds.has(item.id)) {
       state.viewedIds.add(item.id);
@@ -6618,6 +6699,10 @@
     if (name === "search" && state.view !== "search") {
       state.prevView = state.view && state.view !== "search" ? state.view : "feed";
     }
+    if (name === "series" && state.view !== "series") {
+      state.prevView =
+        state.view && state.view !== "series" && state.view !== "search" ? state.view : "feed";
+    }
     // leaving feed: stop audio + unlock any residual viewport freeze so page can scroll
     if (state.view === "feed" && name !== "feed") {
       try {
@@ -6656,7 +6741,7 @@
       } catch (_) {}
     }
     state.view = name;
-    document.body.classList.toggle("search-open", name === "search");
+    document.body.classList.toggle("search-open", name === "search" || name === "series");
     // Feed locks viewport; grid/admin/search need document scroll (standalone + freeze)
     const scrollPage = name !== "feed";
     document.body.classList.toggle("is-scroll-page", scrollPage);
@@ -6691,7 +6776,7 @@
     document.querySelectorAll(".topnav .nav").forEach((b) => {
       b.classList.toggle("active", b.dataset.view === name);
     });
-    ["feed", "grid", "admin", "search"].forEach((v) => {
+    ["feed", "grid", "admin", "search", "series"].forEach((v) => {
       const el = document.getElementById(`view-${v}`);
       if (el) el.classList.toggle("hide", v !== name);
     });
@@ -6715,6 +6800,10 @@
       } catch (e) {
         console.error("onEnterSearchPage", e);
       }
+    } else if (name === "series") {
+      try {
+        syncFeedModeSelects();
+      } catch (_) {}
     } else if (name === "feed") {
       // Leaving feed pauses the shared player; pin-only scroll sync does not resume.
       // Force re-activate the committed slide (respects userPaused).
@@ -6870,6 +6959,123 @@
   function closeSearchPage() {
     const back = state.prevView && state.prevView !== "search" ? state.prevView : "feed";
     setView(back);
+  }
+
+  async function openSeriesPicker() {
+    try {
+      clearSearchFeedSource();
+      state.mode = "series";
+      localStorage.setItem(feedModeKey, "series");
+      if (state.view !== "series") state.prevView = state.view || "feed";
+      setView("series");
+      syncFeedModeSelects();
+      await loadSeriesPicker();
+    } catch (e) {
+      console.error("openSeriesPicker", e);
+      showToast("打开剧集列表失败");
+    }
+  }
+
+  function closeSeriesPicker() {
+    const back = state.prevView && state.prevView !== "series" ? state.prevView : "feed";
+    setView(back);
+    syncFeedModeSelects();
+  }
+
+  async function loadSeriesPicker() {
+    const grid = $("#seriesGrid");
+    const empty = $("#seriesEmpty");
+    const meta = $("#seriesPickerMeta");
+    if (meta) meta.textContent = "加载剧集…";
+    if (grid) grid.innerHTML = "";
+    empty?.classList.add("hide");
+    const params = new URLSearchParams({
+      limit: "100",
+      offset: "0",
+      include_restricted: state.includeRestricted ? "true" : "false",
+    });
+    applyExcludePushTags(params);
+    const data = await api(`/api/series?${params}`);
+    const items = data.items || [];
+    state.seriesPickerItems = items;
+    if (meta) {
+      meta.textContent = items.length ? `剧集 · ${data.total || items.length} 部` : "剧集";
+    }
+    renderSeriesPicker();
+    empty?.classList.toggle("hide", items.length > 0);
+  }
+
+  function renderSeriesPicker() {
+    const grid = $("#seriesGrid");
+    if (!grid) return;
+    const items = state.seriesPickerItems || [];
+    stopAllGridPreviews();
+    grid.innerHTML = items
+      .map((s) => {
+        const cover = s.cover || {};
+        const motion = isGridMotionType(cover.media_type) ? " cell-has-motion" : "";
+        const ep = Number(s.episode_count) || 0;
+        const cur = Number(s.current_episode_index) || 1;
+        const title = s.title || cover.title || `剧集 #${s.id}`;
+        const tag = `剧集 · ${ep} 集 · 看到第 ${Math.min(cur, ep || cur)} 集`;
+        const tip = `${title} · ${tag}`;
+        const thumb = cover.id ? thumbUrl(cover) : "";
+        const file = cover.id ? fileUrl(cover) : "";
+        return `<div class="cell${motion}" data-series-id="${s.id}" title="${escapeHtml(tip)}">
+          <img class="cell-thumb" alt="" data-thumb="${escapeHtml(thumb)}" data-file="${escapeHtml(file)}" data-type="${escapeHtml(cover.media_type || "video")}" />
+          ${isGridMotionType(cover.media_type) ? `<span class="cell-play-hint" aria-hidden="true">▶</span>` : ""}
+          <span class="cell-series-title">${escapeHtml(title)}</span>
+          <span class="tag">${escapeHtml(tag)}</span>
+        </div>`;
+      })
+      .join("");
+    grid.querySelectorAll("img.cell-thumb").forEach((img) => loadGridStaticThumb(img));
+    grid.querySelectorAll(".cell").forEach((cell) => {
+      bindGridHoverPreview(cell);
+      cell.addEventListener("click", () => {
+        stopAllGridPreviews();
+        const sid = Number(cell.dataset.seriesId);
+        if (!sid) return;
+        openSeriesInFeed(sid);
+      });
+    });
+  }
+
+  async function openSeriesInFeed(seriesId) {
+    const data = await api(`/api/series/${Number(seriesId)}`);
+    const eps = (data.episodes || []).filter((x) => x && x.id != null);
+    if (!eps.length) {
+      showToast("该剧集没有可播放条目");
+      return;
+    }
+    clearSearchFeedSource();
+    state.mode = "series";
+    localStorage.setItem(feedModeKey, "series");
+    state.items = eps;
+    state.viewedIds = new Set();
+    const resumeId = Number(data.current_media_id);
+    let idx = eps.findIndex((x) => Number(x.id) === resumeId);
+    if (idx < 0) {
+      const ei = Math.max(1, Number(data.current_episode_index) || 1) - 1;
+      idx = Math.min(Math.max(0, ei), eps.length - 1);
+    }
+    state.feedIndex = idx;
+    commitFeedId(eps[idx].id, idx);
+    setView("feed");
+    renderFeed();
+    requestAnimationFrame(() => {
+      const slide = document.querySelector(`.snap-slide[data-id="${eps[idx].id}"]`);
+      if (slide) {
+        slide.scrollIntoView({ block: "nearest", behavior: "auto" });
+        activateFeedSlide(slide, { force: true });
+      }
+      kickFeedAutoplay(eps[idx].id);
+    });
+    showToast(
+      `${data.title || "剧集"} · ${idx + 1}/${eps.length}`
+    );
+    syncFeedModeSelects();
+    ensureFeedAhead(8, { force: true });
   }
 
   function readSearchSortFromUI() {
@@ -7283,6 +7489,12 @@
             e.preventDefault();
             e.stopPropagation();
             closeSearchPage();
+            return;
+          }
+          if (t.closest("#btnSeriesBack")) {
+            e.preventDefault();
+            e.stopPropagation();
+            closeSeriesPicker();
             return;
           }
           if (t.closest("#btnSearchSubmit")) {

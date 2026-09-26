@@ -1214,6 +1214,23 @@ const LMW = {
         });
     },
 
+    createSeries(body = {}) {
+        return this.request("/api/series", {
+            method: "POST",
+            headers: this.headers(true),
+            body: JSON.stringify({
+                ids: body.ids || [],
+                title: body.title || "",
+            }),
+        });
+    },
+
+    getSeries(id) {
+        return this.request(`/api/series/${Number(id)}`, {
+            headers: this.headers(false),
+        });
+    },
+
     deleteMedia(id) {
         return this.request(`/api/media/${id}`, {
             method: "DELETE",

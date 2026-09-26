@@ -5,10 +5,10 @@
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <title>服务器媒体管理 · LocalMediaWeb</title>
   <link rel="stylesheet" href="css/public.css" />
-  <link rel="stylesheet" href="css/lmw-media-manage.css?v=20260803reencode1" />
+  <link rel="stylesheet" href="css/lmw-media-manage.css?v=20260911previewMode" />
   <script src="js/init.js"></script>
   <script src="js/function.js"></script>
-  <script src="js/local-media-web.js?v=20260808previewToken"></script>
+  <script src="js/local-media-web.js?v=20260911series1"></script>
 </head>
 <body class="mm-body">
   <header class="mm-header">
@@ -21,6 +21,7 @@
         </div>
       </div>
       <div class="mm-header-actions">
+        <button type="button" id="btnSeriesPick" class="button2" title="按点击顺序把多条媒体标记为一部剧集">选择剧集</button>
         <button type="button" id="btnConventionScraper" class="button2" title="按约定链接自动打开页面、模拟浏览并入库">约定抓取器</button>
         <button type="button" id="btnOpenFeed" class="button2" title="在浏览器打开 LocalMediaWeb Feed">打开 Feed</button>
         <button type="button" id="btnRefresh" class="button2" title="刷新列表">刷新</button>
@@ -48,6 +49,11 @@
         <select id="mmSort" class="mm-select" title="排序">
           <option value="new">最新</option>
           <option value="old">最旧</option>
+        </select>
+        <select id="mmPreviewMode" class="mm-select" title="预览模式">
+          <option value="normal">普通</option>
+          <option value="large">大预览</option>
+          <option value="detail">详细信息</option>
         </select>
       </div>
     </div>
@@ -141,6 +147,6 @@
     </div>
   </div>
 
-  <script src="js/lmw-media-manage.js?v=20260808previewToken"></script>
+  <script src="js/lmw-media-manage.js?v=20260911previewMode"></script>
 </body>
 </html>

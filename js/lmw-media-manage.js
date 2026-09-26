@@ -26,6 +26,10 @@
             liked: "",
             sort: "new",
         },
+        seriesPick: false,
+        /** media ids in click order while picking a series */
+        seriesOrder: [],
+        previewMode: "normal",
     };
 
     const $ = (id) => document.getElementById(id);
@@ -108,9 +112,136 @@
         return (n / (1024 * 1024 * 1024)).toFixed(2) + " GB";
     }
 
+    function formatDuration(sec) {
+        const s = Math.max(0, Math.floor(Number(sec) || 0));
+        if (!s) return "";
+        const h = Math.floor(s / 3600);
+        const m = Math.floor((s % 3600) / 60);
+        const r = s % 60;
+        if (h > 0) {
+            return (
+                String(h).padStart(2, "0") +
+                ":" +
+                String(m).padStart(2, "0") +
+                ":" +
+                String(r).padStart(2, "0")
+            );
+        }
+        return String(m).padStart(2, "0") + ":" + String(r).padStart(2, "0");
+    }
+
+    function normalizePreviewMode(raw) {
+        const v = String(raw || "").toLowerCase();
+        if (v === "large" || v === "detail" || v === "normal") return v;
+        return "";
+    }
+
+    function resolvePreviewMode() {
+        const fromG = typeof G !== "undefined" ? normalizePreviewMode(G.lmwPreviewMode) : "";
+        if (fromG) return fromG;
+        if (typeof G !== "undefined" && G.lmwLargePreview) return "large";
+        return "normal";
+    }
+
+    function applyPreviewMode(mode) {
+        const m = normalizePreviewMode(mode) || "normal";
+        state.previewMode = m;
+        const grid = $("mmGrid");
+        if (grid) {
+            grid.classList.toggle("mm-grid-large", m === "large");
+            grid.classList.toggle("mm-grid-detail", m === "detail");
+        }
+        document.body.classList.toggle("mm-large-preview", m === "large");
+        document.body.classList.toggle("mm-detail-preview", m === "detail");
+        const sel = $("mmPreviewMode");
+        if (sel && sel.value !== m) sel.value = m;
+    }
+
+    function persistPreviewMode(mode) {
+        const m = normalizePreviewMode(mode) || "normal";
+        if (typeof G !== "undefined") {
+            G.lmwPreviewMode = m;
+            G.lmwLargePreview = m === "large";
+        }
+        try {
+            chrome.storage.sync.set({ lmwPreviewMode: m, lmwLargePreview: m === "large" });
+            chrome.storage.local.set({ lmwPreviewMode: m, lmwLargePreview: m === "large" });
+        } catch (e) { /* ignore */ }
+    }
+
     function setStatus(msg) {
         const el = $("mmStatus");
         if (el) el.textContent = msg || "";
+    }
+
+    function seriesOrdOf(id) {
+        const i = state.seriesOrder.indexOf(Number(id));
+        return i >= 0 ? i + 1 : 0;
+    }
+
+    function updateSeriesPickUi() {
+        const btn = $("btnSeriesPick");
+        if (btn) {
+            btn.textContent = state.seriesPick
+                ? `提交剧集（${state.seriesOrder.length}）`
+                : "选择剧集";
+            btn.classList.toggle("primary", !!state.seriesPick);
+        }
+        document.body.classList.toggle("mm-series-picking", !!state.seriesPick);
+        $("mmGrid")
+            .querySelectorAll(".mm-card")
+            .forEach((card) => {
+                const id = Number(card.dataset.id);
+                const ord = seriesOrdOf(id);
+                card.classList.toggle("mm-series-on", ord > 0);
+                let badge = card.querySelector(".mm-series-ord");
+                if (ord > 0) {
+                    if (!badge) {
+                        badge = document.createElement("span");
+                        badge.className = "mm-series-ord";
+                        card.appendChild(badge);
+                    }
+                    badge.textContent = String(ord);
+                } else if (badge) {
+                    badge.remove();
+                }
+            });
+    }
+
+    function toggleSeriesPickItem(id) {
+        id = Number(id);
+        if (!id) return;
+        const i = state.seriesOrder.indexOf(id);
+        if (i >= 0) state.seriesOrder.splice(i, 1);
+        else state.seriesOrder.push(id);
+        updateSeriesPickUi();
+        setStatus(
+            state.seriesOrder.length
+                ? `剧集顺序：${state.seriesOrder.map((x, n) => `${n + 1}#${x}`).join(" → ")}`
+                : "点击条目按顺序加入剧集"
+        );
+    }
+
+    async function submitSeries() {
+        const ids = state.seriesOrder.slice();
+        if (ids.length < 2) {
+            setStatus("至少选择 2 条再提交剧集");
+            return;
+        }
+        const first = state.items.find((x) => x.id === ids[0]);
+        const defTitle = (first && first.title) || `剧集 #${ids[0]}`;
+        const title = window.prompt("剧集名称（可空）", defTitle);
+        if (title === null) return;
+        try {
+            const s = await LMW.createSeries({ ids, title: (title || "").trim() });
+            setStatus(`已创建剧集「${s.title}」· ${s.episode_count} 集`);
+            state.seriesPick = false;
+            state.seriesOrder = [];
+            updateSeriesPickUi();
+            await loadList({ reset: true });
+        } catch (e) {
+            setStatus("创建剧集失败：" + (e.message || e));
+        }
     }
 
     function updateSelUi() {
@@ -124,6 +255,7 @@
                 const cb = card.querySelector(".mm-card-check");
                 if (cb) cb.checked = on;
             });
+        if (state.seriesPick) updateSeriesPickUi();
     }
 
     function updateCountUi() {
@@ -343,7 +475,18 @@
         const liked = m.liked ? "♥ " : "";
         const restricted = isRestricted(m);
         const mtype = m.media_type || "";
-        return `<article class="mm-card${restricted ? " is-restricted" : ""}" data-id="${m.id}" data-type="${escapeHtml(mtype)}">
+        const inSeries = m.series_id ? " is-in-series" : "";
+        const dur = formatDuration(m.duration_sec);
+        const techBits = [
+            m.mime || "",
+            dur ? "时长 " + dur : "",
+            m.file_size ? formatSize(m.file_size) : "",
+            m.series_id
+                ? `剧集 ${m.episode_index || "?"}/${m.episode_count || "?"}`
+                : "",
+        ].filter(Boolean);
+        const tech = techBits.join(" · ");
+        return `<article class="mm-card${restricted ? " is-restricted" : ""}${inSeries}" data-id="${m.id}" data-type="${escapeHtml(mtype)}">
   <input type="checkbox" class="mm-card-check" data-id="${m.id}" aria-label="选择 #${m.id}" title="点击选择；Shift+点击连续多选" />
   <div class="mm-thumb-wrap" data-preview="${m.id}" title="预览">
     <div class="mm-thumb-ph" data-thumb-ph="${m.id}">${escapeHtml(typeLabel(mtype))}</div>
@@ -352,7 +495,8 @@
   </div>
   <div class="mm-card-body">
     <div class="mm-card-title" title="${escapeHtml(m.title || "")}">${escapeHtml(m.title || "(无标题)")}</div>
-    <div class="mm-card-meta">${liked}#${m.id} · ${escapeHtml(typeLabel(mtype))} · ${formatSize(m.file_size)}</div>
+    <div class="mm-card-meta">${liked}#${m.id} · ${escapeHtml(typeLabel(mtype))} · ${formatSize(m.file_size)}${dur ? " · " + dur : ""}</div>
+    <div class="mm-card-detail-tech">${escapeHtml(tech || "无更多技术信息")}</div>
     <div class="mm-card-tags">${escapeHtml(tags || "无标签")}</div>
     <label class="mm-card-restricted" title="切换「限制级」标签">
       <input type="checkbox" class="mm-restricted-toggle" data-id="${m.id}" ${restricted ? "checked" : ""} />
@@ -374,6 +518,7 @@
 
     function renderGrid(append) {
         const grid = $("mmGrid");
+        applyPreviewMode(state.previewMode);
         if (!append) {
             grid.innerHTML = "";
             if (!state.items.length) {
@@ -1097,6 +1242,19 @@
     /* ---------- bind ---------- */
 
     function bind() {
+        const btnSeries = $("btnSeriesPick");
+        if (btnSeries) {
+            btnSeries.onclick = () => {
+                if (!state.seriesPick) {
+                    state.seriesPick = true;
+                    state.seriesOrder = [];
+                    updateSeriesPickUi();
+                    setStatus("点击条目按顺序加入剧集，再点「提交剧集」");
+                    return;
+                }
+                submitSeries();
+            };
+        }
         $("btnRefresh").onclick = () => {
             checkHealth();
             loadTagOptions();
@@ -1132,6 +1290,15 @@
         ["mmType", "mmTag", "mmLiked", "mmSort"].forEach((id) => {
             $(id).addEventListener("change", () => loadList({ reset: true }));
         });
+        const previewSel = $("mmPreviewMode");
+        if (previewSel) {
+            applyPreviewMode(resolvePreviewMode());
+            previewSel.addEventListener("change", () => {
+                const m = normalizePreviewMode(previewSel.value) || "normal";
+                applyPreviewMode(m);
+                persistPreviewMode(m);
+            });
+        }
 
         $("btnSelPage").onclick = () => {
             const ids = visibleCardIds();
@@ -1222,6 +1389,15 @@
 
         $("mmGrid").addEventListener("click", (e) => {
             const t = e.target;
+            if (state.seriesPick) {
+                const card = t.closest(".mm-card");
+                if (card && !t.closest("[data-act]")) {
+                    e.preventDefault();
+                    e.stopPropagation();
+                    toggleSeriesPickItem(Number(card.dataset.id));
+                    return;
+                }
+            }
             // Checkbox: normal toggle, or Shift+click continuous range from last anchor
             if (t.classList.contains("mm-card-check")) {
                 const id = Number(t.dataset.id);
@@ -1332,6 +1508,7 @@
 
     async function main() {
         await waitGReady();
+        applyPreviewMode(resolvePreviewMode());
         bind();
         await checkHealth();
         await loadTagOptions();

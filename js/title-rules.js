@@ -143,13 +143,39 @@ var TitleRules = (function () {
         return best;
     }
 
+    function isDumpStem(base) {
+        const b = String(base || "");
+        if (!b || b === "NULL") return true;
+        if (/[\u4e00-\u9fff]/.test(b) || /\s/.test(b)) return false;
+        if (/^\d{6,}([_-][a-z0-9]+)*(-[0-9]+)+$/i.test(b)) return true;
+        if (/^\d{6,}(-\d+){1,6}$/.test(b)) return true;
+        if (/^[0-9a-f]{8,}([-_][0-9a-f]+)*$/i.test(b)) return true;
+        return false;
+    }
+
     function isWeak(t, docTitle) {
         const s = String(t || "").replace(/\s+/g, " ").trim();
         if (!s || s === "NULL") return true;
         if (docTitle && s === String(docTitle).replace(/\s+/g, " ").trim()) return true;
         if (/^https?:\/\//i.test(s)) return true;
-        if (/\.(mp4|m3u8|mpd|webm|m4a|ts)(\?|#|$)/i.test(s)) return true;
+        const extRe = /\.(mp4|m3u8|mpd|webm|m4a|m4s|ts)(\?|#|$)/i;
+        const stem = s.replace(extRe, "");
+        const base = stem.replace(/^.*[/\\]/, "");
+        if (isDumpStem(base)) return true;
+        if (extRe.test(s) && (/^https?:\/\//i.test(base) || !base)) return true;
         return false;
+    }
+
+    function dbg(tag, obj) {
+        try {
+            const row = Object.assign({ t: Date.now(), tag: String(tag || "") }, obj || {});
+            console.warn("[CC-title]", row);
+            chrome.storage.local.get("_ccTitleDbg", (st) => {
+                const arr = Array.isArray(st && st._ccTitleDbg) ? st._ccTitleDbg.slice() : [];
+                arr.push(row);
+                chrome.storage.local.set({ _ccTitleDbg: arr.slice(-40) });
+            });
+        } catch (_) {}
     }
 
     /** selector beats generic og/jsonld/h1/document */
@@ -165,11 +191,56 @@ var TitleRules = (function () {
     function PAGE_TITLE_FN(opts) {
         const selector = (opts && opts.selector) || "";
         const regexStr = (opts && opts.regex) || "";
+        const hintCid = String((opts && opts.hintCid) || "").trim();
         const textOf = (el) => {
             if (!el) return "";
             const c = el.getAttribute && (el.getAttribute("content") || el.getAttribute("title"));
             if (c && String(c).trim()) return String(c).replace(/\s+/g, " ").trim();
             return String(el.textContent || el.innerText || "").replace(/\s+/g, " ").trim();
+        };
+        const readOg = () => {
+            const n =
+                document.querySelector('meta[property="og:title"]') ||
+                document.querySelector('meta[name="twitter:title"]') ||
+                document.querySelector('meta[name="og:title"]');
+            return n && n.getAttribute("content")
+                ? String(n.getAttribute("content")).replace(/\s+/g, " ").trim()
+                : "";
+        };
+        const isThinTitle = (t) => {
+            const s = String(t || "").trim();
+            if (!s) return true;
+            if (/^P?\d{1,4}P?$/i.test(s)) return true;
+            if (s.length <= 4) return true;
+            return false;
+        };
+        const expandThin = (el, t) => {
+            let best = String(t || "").trim();
+            const attr = (n) => {
+                if (!n || !n.getAttribute) return "";
+                return String(n.getAttribute("title") || n.getAttribute("aria-label") || "")
+                    .replace(/\s+/g, " ")
+                    .trim();
+            };
+            let n = el;
+            let depth = 0;
+            while (n && n !== document && depth < 12) {
+                const a = attr(n);
+                if (a && a.length > best.length) best = a;
+                const cls = n.className != null ? String(n.className) : "";
+                if (/\b(video-pod__item|page-item|pod-item)\b/.test(cls)) {
+                    const box = n.querySelector && n.querySelector(".title");
+                    const bt = textOf(box);
+                    if (bt && bt.length > best.length) best = bt;
+                    break;
+                }
+                n = n.parentElement;
+                depth++;
+            }
+            if (!isThinTitle(best)) return best;
+            const og = readOg();
+            if (og && best && og.indexOf(best) < 0) return (best + " " + og).replace(/\s+/g, " ").trim();
+            return og || best;
         };
         const fromJsonLd = () => {
             try {
@@ -218,6 +289,43 @@ var TitleRules = (function () {
                 return "";
             }
         })();
+        const pagePart = (() => {
+            try {
+                const p = new URL(location.href).searchParams.get("p");
+                return p && /^\d+$/.test(p) ? p : "";
+            } catch (_) {
+                return "";
+            }
+        })();
+        const hasActiveClass = (el) => {
+            let n = el;
+            let depth = 0;
+            while (n && n !== document && depth < 14) {
+                const c = n.className != null ? String(n.className) : "";
+                if (/\b(active|current|selected)\b/i.test(c)) return true;
+                n = n.parentElement;
+                depth++;
+            }
+            return false;
+        };
+        const partAttrMatch = (el, part) => {
+            if (!el || !part) return false;
+            let n = el;
+            let depth = 0;
+            while (n && n !== document && depth < 16) {
+                if (n.getAttribute) {
+                    const keys = ["data-index", "data-p", "data-page", "data-part", "p"];
+                    for (let i = 0; i < keys.length; i++) {
+                        const v = n.getAttribute(keys[i]);
+                        if (v == null || v === "") continue;
+                        if (String(v) === part || String(Number(v) + 1) === part) return true;
+                    }
+                }
+                n = n.parentElement;
+                depth++;
+            }
+            return false;
+        };
         const ancestorHasId = (el, id) => {
             if (!el || !id) return false;
             let n = el;
@@ -274,6 +382,19 @@ var TitleRules = (function () {
                     if (ancestorHasId(found[i], pageItemId) && textOf(found[i])) return found[i];
                 }
             }
+            if (found.length > 1) {
+                if (pagePart) {
+                    for (let i = found.length - 1; i >= 0; i--) {
+                        if (partAttrMatch(found[i], pagePart) && textOf(found[i])) return found[i];
+                    }
+                }
+                for (let i = found.length - 1; i >= 0; i--) {
+                    if (hasActiveClass(found[i]) && isShown(found[i]) && textOf(found[i])) return found[i];
+                }
+                for (let i = found.length - 1; i >= 0; i--) {
+                    if (hasActiveClass(found[i]) && textOf(found[i])) return found[i];
+                }
+            }
             let best = null;
             let bestZ = -1;
             let bestI = -1;
@@ -303,11 +424,16 @@ var TitleRules = (function () {
                 const alt = t.replace(/#([A-Za-z_][\w-]*)/g, '[id="$1"]');
                 if (alt && alt !== t && out.indexOf(alt) < 0) out.push(alt);
             };
-            push(s);
-            push(s.replace(/:nth-(?:child|of-type)\(\d+\)/gi, ""));
-            push(
-                s.replace(/:nth-(?:child|of-type)\(\d+\)/gi, "").replace(/\.[A-Z][A-Za-z0-9_-]{4,}\b/g, "")
-            );
+            const strippedNth = s.replace(/:nth-(?:child|of-type)\(\d+\)/gi, "");
+            const playlist = /\.active\b|\.page-item\b|\.video-pod\b/i.test(s);
+            if (playlist && strippedNth !== s) {
+                push(strippedNth);
+                push(s);
+            } else {
+                push(s);
+                push(strippedNth);
+            }
+            push(strippedNth.replace(/\.[A-Z][A-Za-z0-9_-]{4,}\b/g, ""));
             const parts = s.split(/\s*>\s*/);
             if (parts.length > 1) {
                 for (let n = parts.length - 1; n >= 1; n--) {
@@ -318,32 +444,101 @@ var TitleRules = (function () {
             }
             return out;
         };
+        const collectPages = () => {
+            const pages = [];
+            const add = (arr) => {
+                if (!arr || !arr.length) return;
+                for (let i = 0; i < arr.length; i++) {
+                    const x = arr[i];
+                    if (!x || typeof x !== "object") continue;
+                    const cid = x.cid != null ? String(x.cid) : "";
+                    const part = String(x.part || x.title || x.name || "").trim();
+                    if (cid || part) pages.push({ cid, part });
+                }
+            };
+            const scan = (obj, depth) => {
+                if (!obj || typeof obj !== "object" || depth > 5) return;
+                if (Array.isArray(obj)) {
+                    if (obj.length && obj[0] && typeof obj[0] === "object" && obj[0].cid != null) add(obj);
+                    return;
+                }
+                if (obj.pages) add(obj.pages);
+                if (obj.videoData) scan(obj.videoData, depth + 1);
+                if (obj.videoInfo) scan(obj.videoInfo, depth + 1);
+                if (obj.mediaInfo) scan(obj.mediaInfo, depth + 1);
+                if (obj.props) scan(obj.props, depth + 1);
+                if (obj.pageProps) scan(obj.pageProps, depth + 1);
+            };
+            try {
+                scan(window.__INITIAL_STATE__, 0);
+            } catch (_) {}
+            try {
+                scan(window.__NEXT_DATA__, 0);
+            } catch (_) {}
+            return pages;
+        };
+        const titleFromHint = (cid) => {
+            if (!cid) return "";
+            const pages = collectPages();
+            for (let i = 0; i < pages.length; i++) {
+                if (pages[i].cid === cid && pages[i].part) return pages[i].part;
+            }
+            const nodes = document.querySelectorAll(
+                ".video-pod__item, .page-item, [data-cid], [data-id]"
+            );
+            for (let i = 0; i < nodes.length; i++) {
+                const el = nodes[i];
+                let blob = "";
+                try {
+                    blob = String(
+                        (el.getAttribute("data-cid") || "") +
+                            " " +
+                            (el.getAttribute("data-id") || "") +
+                            " " +
+                            (el.getAttribute("data-key") || "") +
+                            " " +
+                            (el.outerHTML || "").slice(0, 800)
+                    );
+                } catch (_) {
+                    blob = "";
+                }
+                if (blob.indexOf(cid) < 0) continue;
+                let t =
+                    textOf(el.querySelector && el.querySelector(".title, .title-txt")) || textOf(el);
+                if (el && isThinTitle(t)) t = expandThin(el, t) || t;
+                if (t) return t;
+            }
+            return "";
+        };
         let source = "";
         let title = "";
-        if (selector) {
+        if (hintCid) {
+            const hinted = titleFromHint(hintCid);
+            if (hinted) {
+                title = hinted;
+                source = "selector";
+            }
+        }
+        if (selector && (!title || isThinTitle(title))) {
             try {
                 const cands = selectorCandidates(selector);
                 for (let i = 0; i < cands.length; i++) {
-                    title = textOf(queryDeep(cands[i]));
-                    if (title) {
+                    const el = queryDeep(cands[i]);
+                    let t = textOf(el);
+                    if (!t) continue;
+                    if (el && isThinTitle(t)) t = expandThin(el, t) || t;
+                    if (!title || (isThinTitle(title) && !isThinTitle(t)) || t.length > title.length) {
+                        title = t;
                         source = "selector";
-                        break;
                     }
+                    if (title && !isThinTitle(title)) break;
                 }
             } catch (_) {
                 source = "selector-error";
             }
         }
         if (!title) {
-            title =
-                (document.querySelector('meta[property="og:title"]') &&
-                    document.querySelector('meta[property="og:title"]').getAttribute("content")) ||
-                (document.querySelector('meta[name="twitter:title"]') &&
-                    document.querySelector('meta[name="twitter:title"]').getAttribute("content")) ||
-                (document.querySelector('meta[name="og:title"]') &&
-                    document.querySelector('meta[name="og:title"]').getAttribute("content")) ||
-                "";
-            title = String(title).replace(/\s+/g, " ").trim();
+            title = readOg();
             if (title) source = "og";
         }
         if (!title) {
@@ -397,7 +592,13 @@ var TitleRules = (function () {
         const results = await chrome.scripting.executeScript({
             target: { tabId: tabId, allFrames: true },
             func: PAGE_TITLE_FN,
-            args: [{ selector: (opts && opts.selector) || "", regex: (opts && opts.regex) || "" }],
+            args: [
+                {
+                    selector: (opts && opts.selector) || "",
+                    regex: (opts && opts.regex) || "",
+                    hintCid: (opts && opts.hintCid) || "",
+                },
+            ],
         });
         return pickExtract(
             (results || []).map((r) => r && r.result),
@@ -415,23 +616,36 @@ var TitleRules = (function () {
         } catch (_) {}
     }
 
-    async function resolveForTab(tabId, webInfo, extraUrls) {
+    function cidFromMedia(name, url) {
+        const s = String(name || "") + " " + String(url || "");
+        const m = s.match(/(\d{6,})(?:_nb\d+)?-\d-\d{4,5}/i);
+        return m ? m[1] : "";
+    }
+
+    function cacheKey(tabId, pageUrl, hintCid) {
+        return String(tabId) + "\t" + String(hintCid || "") + "\t" + String(pageUrl || "");
+    }
+
+    async function resolveForTab(tabId, webInfo, extraUrls, hintCid) {
         await hydrateRules();
         let pageUrl = (webInfo && webInfo.url) || "";
+        hintCid = String(hintCid || (webInfo && webInfo.hintCid) || "").trim();
         if (tabId) {
             try {
                 const tab = await chrome.tabs.get(tabId);
                 if (tab && tab.url) {
-                    if (!pageUrl || /modal_id=|aweme_id=/.test(tab.url)) pageUrl = tab.url;
+                    pageUrl = tab.url;
                     webInfo = webInfo || tab;
                 }
             } catch (_) {}
         }
-        const cached = cache.get(tabId);
+        const ck = cacheKey(tabId, pageUrl, hintCid);
+        const cached = cache.get(ck) || (!hintCid && cache.get(tabId));
         const rulePeek = matchRule(pageUrl, extraUrls);
         if (
             cached &&
             cached.pageUrl === pageUrl &&
+            cached.hintCid === hintCid &&
             cached.title &&
             (!rulePeek || cached.source === "selector")
         ) {
@@ -449,6 +663,7 @@ var TitleRules = (function () {
                 selector: (rule && rule.selector) || "",
                 regex: (rule && rule.regex) || "",
                 pageUrl: pageUrl,
+                hintCid: hintCid,
             });
         } catch (e) {
             picked.title = (webInfo && webInfo.title) || "";
@@ -456,14 +671,41 @@ var TitleRules = (function () {
         }
         if (rule) picked.ruleHost = rule.host;
         if (rule) picked.rulePath = rule.path;
-        if (!rule || picked.source === "selector") cache.set(tabId, picked);
-        else cache.delete(tabId);
+        picked.hintCid = hintCid;
+        if (!rule || picked.source === "selector") {
+            cache.set(ck, picked);
+            if (!hintCid) cache.set(tabId, picked);
+        } else {
+            cache.delete(ck);
+            if (!hintCid) cache.delete(tabId);
+        }
         return picked;
     }
 
     function invalidate(tabId) {
-        if (tabId == null) cache.clear();
-        else cache.delete(tabId);
+        if (tabId == null) {
+            cache.clear();
+            return;
+        }
+        cache.delete(tabId);
+        const prefix = String(tabId) + "\t";
+        for (const k of Array.from(cache.keys())) {
+            if (String(k).indexOf(prefix) === 0) cache.delete(k);
+        }
+    }
+
+    function dumpQuality(name) {
+        const b = String(name || "").replace(/\.(mp4|m3u8|mpd|webm|m4a|m4s|ts)(\?|#|$)/i, "");
+        const m = b.match(/-(\d{4,5})$/);
+        return m ? m[1] : "";
+    }
+
+    function titledFileName(title, origName, ext) {
+        let base = String(title || "").replace(/\s+/g, " ").trim() || "media";
+        const q = dumpQuality(origName);
+        if (q && base.indexOf(q) < 0) base += "-" + q;
+        const e = ext ? (String(ext).charAt(0) === "." ? ext : "." + ext) : "";
+        return base + e;
     }
 
     function applyToItems(list, resolved) {
@@ -497,5 +739,8 @@ var TitleRules = (function () {
         hydrateRules: hydrateRules,
         invalidate: invalidate,
         applyToItems: applyToItems,
+        titledFileName: titledFileName,
+        cidFromMedia: cidFromMedia,
+        dbg: dbg,
     };
 })();

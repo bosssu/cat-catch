@@ -1950,6 +1950,23 @@ button.chip.tag.is-active {
   border-radius: 999px;
   border: 1px solid rgba(255,255,255,0.08);
 }
+.grid .cell .cell-series-title {
+  position: absolute;
+  left: 8px;
+  right: 8px;
+  top: 8px;
+  z-index: 3;
+  font-size: 13px;
+  font-weight: 650;
+  line-height: 1.3;
+  color: #fff;
+  text-shadow: 0 1px 8px rgba(0, 0, 0, 0.85);
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+  pointer-events: none;
+}
 .grid .cell .cell-del {
   position: absolute;
   top: 6px;

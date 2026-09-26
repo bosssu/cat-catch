@@ -186,16 +186,20 @@
         const urlA = urlAffinityScore(v.url, a.url);
         const reqA = requestAffinityScore(v, a);
         const szA = sizeAffinityScore(v, a);
-        const soft = Math.max(0, Math.min(1, urlA * 0.55 + reqA * 0.3 + Math.max(0, szA) * 0.15 + Math.min(0, szA)));
+        // Soft is only a tiny tie-break; URL/request must not override duration
+        const soft = Math.max(
+            0,
+            Math.min(1, urlA * 0.28 + reqA * 0.12 + Math.max(0, szA) * 0.6 + Math.min(0, szA))
+        );
 
-        // Auto gate: strict duration alone, or slightly looser duration + relatedness
+        // Auto gate: duration-first. Soft may only rescue a very near miss.
         const AUTO_STRICT = 0.99;
-        const AUTO_SOFT = 0.975;
-        if (durationScore < AUTO_STRICT && !(durationScore >= AUTO_SOFT && soft >= 0.22)) {
+        const AUTO_SOFT = 0.985;
+        if (durationScore < AUTO_STRICT && !(durationScore >= AUTO_SOFT && soft >= 0.35)) {
             return null;
         }
 
-        const score = durationScore * 0.82 + soft * 0.18;
+        const score = durationScore * 0.96 + soft * 0.04;
         return {
             score,
             durationScore,
@@ -204,8 +208,14 @@
         };
     }
 
+    function libOrderOf(it, fallback) {
+        const n = Number(it && it._libOrder);
+        return Number.isFinite(n) ? n : fallback;
+    }
+
     /**
-     * Match videos/audios with duration+soft signals; skip ambiguous near-ties.
+     * Match by original duration+affinity score, but claim in library/grid order:
+     * seed = first unused video/audio (top-left), pick its best remaining counterpart.
      * @param {object[]} videos items with _durationSec and _key
      * @param {object[]} audios
      * @returns {{ pairs: object[], ambiguous: number, candidateCount: number, blockedVideos: number, blockedAudios: number }}
@@ -214,6 +224,13 @@
         const vOk = (videos || []).filter((v) => v && v._key && Number(v._durationSec) > 0.05);
         const aOk = (audios || []).filter((a) => a && a._key && Number(a._durationSec) > 0.05);
         const AMBIG_MARGIN = 0.0045;
+
+        vOk.forEach((v, i) => {
+            if (v._libOrder == null) v._libOrder = i;
+        });
+        aOk.forEach((a, i) => {
+            if (a._libOrder == null) a._libOrder = i;
+        });
 
         /** @type {{ v: object, a: object, score: number, durationScore: number, soft: number, delta: number }[]} */
         const candidates = [];
@@ -231,12 +248,6 @@
                 });
             }
         }
-        candidates.sort(
-            (x, y) =>
-                y.score - x.score ||
-                y.durationScore - x.durationScore ||
-                Math.abs(x.delta) - Math.abs(y.delta)
-        );
 
         /** @type {Map<string, typeof candidates>} */
         const byV = new Map();
@@ -248,47 +259,45 @@
             byV.get(c.v._key).push(c);
             byA.get(c.a._key).push(c);
         }
+        const sortDesc = (list) =>
+            list.sort(
+                (x, y) =>
+                    y.score - x.score ||
+                    y.durationScore - x.durationScore ||
+                    Math.abs(x.delta) - Math.abs(y.delta)
+            );
+        for (const list of byV.values()) sortDesc(list);
+        for (const list of byA.values()) sortDesc(list);
 
-        const blockedV = new Set();
-        const blockedA = new Set();
-        for (const [vk, list] of byV) {
-            if (list.length >= 2 && list[0].score - list[1].score < AMBIG_MARGIN) {
-                blockedV.add(vk);
-            }
-        }
-        for (const [ak, list] of byA) {
-            if (list.length >= 2 && list[0].score - list[1].score < AMBIG_MARGIN) {
-                blockedA.add(ak);
-            }
-        }
-
+        const vKeys = new Set(vOk.map((v) => v._key));
         const usedV = new Set();
         const usedA = new Set();
         const pairs = [];
-        let ambiguous = blockedV.size + blockedA.size;
+        let ambiguous = 0;
 
-        for (const c of candidates) {
-            const vk = c.v._key;
-            const ak = c.a._key;
-            if (usedV.has(vk) || usedA.has(ak)) continue;
-            if (blockedV.has(vk) || blockedA.has(ak)) continue;
+        const seeds = [...vOk, ...aOk].sort(
+            (x, y) => libOrderOf(x, 0) - libOrderOf(y, 0)
+        );
 
-            // Mutual near-best: reject if the other side clearly prefers someone else free
-            const aList = (byA.get(ak) || []).filter((x) => !usedV.has(x.v._key) && !blockedV.has(x.v._key));
-            if (aList.length && aList[0].v._key !== vk) {
-                if (aList[0].score - c.score >= AMBIG_MARGIN) continue;
+        for (const seed of seeds) {
+            if (usedV.has(seed._key) || usedA.has(seed._key)) continue;
+            const seedIsV = vKeys.has(seed._key);
+            const raw = seedIsV ? byV.get(seed._key) || [] : byA.get(seed._key) || [];
+            const list = raw.filter((c) =>
+                seedIsV ? !usedA.has(c.a._key) : !usedV.has(c.v._key)
+            );
+            if (!list.length) continue;
+            if (list.length >= 2 && list[0].score - list[1].score < AMBIG_MARGIN) {
+                ambiguous++;
+                continue;
             }
-            const vList = (byV.get(vk) || []).filter((x) => !usedA.has(x.a._key) && !blockedA.has(x.a._key));
-            if (vList.length && vList[0].a._key !== ak) {
-                if (vList[0].score - c.score >= AMBIG_MARGIN) continue;
-            }
-
-            usedV.add(vk);
-            usedA.add(ak);
+            const c = list[0];
+            usedV.add(c.v._key);
+            usedA.add(c.a._key);
             pairs.push({
                 source: "page",
-                video_key: vk,
-                audio_key: ak,
+                video_key: c.v._key,
+                audio_key: c.a._key,
                 video_item: c.v,
                 audio_item: c.a,
                 pair_index: pairs.length,
@@ -301,21 +310,12 @@
             });
         }
 
-        // Count unresolved blocked items that never paired (informational)
-        ambiguous = 0;
-        for (const vk of blockedV) {
-            if (!usedV.has(vk)) ambiguous++;
-        }
-        for (const ak of blockedA) {
-            if (!usedA.has(ak)) ambiguous++;
-        }
-
         return {
             pairs,
             ambiguous,
             candidateCount: candidates.length,
-            blockedVideos: blockedV.size,
-            blockedAudios: blockedA.size,
+            blockedVideos: 0,
+            blockedAudios: 0,
         };
     }
 
@@ -478,6 +478,9 @@
      * Detect duration-matched video+audio pairs in a pool (same algorithm as local-media).
      */
     async function detectPageAvPairs(pool, { onStatus } = {}) {
+        (pool || []).forEach((it, i) => {
+            if (it) it._libOrder = i;
+        });
         if (onStatus) onStatus("内容识别中…");
         const { classified } = await classifyPool(pool, { onStatus });
 

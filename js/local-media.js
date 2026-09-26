@@ -1649,39 +1649,57 @@
         if (typeof LMWAv !== "undefined" && LMWAv.matchVideoAudioPairs) {
             return LMWAv.matchVideoAudioPairs(videos, audios);
         }
-        // Minimal fallback: strict duration greedy (no soft signals)
+        // Fallback: same seed order + best duration match
         const vOk = (videos || []).filter((v) => v && v._key && Number(v._durationSec) > 0.05);
         const aOk = (audios || []).filter((a) => a && a._key && Number(a._durationSec) > 0.05);
-        const candidates = [];
-        for (const v of vOk) {
-            for (const a of aOk) {
-                const sc = durationMatchScore(v._durationSec, a._durationSec);
-                if (sc == null || sc < 0.99) continue;
-                candidates.push({ score: sc, delta: v._durationSec - a._durationSec, v, a });
-            }
-        }
-        candidates.sort((x, y) => y.score - x.score || Math.abs(x.delta) - Math.abs(y.delta));
+        vOk.forEach((v, i) => {
+            if (v._libOrder == null) v._libOrder = i;
+        });
+        aOk.forEach((a, i) => {
+            if (a._libOrder == null) a._libOrder = i;
+        });
         const usedV = new Set();
         const usedA = new Set();
         const pairs = [];
-        for (const c of candidates) {
-            if (usedV.has(c.v._key) || usedA.has(c.a._key)) continue;
-            usedV.add(c.v._key);
-            usedA.add(c.a._key);
+        let candidateCount = 0;
+        const vKeys = new Set(vOk.map((v) => v._key));
+        const seeds = [...vOk, ...aOk].sort(
+            (x, y) => Number(x._libOrder || 0) - Number(y._libOrder || 0)
+        );
+        for (const seed of seeds) {
+            if (usedV.has(seed._key) || usedA.has(seed._key)) continue;
+            const seedIsV = vKeys.has(seed._key);
+            let best = null;
+            const others = seedIsV ? aOk : vOk;
+            for (const other of others) {
+                const ok = seedIsV ? !usedA.has(other._key) : !usedV.has(other._key);
+                if (!ok) continue;
+                const v = seedIsV ? seed : other;
+                const a = seedIsV ? other : seed;
+                const sc = durationMatchScore(v._durationSec, a._durationSec);
+                if (sc == null || sc < 0.99) continue;
+                candidateCount++;
+                if (!best || sc > best.score) {
+                    best = { v, a, score: sc, delta: v._durationSec - a._durationSec };
+                }
+            }
+            if (!best) continue;
+            usedV.add(best.v._key);
+            usedA.add(best.a._key);
             pairs.push({
                 source: "page",
-                video_key: c.v._key,
-                audio_key: c.a._key,
-                video_item: c.v,
-                audio_item: c.a,
+                video_key: best.v._key,
+                audio_key: best.a._key,
+                video_item: best.v,
+                audio_item: best.a,
                 pair_index: pairs.length,
-                score: +c.score.toFixed(5),
-                delta_sec: c.delta,
-                video_duration: c.v._durationSec,
-                audio_duration: c.a._durationSec,
+                score: +best.score.toFixed(5),
+                delta_sec: best.delta,
+                video_duration: best.v._durationSec,
+                audio_duration: best.a._durationSec,
             });
         }
-        return { pairs, ambiguous: 0, candidateCount: candidates.length, blockedVideos: 0, blockedAudios: 0 };
+        return { pairs, ambiguous: 0, candidateCount, blockedVideos: 0, blockedAudios: 0 };
     }
 
     /**
@@ -1807,6 +1825,9 @@
     }
 
     async function detectPageAvPairs(pool) {
+        (pool || []).forEach((it, i) => {
+            if (it) it._libOrder = i;
+        });
         // Reclassify progressive items by content (not extension)
         const progressive = pool.filter((it) => {
             const t = mediaTypeOf(it);

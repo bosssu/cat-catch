@@ -16,7 +16,7 @@
   <link rel="icon" type="image/png" sizes="192x192" href="/icons/icon-192.png" />
   <link rel="icon" type="image/png" sizes="512x512" href="/icons/icon-512.png" />
   <title>LocalMediaWeb</title>
-  <link rel="stylesheet" href="/assets/app.css?v=20260824castms1" />
+  <link rel="stylesheet" href="/assets/app.css?v=20260911seriesPicker1" />
 </head>
 <body>
   <div id="app">
@@ -54,6 +54,7 @@
             <option value="recommend">推荐</option>
             <option value="recent">最新</option>
             <option value="liked">已喜欢</option>
+            <option value="series">剧集</option>
             <option value="search">搜索</option>
           </select>
         </label>
@@ -138,6 +139,22 @@
       </div>
     </section>
 
+    <section id="view-series" class="view hide">
+      <div class="search-page">
+        <div class="search-bar-row">
+          <button type="button" id="btnSeriesBack" class="nav-icon-btn" title="返回" aria-label="返回">
+            <svg class="ico" viewBox="0 0 24 24" aria-hidden="true"><path fill="currentColor" d="M20 11H7.83l5.59-5.59L12 4l-8 8 8 8 1.41-1.41L7.83 13H20v-2z"/></svg>
+          </button>
+          <div class="search-result-head" style="flex:1;border:0;padding:0;margin:0">
+            <span id="seriesPickerMeta" class="muted">剧集</span>
+            <span class="muted search-result-hint">每部一张卡片 · 点击进入按集播放</span>
+          </div>
+        </div>
+        <div id="seriesGrid" class="grid search-grid"></div>
+        <div id="seriesEmpty" class="search-empty hide muted">暂无剧集，请到「服务器媒体管理」把条目组成剧集</div>
+      </div>
+    </section>
+
     <section id="view-admin" class="view hide">
       <div class="page-head">
         <h1>管理</h1>
@@ -155,10 +172,11 @@
             <option value="recommend">推荐</option>
             <option value="recent">最新</option>
             <option value="liked">已喜欢</option>
+            <option value="series">剧集</option>
             <option value="search">搜索</option>
           </select>
         </label>
-        <p class="muted tip">与右上角一致：随机（默认）/ 相似 / 推荐 / 最新 / 已喜欢 / 搜索。搜索为虚拟模式，播放搜索结果时自动显示，不写入本机偏好。</p>
+        <p class="muted tip">与右上角一致：随机（默认）/ 相似 / 推荐 / 最新 / 已喜欢 / 剧集 / 搜索。剧集模式每部只列一条，点开后上划下滑按集数顺序。搜索为虚拟模式，播放搜索结果时自动显示，不写入本机偏好。</p>
         <label>访问 Token（可选）
           <input id="tokenInput" type="password" placeholder="X-LMW-Token" autocomplete="off" />
         </label>
@@ -304,6 +322,6 @@
     </div>
   </div>
   <script src="/assets/cast-media-session.js?v=20260824castms1"></script>
-  <script src="/assets/app.js?v=20260824castms1"></script>
+  <script src="/assets/app.js?v=20260911seriesPicker1"></script>
 </body>
 </html>

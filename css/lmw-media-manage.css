@@ -509,6 +509,51 @@
   gap: 12px;
 }
 
+.mm-grid.mm-grid-large {
+  grid-template-columns: repeat(auto-fill, minmax(280px, 1fr));
+  gap: 14px;
+}
+
+.mm-grid.mm-grid-detail {
+  grid-template-columns: 1fr;
+  gap: 8px;
+}
+
+.mm-grid.mm-grid-detail .mm-card {
+  flex-direction: row;
+  min-height: 108px;
+  align-items: stretch;
+}
+
+.mm-grid.mm-grid-detail .mm-thumb-wrap {
+  width: 120px;
+  flex: 0 0 120px;
+  aspect-ratio: 1;
+}
+
+.mm-grid.mm-grid-detail .mm-card-title {
+  -webkit-line-clamp: unset;
+  display: block;
+  overflow: visible;
+  white-space: pre-wrap;
+}
+
+.mm-grid.mm-grid-detail .mm-card-tags {
+  -webkit-line-clamp: unset;
+}
+
+.mm-card-detail-tech {
+  display: none;
+  font-size: 11px;
+  opacity: 0.78;
+  line-height: 1.4;
+  word-break: break-word;
+}
+
+.mm-grid.mm-grid-detail .mm-card-detail-tech {
+  display: block;
+}
+
 .mm-card {
   position: relative;
   background: #171a22;
@@ -559,6 +604,39 @@
 .mm-card.selected {
   border-color: rgba(96, 140, 255, 0.85);
   box-shadow: 0 0 0 1px rgba(96, 140, 255, 0.3);
+}
+
+.mm-card.mm-series-on {
+  border-color: rgba(250, 204, 21, 0.85);
+  box-shadow: 0 0 0 1px rgba(250, 204, 21, 0.35);
+}
+
+.mm-series-ord {
+  position: absolute;
+  top: 8px;
+  right: 8px;
+  z-index: 3;
+  min-width: 22px;
+  height: 22px;
+  padding: 0 6px;
+  border-radius: 999px;
+  background: #facc15;
+  color: #1a1400;
+  font-weight: 700;
+  font-size: 12px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  pointer-events: none;
+}
+
+.mm-card.is-in-series .mm-card-meta::after {
+  content: " · 剧集";
+  color: #facc15;
+}
+
+body.mm-series-picking .mm-card {
+  cursor: pointer;
 }
 
 .mm-card.is-restricted {

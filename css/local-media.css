@@ -98,6 +98,112 @@ body {
   grid-template-columns: repeat(auto-fill, minmax(280px, 1fr));
   gap: 14px;
 }
+.lm-grid.lm-grid-detail {
+  grid-template-columns: 1fr;
+  gap: 6px;
+}
+.lm-card-detail {
+  display: none;
+}
+/* Compact list rows: thumb left, text right. Do NOT use display:grid on
+   .lm-card — badges/poster/play are extra children and would each become a row. */
+.lm-grid.lm-grid-detail .lm-card {
+  aspect-ratio: auto;
+  height: 96px;
+  max-height: 96px;
+  display: block;
+  overflow: hidden;
+}
+.lm-grid.lm-grid-detail .lm-card-poster,
+.lm-grid.lm-grid-detail .lm-card-poster-img,
+.lm-grid.lm-grid-detail .lm-card-poster-canvas,
+.lm-grid.lm-grid-detail .lm-card-motion,
+.lm-grid.lm-grid-detail .lm-card-play,
+.lm-grid.lm-grid-detail .lm-card img.lm-card-static,
+.lm-grid.lm-grid-detail .lm-card video {
+  position: absolute;
+  inset: 0 auto 0 0;
+  width: 96px;
+  height: 96px;
+  max-width: 96px;
+  max-height: 96px;
+  object-fit: cover;
+}
+.lm-grid.lm-grid-detail .lm-card-detail {
+  display: flex;
+  position: absolute;
+  left: 96px;
+  right: 0;
+  top: 0;
+  bottom: 0;
+  flex-direction: column;
+  justify-content: center;
+  gap: 2px;
+  min-width: 0;
+  padding: 8px 36px 8px 10px;
+  z-index: 2;
+  background: #1e1e2a;
+}
+.lm-detail-name {
+  font-size: 13px;
+  font-weight: 650;
+  line-height: 1.3;
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+  word-break: break-all;
+  white-space: normal;
+}
+.lm-detail-meta {
+  font-size: 11px;
+  color: #b8c0d4;
+  line-height: 1.35;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.lm-detail-url {
+  font-size: 11px;
+  color: #7a7a8c;
+  line-height: 1.3;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+body.lm-manual-av-mode .lm-grid {
+  outline: 2px dashed rgba(96, 165, 250, 0.45);
+  outline-offset: -4px;
+  border-radius: 8px;
+}
+.lm-card.lm-mav-v,
+.lm-card.lm-mav-a {
+  box-shadow: 0 0 0 2px #60a5fa;
+  border-color: #60a5fa;
+}
+.lm-card .lm-mav-badge {
+  position: absolute;
+  top: 50%;
+  left: 50%;
+  transform: translate(-50%, -50%);
+  z-index: 7;
+  min-width: 36px;
+  height: 36px;
+  padding: 0 8px;
+  border-radius: 999px;
+  display: grid;
+  place-items: center;
+  font-size: 16px;
+  font-weight: 800;
+  color: #061018;
+  background: #60a5fa;
+  pointer-events: none;
+}
+#btnManualAvMerge.lm-mm-active {
+  background: #1d4ed8;
+  color: #fff;
+  border-color: #60a5fa;
+}
 body.lm-multi-merge-mode .lm-grid {
   outline: 2px dashed rgba(251, 191, 36, 0.45);
   outline-offset: -4px;
