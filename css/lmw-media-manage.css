@@ -630,9 +630,9 @@
   pointer-events: none;
 }
 
-.mm-card.is-in-series .mm-card-meta::after {
-  content: " · 剧集";
-  color: #facc15;
+.mm-card.mm-series-mark {
+  border-color: rgba(250, 204, 21, 0.95);
+  box-shadow: 0 0 0 2px rgba(250, 204, 21, 0.5);
 }
 
 body.mm-series-picking .mm-card {
@@ -803,6 +803,14 @@ body.mm-series-picking .mm-card {
 
 .mm-card-actions button[data-act="subtitle"]:hover {
   background: rgba(14, 165, 233, 0.18);
+}
+
+.mm-card.mm-series-item {
+  cursor: pointer;
+}
+
+.mm-card.mm-series-item .mm-card-title {
+  font-weight: 600;
 }
 
 .mm-footer {

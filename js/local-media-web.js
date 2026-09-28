@@ -1234,8 +1234,28 @@ const LMW = {
         });
     },
 
-    getSeries(id) {
+    listSeries(params = {}, options = {}) {
+        const q = new URLSearchParams();
+        q.set("offset", String(params.offset ?? 0));
+        q.set("limit", String(params.limit ?? 48));
+        if (params.include_restricted) q.set("include_restricted", "true");
+        const qs = q.toString();
+        return this.request(`/api/series?${qs}`, {
+            headers: this.headers(false),
+            signal: options.signal,
+        });
+    },
+
+    getSeries(id, options = {}) {
         return this.request(`/api/series/${Number(id)}`, {
+            headers: this.headers(false),
+            signal: options.signal,
+        });
+    },
+
+    deleteSeries(id) {
+        return this.request(`/api/series/${Number(id)}`, {
+            method: "DELETE",
             headers: this.headers(false),
         });
     },

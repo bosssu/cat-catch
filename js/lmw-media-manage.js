@@ -29,6 +29,13 @@
         seriesPick: false,
         /** media ids in click order while picking a series */
         seriesOrder: [],
+        /** Set while the grid shows one series' episodes (type stays 剧集). */
+        openSeriesId: null,
+        openSeriesTitle: "",
+        /** Highlight every loaded card in this series. */
+        markedSeriesId: null,
+        /** Episode rows inserted so off-page members stay visible until the next reload. */
+        markInjectedIds: [],
         previewMode: "normal",
     };
 
@@ -228,13 +235,27 @@
             setStatus("至少选择 2 条再提交剧集");
             return;
         }
+        const taken = ids.filter((id) => {
+            const row = state.items.find((x) => x.id === id);
+            return row && row.series_id;
+        });
+        if (
+            taken.length &&
+            !window.confirm(
+                `其中 ${taken.length} 条已在剧集中，将按当前顺序重建。媒体文件保留。`
+            )
+        ) {
+            return;
+        }
         const first = state.items.find((x) => x.id === ids[0]);
         const defTitle = (first && first.title) || `剧集 #${ids[0]}`;
         const title = window.prompt("剧集名称（可空）", defTitle);
         if (title === null) return;
         try {
             const s = await LMW.createSeries({ ids, title: (title || "").trim() });
-            setStatus(`已创建剧集「${s.title}」· ${s.episode_count} 集`);
+            setStatus(
+                `${taken.length ? "已重建" : "已创建"}剧集「${s.title}」· ${s.episode_count} 集`
+            );
             state.seriesPick = false;
             state.seriesOrder = [];
             updateSeriesPickUi();
@@ -258,19 +279,67 @@
         if (state.seriesPick) updateSeriesPickUi();
     }
 
+    function isSeriesBrowse() {
+        return state.filters.type === "series";
+    }
+
     function updateCountUi() {
-        $("mmCount").textContent = `${state.items.length} / ${state.total}`;
-        $("btnMore").disabled = state.loading || state.items.length >= state.total;
-        $("btnMore").textContent =
-            state.items.length >= state.total && state.total > 0 ? "已全部加载" : "加载更多";
+        const unit = isSeriesBrowse() && !state.openSeriesId ? " 部" : "";
+        $("mmCount").textContent = `${state.items.length} / ${state.total}${unit}`;
+        const back = $("btnSeriesBack");
+        if (back) {
+            const inside = isSeriesBrowse() && !!state.openSeriesId;
+            back.hidden = !inside;
+            back.textContent = inside
+                ? `返回剧集${state.openSeriesTitle ? " · " + state.openSeriesTitle : ""}`
+                : "返回剧集";
+        }
+        const more = $("btnMore");
+        if (more) {
+            const inside = isSeriesBrowse() && !!state.openSeriesId;
+            more.hidden = inside;
+            more.disabled = inside || state.loading || state.items.length >= state.total;
+            more.textContent =
+                state.items.length >= state.total && state.total > 0 ? "已全部加载" : "加载更多";
+        }
+    }
+
+    function syncSeriesBrowseChrome() {
+        const series = isSeriesBrowse();
+        const inside = series && !!state.openSeriesId;
+        const q = $("mmQ");
+        if (q) {
+            q.placeholder = inside
+                ? "在本剧中搜索标题"
+                : series
+                  ? "搜索剧集名称"
+                  : "搜索标题 / URL / 标签";
+        }
+        ["mmTag", "mmLiked", "mmSort"].forEach((id) => {
+            const el = $(id);
+            if (!el) return;
+            el.disabled = series;
+            el.title = series ? "剧集视图只按名称筛选，标签 / 喜欢 / 排序用于媒体列表" : "";
+        });
+        updateCountUi();
     }
 
     function readFilters() {
+        const prevType = state.filters.type;
         state.filters.q = ($("mmQ").value || "").trim();
         state.filters.type = $("mmType").value || "";
         state.filters.tag = $("mmTag").value || "";
         state.filters.liked = $("mmLiked").value || "";
         state.filters.sort = $("mmSort").value || "new";
+        if (state.filters.type !== prevType) {
+            state.openSeriesId = null;
+            state.openSeriesTitle = "";
+        }
+        if (state.filters.type === "series" && state.seriesPick) {
+            state.seriesPick = false;
+            state.seriesOrder = [];
+            updateSeriesPickUi();
+        }
     }
 
     function listParams(offset) {
@@ -470,6 +539,30 @@
         return map[t] || t || "media";
     }
 
+    function seriesCardHtml(s) {
+        const cover = s.cover || {};
+        const mtype = cover.media_type || "";
+        const ep = Number(s.episode_count) || 0;
+        const cur = Number(s.current_episode_index) || 1;
+        const title = s.title || cover.title || `剧集 #${s.id}`;
+        const seen = Math.min(cur, ep || cur);
+        return `<article class="mm-card mm-series-item" data-series-id="${s.id}" data-type="series">
+  <div class="mm-thumb-wrap" data-series-open="${s.id}" title="展开剧集">
+    <div class="mm-thumb-ph" data-thumb-ph="s${s.id}">剧集</div>
+    <img alt="" data-thumb="s${s.id}" data-src="${escapeHtml(cover.thumb_url || "")}" hidden />
+  </div>
+  <div class="mm-card-body">
+    <div class="mm-card-title" title="${escapeHtml(title)}">${escapeHtml(title)}</div>
+    <div class="mm-card-meta">剧集 #${s.id} · ${ep} 集 · 看到第 ${seen} 集${mtype ? " · " + escapeHtml(typeLabel(mtype)) : ""}</div>
+    <div class="mm-card-detail-tech">点卡片展开各集。解散只拆关系，不删文件。</div>
+    <div class="mm-card-tags">${escapeHtml(cover.title || "")}</div>
+    <div class="mm-card-actions">
+      <button type="button" data-act="dissolve" data-series-id="${s.id}" data-series-title="${escapeHtml(title)}" title="拆掉整部剧集关系，媒体文件保留">解散</button>
+    </div>
+  </div>
+</article>`;
+    }
+
     function cardHtml(m) {
         const tags = (m.tags || []).map((t) => "#" + t).join(" ");
         const liked = m.liked ? "♥ " : "";
@@ -477,16 +570,21 @@
         const mtype = m.media_type || "";
         const inSeries = m.series_id ? " is-in-series" : "";
         const dur = formatDuration(m.duration_sec);
+        const seriesName =
+            (m.series_title || "").trim() || (m.series_id ? `#${m.series_id}` : "");
+        const seriesLabel = m.series_id
+            ? `剧集「${seriesName}」 ${m.episode_index || "?"}/${m.episode_count || "?"}`
+            : "";
+        const marked =
+            state.markedSeriesId && Number(m.series_id) === Number(state.markedSeriesId);
         const techBits = [
             m.mime || "",
             dur ? "时长 " + dur : "",
             m.file_size ? formatSize(m.file_size) : "",
-            m.series_id
-                ? `剧集 ${m.episode_index || "?"}/${m.episode_count || "?"}`
-                : "",
+            seriesLabel,
         ].filter(Boolean);
         const tech = techBits.join(" · ");
-        return `<article class="mm-card${restricted ? " is-restricted" : ""}${inSeries}" data-id="${m.id}" data-type="${escapeHtml(mtype)}">
+        return `<article class="mm-card${restricted ? " is-restricted" : ""}${inSeries}${marked ? " mm-series-mark" : ""}" data-id="${m.id}" data-type="${escapeHtml(mtype)}">
   <input type="checkbox" class="mm-card-check" data-id="${m.id}" aria-label="选择 #${m.id}" title="点击选择；Shift+点击连续多选" />
   <div class="mm-thumb-wrap" data-preview="${m.id}" title="预览">
     <div class="mm-thumb-ph" data-thumb-ph="${m.id}">${escapeHtml(typeLabel(mtype))}</div>
@@ -495,7 +593,7 @@
   </div>
   <div class="mm-card-body">
     <div class="mm-card-title" title="${escapeHtml(m.title || "")}">${escapeHtml(m.title || "(无标题)")}</div>
-    <div class="mm-card-meta">${liked}#${m.id} · ${escapeHtml(typeLabel(mtype))} · ${formatSize(m.file_size)}${dur ? " · " + dur : ""}${m.has_subtitle ? " · 字幕" : ""}</div>
+    <div class="mm-card-meta" title="${escapeHtml(seriesLabel)}">${liked}#${m.id} · ${escapeHtml(typeLabel(mtype))} · ${formatSize(m.file_size)}${dur ? " · " + dur : ""}${m.has_subtitle ? " · 字幕" : ""}${seriesLabel ? " · " + escapeHtml(seriesLabel) : ""}</div>
     <div class="mm-card-detail-tech">${escapeHtml(tech || "无更多技术信息")}</div>
     <div class="mm-card-tags">${escapeHtml(tags || "无标签")}</div>
     <label class="mm-card-restricted" title="切换「限制级」标签">
@@ -504,6 +602,11 @@
     </label>
     <div class="mm-card-actions">
       <button type="button" data-act="edit" data-id="${m.id}">编辑</button>
+      ${
+          m.series_id
+              ? `<button type="button" data-act="mark-series" data-id="${m.id}" title="标出这部剧的全部集">标记同剧</button><button type="button" data-act="dissolve" data-id="${m.id}" data-series-id="${m.series_id}" data-series-title="${escapeHtml(m.series_title || "")}" title="拆掉整部剧集关系，媒体文件保留">解散</button>`
+              : ""
+      }
       <button type="button" data-act="like" data-id="${m.id}">${m.liked ? "取消♥" : "喜欢"}</button>
       ${
           mtype === "video" || mtype === "m3u8"
@@ -532,7 +635,13 @@
         if (!append) {
             grid.innerHTML = "";
             if (!state.items.length) {
-                grid.innerHTML = `<div class="mm-empty">暂无媒体${state.filters.q || state.filters.tag || state.filters.type ? "（试试调整筛选）" : "，可上传本地文件"}</div>`;
+                const seriesList = isSeriesBrowse() && !state.openSeriesId;
+            const inside = isSeriesBrowse() && !!state.openSeriesId;
+            grid.innerHTML = seriesList
+                ? `<div class="mm-empty">暂无剧集${state.filters.q ? "（试试调整名称）" : "。把类型改回「全部类型」，再用「选择剧集」组成"}</div>`
+                : inside
+                  ? `<div class="mm-empty">这部剧里没有匹配的集</div>`
+                  : `<div class="mm-empty">暂无媒体${state.filters.q || state.filters.tag || state.filters.type ? "（试试调整筛选）" : "，可上传本地文件"}</div>`;
                 updateCountUi();
                 updateSelUi();
                 return;
@@ -541,9 +650,10 @@
         const start = append ? grid.querySelectorAll(".mm-card").length : 0;
         const slice = state.items.slice(start);
         if (!slice.length && !append) return;
+        const seriesList = isSeriesBrowse() && !state.openSeriesId;
         const frag = document.createDocumentFragment();
         const wrap = document.createElement("div");
-        wrap.innerHTML = slice.map(cardHtml).join("");
+        wrap.innerHTML = slice.map(seriesList ? seriesCardHtml : cardHtml).join("");
         while (wrap.firstChild) frag.appendChild(wrap.firstChild);
         // remove empty placeholder
         const empty = grid.querySelector(".mm-empty");
@@ -609,6 +719,155 @@
         }
     }
 
+    async function fetchAllSeries(signal) {
+        const all = [];
+        let offset = 0;
+        let total = Infinity;
+        while (offset < total) {
+            const data = await LMW.listSeries(
+                { offset, limit: 100, include_restricted: true },
+                { signal }
+            );
+            const items = data.items || [];
+            total = data.total ?? items.length;
+            all.push(...items);
+            offset += items.length;
+            if (!items.length) break;
+        }
+        return all;
+    }
+
+    async function loadSeriesList(offset, signal) {
+        const q = (state.filters.q || "").trim().toLowerCase();
+        const all = await fetchAllSeries(signal);
+        const filtered = q
+            ? all.filter((s) => String(s.title || "").toLowerCase().includes(q))
+            : all;
+        state.total = filtered.length;
+        const page = filtered.slice(offset, offset + PAGE_SIZE);
+        if (offset === 0) state.items = page;
+        else state.items = state.items.concat(page);
+        state.offset = state.items.length;
+        renderGrid(offset > 0);
+    }
+
+    async function loadOpenSeries(signal) {
+        const sid = state.openSeriesId;
+        let data;
+        try {
+            data = await LMW.getSeries(sid, { signal });
+        } catch (e) {
+            const msg = String((e && e.message) || e || "");
+            if (/404|不存在|not found/i.test(msg)) {
+                state.openSeriesId = null;
+                state.openSeriesTitle = "";
+                state._seriesStatusKeep = "这部剧集已经没了，回到剧集列表";
+                await loadSeriesList(0, signal);
+                return;
+            }
+            throw e;
+        }
+        state.openSeriesTitle = data.title || state.openSeriesTitle || "";
+        const q = (state.filters.q || "").trim().toLowerCase();
+        let eps = data.episodes || [];
+        if (q) {
+            eps = eps.filter((m) => String(m.title || "").toLowerCase().includes(q));
+        }
+        state.items = eps;
+        state.total = eps.length;
+        state.offset = eps.length;
+        renderGrid(false);
+    }
+
+    async function dissolveSeriesById(sid, name) {
+        const label = name || `#${sid}`;
+        if (!confirm(`解散剧集「${label}」？同一部剧的关系都会拆掉，媒体文件保留。`)) return;
+        try {
+            await LMW.deleteSeries(sid);
+            if (Number(state.openSeriesId) === Number(sid)) {
+                state.openSeriesId = null;
+                state.openSeriesTitle = "";
+            }
+            setStatus(`已解散剧集「${label}」`);
+            await loadList({ reset: true });
+        } catch (e) {
+            setStatus("解散失败：" + (e.message || e));
+        }
+    }
+
+    function openSeriesInManage(id, title) {
+        const sid = Number(id);
+        if (!sid) return;
+        if (state.seriesPick) return;
+        state.openSeriesId = sid;
+        state.openSeriesTitle = title || "";
+        state.selected.clear();
+        state.selAnchorId = null;
+        loadList({ reset: true });
+    }
+
+    function dropMarkedInjections() {
+        if (!state.markInjectedIds.length) return;
+        const drop = new Set(state.markInjectedIds.map(Number));
+        state.items = state.items.filter((x) => !drop.has(Number(x.id)));
+        state.markInjectedIds = [];
+    }
+
+    async function markSameSeries(seedId) {
+        let id = Number(seedId) || 0;
+        if (!id) {
+            const picked = Array.from(state.selected);
+            if (picked.length !== 1) {
+                setStatus("先勾选一条剧集里的条目，再点「标记同剧」");
+                return;
+            }
+            id = picked[0];
+        }
+        const row = state.items.find((x) => Number(x.id) === id);
+        if (!row || !row.series_id) {
+            setStatus("这条不在剧集里");
+            return;
+        }
+        const sid = Number(row.series_id);
+        if (Number(state.markedSeriesId) === sid) {
+            dropMarkedInjections();
+            state.markedSeriesId = null;
+            renderGrid(false);
+            updateCountUi();
+            updateSelUi();
+            setStatus("已取消剧集标记");
+            return;
+        }
+        try {
+            const data = await LMW.getSeries(sid);
+            const eps = data.episodes || [];
+            dropMarkedInjections();
+            const have = new Set(state.items.map((x) => Number(x.id)));
+            const missing = eps.filter((e) => e && !have.has(Number(e.id)));
+            if (missing.length) {
+                state.markInjectedIds = missing.map((e) => Number(e.id));
+                state.items = missing.concat(state.items);
+            }
+            state.markedSeriesId = sid;
+            renderGrid(false);
+            updateCountUi();
+            updateSelUi();
+            const name = data.title || row.series_title || `#${sid}`;
+            setStatus(`已标出剧集「${name}」· ${eps.length} 集`);
+        } catch (e) {
+            setStatus("标记剧集失败：" + (e.message || e));
+        }
+    }
+
+    function closeSeriesInManage() {
+        if (!state.openSeriesId) return;
+        state.openSeriesId = null;
+        state.openSeriesTitle = "";
+        const q = $("mmQ");
+        if (q && state.filters.type === "series") q.value = "";
+        loadList({ reset: true });
+    }
+
     async function loadList({ reset = false } = {}) {
         if (state.loading) return;
         readFilters();
@@ -617,6 +876,8 @@
             state.items = [];
             state.selected.clear();
             state.selAnchorId = null;
+            state.markedSeriesId = null;
+            state.markInjectedIds = [];
             if (state.listAbort) state.listAbort.abort();
             // Drop stale file/thumb blobs so jasna-replaced media re-fetches
             if (typeof LMW.revokeAllBlobUrls === "function") {
@@ -626,17 +887,38 @@
         state.listAbort = new AbortController();
         const offset = state.offset;
         state.loading = true;
+        syncSeriesBrowseChrome();
         setStatus(reset ? "加载中…" : "加载更多…");
         $("btnMore").disabled = true;
         try {
-            const data = await LMW.listMedia(listParams(offset), { signal: state.listAbort.signal });
-            const items = data.items || [];
-            state.total = data.total ?? items.length;
-            if (reset) state.items = items;
-            else state.items = state.items.concat(items);
-            state.offset = state.items.length;
-            renderGrid(!reset);
-            setStatus("");
+            if (isSeriesBrowse() && state.openSeriesId) {
+                await loadOpenSeries(state.listAbort.signal);
+            } else if (isSeriesBrowse()) {
+                await loadSeriesList(offset, state.listAbort.signal);
+            } else {
+                const data = await LMW.listMedia(listParams(offset), { signal: state.listAbort.signal });
+                const items = data.items || [];
+                state.total = data.total ?? items.length;
+                if (reset) state.items = items;
+                else {
+                    const have = new Set(state.items.map((x) => Number(x.id)));
+                    state.items = state.items.concat(
+                        items.filter((x) => x && !have.has(Number(x.id)))
+                    );
+                }
+                state.offset = offset + items.length;
+                renderGrid(!reset);
+            }
+            if (isSeriesBrowse() && state.openSeriesId) {
+                setStatus(
+                    `剧集「${state.openSeriesTitle || state.openSeriesId}」· 点「返回剧集」回到列表`
+                );
+            } else if (state._seriesStatusKeep) {
+                setStatus(state._seriesStatusKeep);
+            } else {
+                setStatus("");
+            }
+            state._seriesStatusKeep = "";
         } catch (e) {
             if (e && e.name === "AbortError") return;
             setStatus("加载失败：" + (e.message || e));
@@ -1372,11 +1654,32 @@
             }
             return;
         }
+        if (act === "mark-series") {
+            await markSameSeries(id);
+            return;
+        }
+        if (act === "dissolve") {
+            const m = state.items.find((x) => x.id === id);
+            const sid = (m && m.series_id) || state.openSeriesId;
+            if (!sid) {
+                setStatus("这条不在剧集里");
+                return;
+            }
+            const name = (m && m.series_title) || state.openSeriesTitle || `#${sid}`;
+            await dissolveSeriesById(sid, name);
+            return;
+        }
         if (act === "del") {
             if (!confirm(`确定删除媒体 #${id}？不可恢复。`)) return;
             try {
                 await LMW.deleteMedia(id);
                 state.selected.delete(id);
+                if (state.openSeriesId) {
+                    setStatus(`已删除 #${id}`);
+                    await loadTagOptions();
+                    await loadList({ reset: true });
+                    return;
+                }
                 state.items = state.items.filter((x) => x.id !== id);
                 state.total = Math.max(0, state.total - 1);
                 const card = $("mmGrid").querySelector(`.mm-card[data-id="${id}"]`);
@@ -1398,6 +1701,10 @@
         const btnSeries = $("btnSeriesPick");
         if (btnSeries) {
             btnSeries.onclick = () => {
+                if (isSeriesBrowse()) {
+                    setStatus("组剧集请先把类型改回「全部类型」或具体媒体类型，再点「选择剧集」");
+                    return;
+                }
                 if (!state.seriesPick) {
                     state.seriesPick = true;
                     state.seriesOrder = [];
@@ -1426,6 +1733,8 @@
             };
         }
         $("btnMore").onclick = () => loadList({ reset: false });
+        const btnSeriesBack = $("btnSeriesBack");
+        if (btnSeriesBack) btnSeriesBack.onclick = () => closeSeriesInManage();
 
         const combosList = $("mmTagCombosList");
         if (combosList) {
@@ -1453,6 +1762,8 @@
             });
         }
 
+        const btnMarkSeries = $("btnMarkSeries");
+        if (btnMarkSeries) btnMarkSeries.onclick = () => markSameSeries(0);
         $("btnSelPage").onclick = () => {
             const ids = visibleCardIds();
             ids.forEach((id) => state.selected.add(id));
@@ -1579,7 +1890,24 @@
             const btn = t.closest("[data-act]");
             if (btn) {
                 e.preventDefault();
+                if (btn.dataset.act === "dissolve" && btn.dataset.seriesId && !btn.dataset.id) {
+                    dissolveSeriesById(
+                        Number(btn.dataset.seriesId),
+                        btn.getAttribute("data-series-title") || ""
+                    );
+                    return;
+                }
                 onCardAction(btn.dataset.act, Number(btn.dataset.id));
+                return;
+            }
+            const seriesCard = t.closest(".mm-series-item");
+            if (seriesCard && isSeriesBrowse() && !state.openSeriesId) {
+                e.preventDefault();
+                const titleEl = seriesCard.querySelector(".mm-card-title");
+                openSeriesInManage(
+                    Number(seriesCard.dataset.seriesId),
+                    titleEl ? titleEl.textContent : ""
+                );
                 return;
             }
             const prev = t.closest("[data-preview]");
@@ -1639,6 +1967,7 @@
             if (e.key === "Escape") {
                 if (!$("mmEdit").classList.contains("hide")) closeEdit();
                 else if (!$("mmPreview").classList.contains("hide")) closePreview();
+                else if (state.openSeriesId) closeSeriesInManage();
             }
         });
 

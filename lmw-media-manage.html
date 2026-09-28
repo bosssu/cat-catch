@@ -5,10 +5,10 @@
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <title>服务器媒体管理 · LocalMediaWeb</title>
   <link rel="stylesheet" href="css/public.css" />
-  <link rel="stylesheet" href="css/lmw-media-manage.css?v=20260911previewMode" />
+  <link rel="stylesheet" href="css/lmw-media-manage.css?v=20260927seriesMark" />
   <script src="js/init.js"></script>
   <script src="js/function.js"></script>
-  <script src="js/local-media-web.js?v=20260911series1"></script>
+  <script src="js/local-media-web.js?v=20260927seriesMark"></script>
 </head>
 <body class="mm-body">
   <header class="mm-header">
@@ -37,6 +37,7 @@
           <option value="audio">音频</option>
           <option value="image">图片</option>
           <option value="gif">动图</option>
+          <option value="series">剧集</option>
         </select>
         <select id="mmTag" class="mm-select" title="标签">
           <option value="">全部标签</option>
@@ -100,6 +101,7 @@
       <div class="mm-batch-left">
         <span id="mmSelCount" class="mm-sel-count">已选 0</span>
         <button type="button" id="btnSelPage" class="button2 ghost">全选本页</button>
+        <button type="button" id="btnMarkSeries" class="button2 ghost" title="勾选一条已在剧里的条目，标出同一部剧的全部集">标记同剧</button>
         <button type="button" id="btnSelClear" class="button2 ghost">清除选择</button>
         <span class="muted mm-sel-hint" title="先点选一项作为起点，再按住 Shift 点击另一项，选中中间全部">Shift+点击 连续选</span>
       </div>
@@ -118,6 +120,7 @@
   <main class="mm-main">
     <div id="mmGrid" class="mm-grid" aria-live="polite"></div>
     <div class="mm-footer">
+      <button type="button" id="btnSeriesBack" class="button2" hidden>返回剧集</button>
       <button type="button" id="btnMore" class="button2" disabled>加载更多</button>
       <span id="mmCount" class="muted">0 / 0</span>
     </div>
@@ -147,6 +150,6 @@
     </div>
   </div>
 
-  <script src="js/lmw-media-manage.js?v=20260911previewMode"></script>
+  <script src="js/lmw-media-manage.js?v=20260927seriesMark"></script>
 </body>
 </html>

@@ -215,6 +215,10 @@ def _detach_media_from_series(db, media_id: int) -> None:
         if s:
             db.delete(s)
         return
+    # SQLite checks the unique (series_id, episode_index) row by row.
+    for i, r in enumerate(rest, start=1):
+        r.episode_index = -i
+    db.flush()
     for i, r in enumerate(rest, start=1):
         r.episode_index = i
     s = db.get(MediaSeries, sid)
@@ -902,11 +906,8 @@ def create_series(body: SeriesCreate, db=Depends(get_db)):
     if len(rows) != len(ids):
         missing = [i for i in ids if i not in {int(m.id) for m in rows}]
         raise HTTPException(404, f"媒体不存在: {missing[:8]}")
-    taken = list(
-        db.scalars(select(SeriesEpisode).where(SeriesEpisode.media_id.in_(ids))).all()
-    )
-    if taken:
-        raise HTTPException(400, "部分媒体已属于其他剧集")
+    for mid in ids:
+        _detach_media_from_series(db, mid)
     title = (body.title or "").strip()
     if not title:
         title = (rows[0].title or "").strip() or f"剧集 #{rows[0].id}"
@@ -1280,6 +1281,9 @@ def _apply_last_position(m: MediaItem, position_sec: float | None) -> None:
     m.last_position_sec = max(0.0, min(t, 86400 * 12))
 
 
+_INTERACT_EVENTS = ("view", "dwell", "skip", "progress", "ended")
+
+
 @router.post("/media/{media_id}/interact", dependencies=[Depends(require_token)])
 def interact(media_id: int, body: InteractEvent, db=Depends(get_db)):
     m = db.get(MediaItem, media_id)
@@ -1289,7 +1293,17 @@ def interact(media_id: int, body: InteractEvent, db=Depends(get_db)):
     now = datetime.now(timezone.utc)
     _apply_duration_sec(m, body.duration_sec)
     _apply_last_position(m, body.position_sec)
-    if ev == "view":
+    # Series-mode playback must not affect recommendation: skip view_count /
+    # dwell_ms_total / max_progress / skip_count / last_viewed_at. Resume
+    # position + series cursor are still stored. The same item played from
+    # the normal feed/grid (no source) keeps counting exactly as before.
+    from_series = (body.source or "").strip().lower() == "series"
+    if from_series:
+        if ev not in _INTERACT_EVENTS:
+            raise HTTPException(400, "event must be view|dwell|skip|progress|ended")
+        if ev == "ended" and body.position_sec is None:
+            m.last_position_sec = 0.0
+    elif ev == "view":
         m.view_count = int(m.view_count or 0) + 1
         m.last_viewed_at = now
     elif ev == "dwell":

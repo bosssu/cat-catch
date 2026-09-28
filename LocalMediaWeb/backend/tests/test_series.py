@@ -127,11 +127,60 @@ def test_delete_media_unbinds_and_drops_short_series(client: TestClient):
     assert g.status_code == 404
 
 
-def test_reject_duplicate_membership_and_too_few(client: TestClient):
+def test_recreate_moves_members_and_drops_short_series(client: TestClient):
     ids = client.media_ids  # type: ignore[attr-defined]
     a = client.post("/api/series", json={"ids": ids[:2], "title": "A"})
     assert a.status_code == 200
+    sid_a = a.json()["id"]
     b = client.post("/api/series", json={"ids": [ids[0], ids[2]], "title": "B"})
-    assert b.status_code == 400
-    c = client.post("/api/series", json={"ids": [ids[3]], "title": "C"})
-    assert c.status_code == 400
+    assert b.status_code == 200, b.text
+    body = b.json()
+    assert [e["id"] for e in body["episodes"]] == [ids[0], ids[2]]
+    assert client.get(f"/api/series/{sid_a}").status_code == 404
+    lone = client.get(f"/api/media/{ids[1]}").json()
+    assert lone["series_id"] is None
+    too_few = client.post("/api/series", json={"ids": [ids[3]], "title": "C"})
+    assert too_few.status_code == 400
+
+
+def test_recreate_keeps_unselected_episodes(client: TestClient):
+    ids = client.media_ids  # type: ignore[attr-defined]
+    a = client.post("/api/series", json={"ids": ids, "title": "All"})
+    sid_a = a.json()["id"]
+    b = client.post("/api/series", json={"ids": ids[:2], "title": "Head"})
+    assert b.status_code == 200, b.text
+    assert [e["id"] for e in b.json()["episodes"]] == ids[:2]
+    left = client.get(f"/api/series/{sid_a}")
+    assert left.status_code == 200
+    assert [e["id"] for e in left.json()["episodes"]] == ids[2:]
+    assert [e["episode_index"] for e in left.json()["episodes"]] == [1, 2]
+
+
+def test_series_source_interact_skips_rank_counters(client: TestClient):
+    ids = client.media_ids  # type: ignore[attr-defined]
+    r = client.post("/api/series", json={"ids": ids[:3], "title": "Show S"})
+    sid = r.json()["id"]
+    mid = ids[2]
+    for body in (
+        {"event": "view", "source": "series"},
+        {"event": "dwell", "dwell_ms": 5000, "source": "series"},
+        {"event": "skip", "source": "series"},
+        {"event": "progress", "progress": 0.5, "position_sec": 44, "duration_sec": 120, "source": "series"},
+    ):
+        ir = client.post(f"/api/media/{mid}/interact", json=body)
+        assert ir.status_code == 200, ir.text
+    out = ir.json()
+    assert out["view_count"] == 0
+    assert out["skip_count"] == 0
+    assert out["max_progress"] == 0
+    assert out["last_position_sec"] == 44
+    g = client.get(f"/api/series/{sid}").json()
+    assert g["current_media_id"] == mid
+    assert g["current_episode_index"] == 3
+    bad = client.post(f"/api/media/{mid}/interact", json={"event": "nope", "source": "series"})
+    assert bad.status_code == 400
+    # Same item from the normal feed still counts
+    nr = client.post(f"/api/media/{mid}/interact", json={"event": "view"})
+    assert nr.json()["view_count"] == 1
+    nr = client.post(f"/api/media/{mid}/interact", json={"event": "progress", "progress": 0.5})
+    assert nr.json()["max_progress"] == 0.5

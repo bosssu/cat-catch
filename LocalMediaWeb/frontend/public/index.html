@@ -55,6 +55,7 @@
             <option value="recent">最新</option>
             <option value="liked">已喜欢</option>
             <option value="series">剧集</option>
+            <option value="series-play" hidden>剧集播放</option>
             <option value="search">搜索</option>
           </select>
         </label>
@@ -173,10 +174,11 @@
             <option value="recent">最新</option>
             <option value="liked">已喜欢</option>
             <option value="series">剧集</option>
+            <option value="series-play" hidden>剧集播放</option>
             <option value="search">搜索</option>
           </select>
         </label>
-        <p class="muted tip">与右上角一致：随机（默认）/ 相似 / 推荐 / 最新 / 已喜欢 / 剧集 / 搜索。剧集模式每部只列一条，点开后上划下滑按集数顺序。搜索为虚拟模式，播放搜索结果时自动显示，不写入本机偏好。</p>
+        <p class="muted tip">与右上角一致：随机（默认）/ 相似 / 推荐 / 最新 / 已喜欢 / 剧集 / 搜索。选「剧集」打开目录；正在按集播放时下拉显示「剧集播放」（不写入本机偏好，偏好仍是剧集）。再选「剧集」回到目录。搜索同样是虚拟项。</p>
         <label>访问 Token（可选）
           <input id="tokenInput" type="password" placeholder="X-LMW-Token" autocomplete="off" />
         </label>
@@ -327,6 +329,6 @@
     </div>
   </div>
   <script src="/assets/cast-media-session.js?v=20260824castms1"></script>
-  <script src="/assets/app.js?v=20260911seriesPicker1"></script>
+  <script src="/assets/app.js?v=20260928dwellFix1"></script>
 </body>
 </html>

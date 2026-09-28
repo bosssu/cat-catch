@@ -109,6 +109,10 @@ class InteractEvent(BaseModel):
     duration_sec: float | None = None
     # Absolute playback clock (sec) for resume; independent of max_progress
     position_sec: float | None = None
+    # Playback source. "series" = series-mode playback: only resume position /
+    # series cursor are stored; recommendation counters are left untouched.
+    # None / anything else = normal feed/grid playback (counts as before).
+    source: str | None = None
 
 
 class JobOut(BaseModel):

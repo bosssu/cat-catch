@@ -69,7 +69,10 @@
     view: "feed",
     /** view before opening search (for back) */
     prevView: "feed",
-    mode: localStorage.getItem(feedModeKey) || "random",
+    mode: (() => {
+      const m = localStorage.getItem(feedModeKey) || "random";
+      return m === "series-play" ? "series" : m;
+    })(),
     includeRestricted: localStorage.getItem(includeRestrictedKey) === "1",
     includeImages: localStorage.getItem(includeImagesKey) === "1",
     excludePushTags: loadExcludePushTags(),
@@ -80,7 +83,8 @@
     similarTag: null,
     items: [],
     feedIndex: 0,
-    dwellStart: 0,
+    /** Active dwell session (see dwellBegin); flushed before the next slide starts */
+    _dwell: null,
     viewedIds: new Set(),
     /** library fingerprint: total:newestId — used for auto-refresh after server downloads */
     libFp: "",
@@ -1948,24 +1952,45 @@
     return [$("#feedModeNav"), $("#feedMode")].filter(Boolean);
   }
 
+  function ensureFeedModeOption(sel, value, label, afterValue) {
+    let opt = [...sel.options].find((o) => o.value === value);
+    if (!opt) {
+      opt = document.createElement("option");
+      opt.value = value;
+      opt.textContent = label;
+      const after = afterValue
+        ? [...sel.options].find((o) => o.value === afterValue)
+        : null;
+      if (after && after.nextSibling) sel.insertBefore(opt, after.nextSibling);
+      else if (after) sel.appendChild(opt);
+      else sel.appendChild(opt);
+    }
+    return opt;
+  }
+
   function syncFeedModeSelects() {
-    // Search playlist uses a virtual mode label; not persisted to localStorage
+    // Search playlist and in-progress series playback use virtual labels.
+    // Neither is written to localStorage (stored mode stays "series" / previous).
+    // "剧集播放" is a different value from "剧集", so choosing 剧集 fires change
+    // and reopens the catalog even after a cold start resumed playback.
+    const playingSeries =
+      state.mode === "series" &&
+      state.view !== "series" &&
+      state.feedSource !== "search";
     const v =
       state.view === "series"
         ? "series"
         : state.feedSource === "search"
           ? "search"
-          : state.mode && state.mode !== "search"
-            ? state.mode
-            : "random";
+          : playingSeries
+            ? "series-play"
+            : state.mode && state.mode !== "search"
+              ? state.mode
+              : "random";
     for (const sel of feedModeSelects()) {
-      // ensure option exists (older cached HTML may lack it)
-      if (v === "search" && ![...sel.options].some((o) => o.value === "search")) {
-        const opt = document.createElement("option");
-        opt.value = "search";
-        opt.textContent = "搜索";
-        sel.appendChild(opt);
-      }
+      if (v === "search") ensureFeedModeOption(sel, "search", "搜索", "series-play");
+      const playOpt = ensureFeedModeOption(sel, "series-play", "剧集播放", "series");
+      playOpt.hidden = v !== "series-play";
       if ([...sel.options].some((o) => o.value === v)) {
         sel.value = v;
       }
@@ -2912,6 +2937,16 @@
       return;
     }
     if (next === "series") {
+      await openSeriesPicker();
+      return;
+    }
+    if (next === "series-play") {
+      // Display-only value. Playback is already the series feed.
+      if (state.mode === "series") {
+        if (state.view !== "feed") setView("feed");
+        syncFeedModeSelects();
+        return;
+      }
       await openSeriesPicker();
       return;
     }
@@ -3986,10 +4021,20 @@
     // ~2.5s while page visible — catches finished ingest jobs quickly
     state.libPollTimer = setInterval(pollLibraryChange, 2500);
     document.addEventListener("visibilitychange", () => {
-      if (document.hidden) flushCurrentWatchPosition();
-      else pollLibraryChange();
+      if (document.hidden) {
+        flushCurrentWatchPosition();
+        dwellClockPause();
+        flushDwell({ keepalive: true }).catch(() => {});
+      } else {
+        dwellClockResume();
+        pollLibraryChange();
+      }
     });
-    window.addEventListener("pagehide", () => flushCurrentWatchPosition());
+    window.addEventListener("pagehide", () => {
+      flushCurrentWatchPosition();
+      dwellClockPause();
+      flushDwell({ keepalive: true }).catch(() => {});
+    });
     // initial baseline after first feed load
     setTimeout(pollLibraryChange, 800);
   }
@@ -4007,13 +4052,46 @@
   const _posSaveAt = new Map();
   const _posSaveLast = new Map();
 
+  /**
+   * Playback source for /interact. "series" = series-mode playback: server
+   * keeps resume position + series cursor but skips recommendation counters.
+   * Captured per slide at activation (item._playSource) so a dwell/position
+   * flushed after a mode switch is attributed to the mode it was watched in.
+   */
+  function currentPlaySource() {
+    return isSeriesFeedMode() ? "series" : "feed";
+  }
+
+  function playSourceForItem(item) {
+    const s = item && item._playSource;
+    return s === "series" || s === "feed" ? s : currentPlaySource();
+  }
+
+  function playSourceForId(id) {
+    const n = Number(id);
+    const cur = currentItem();
+    if (cur && Number(cur.id) === n) return playSourceForItem(cur);
+    const it = (state.items || []).find((x) => x && Number(x.id) === n);
+    return playSourceForItem(it);
+  }
+
+  /** Session de-dupe key: series plays never block normal-feed reporting. */
+  function playMarkKey(id, source) {
+    return source === "series" ? `s:${id}` : id;
+  }
+
   async function postInteract(id, event, dwell_ms = 0, extra = {}) {
     try {
-      const body = { event, dwell_ms, ...extra };
+      const { source, keepalive, ...rest } = extra || {};
+      const src = source || playSourceForId(id);
+      const body = { event, dwell_ms, ...rest };
+      if (src === "series") body.source = "series";
       return await api(`/api/media/${id}/interact`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify(body),
+        // page hide/unload: let the request outlive the page
+        ...(keepalive ? { keepalive: true } : {}),
       });
     } catch (e) {
       console.warn("interact failed", e);
@@ -4030,10 +4108,12 @@
     const d = video.duration;
     if (!d || !isFinite(d) || d <= 0) return;
     const p = Math.min(1, Math.max(0, (video.currentTime || 0) / d));
-    let sent = progressMarksSent.get(mediaId);
+    const src = playSourceForId(mediaId);
+    const markKey = playMarkKey(mediaId, src);
+    let sent = progressMarksSent.get(markKey);
     if (!sent) {
       sent = new Set();
-      progressMarksSent.set(mediaId, sent);
+      progressMarksSent.set(markKey, sent);
     }
     const marks = [
       [0.25, "p25"],
@@ -4046,6 +4126,7 @@
         postInteract(mediaId, "progress", 0, {
           progress: thr,
           duration_sec: d,
+          source: src,
         }).catch(() => {});
       }
     }
@@ -4055,10 +4136,12 @@
     if (!video || mediaId == null) return;
     const d = video.duration;
     const dur = d && isFinite(d) && d > 0 ? d : undefined;
-    let sent = progressMarksSent.get(mediaId);
+    const src = playSourceForId(mediaId);
+    const markKey = playMarkKey(mediaId, src);
+    let sent = progressMarksSent.get(markKey);
     if (!sent) {
       sent = new Set();
-      progressMarksSent.set(mediaId, sent);
+      progressMarksSent.set(markKey, sent);
     }
     if (sent.has("ended")) return;
     sent.add("ended");
@@ -4070,6 +4153,7 @@
       progress: 1,
       position_sec: 0,
       ...(dur != null ? { duration_sec: dur } : {}),
+      source: src,
     }).catch(() => {});
   }
 
@@ -4102,6 +4186,7 @@
     postInteract(mediaId, "progress", 0, {
       position_sec: t,
       ...(dur != null ? { duration_sec: dur } : {}),
+      source: playSourceForId(mediaId),
     }).catch(() => {});
   }
 
@@ -4130,13 +4215,87 @@
     return true;
   }
 
-  async function flushDwell(prevIndex) {
-    const item = state.items[prevIndex];
-    if (!item) return;
-    const ms = state.dwellStart ? Date.now() - state.dwellStart : 0;
-    state.dwellStart = Date.now();
-    if (ms >= 800) await postInteract(item.id, "dwell", ms);
+  // ---- dwell session (begin) ----
+  /**
+   * Dwell = time actually spent watching the active slide.
+   * Video/audio: wall time summed from timeupdate ticks while playing, on the
+   * feed view, with the page visible (paused / hidden / stalled time is not
+   * counted). Images/GIFs: wall time while the feed view is shown and visible.
+   * Playback source ("series"/"feed") is captured when the session starts, so
+   * a later flush keeps the series-mode exclusion of the slide it belongs to.
+   */
+  const DWELL_MIN_MS = 800;
+  const DWELL_MAX_MS = 600000; // backend also caps each dwell event at 600s
+  const DWELL_TICK_GAP_MS = 2000; // larger gaps = stall/throttle, not watching
+
+  function dwellClockRunning() {
+    return !document.hidden && state.view === "feed";
   }
+
+  function dwellBegin(item) {
+    const isImg = item.media_type === "image" || item.media_type === "gif";
+    state._dwell = {
+      id: item.id,
+      source: playSourceForItem(item),
+      playback: !isImg,
+      accMs: 0,
+      lastTick: 0,
+      visSince: !isImg || !dwellClockRunning() ? 0 : Date.now(),
+    };
+  }
+
+  function dwellTick(video, mediaId) {
+    const d = state._dwell;
+    if (!d || !d.playback || Number(d.id) !== Number(mediaId)) return;
+    if (!video || video.paused || video.ended || video.seeking || !dwellClockRunning()) {
+      d.lastTick = 0;
+      return;
+    }
+    const now = Date.now();
+    if (d.lastTick) {
+      const dt = now - d.lastTick;
+      if (dt > 0 && dt <= DWELL_TICK_GAP_MS) d.accMs += dt;
+    }
+    d.lastTick = now;
+  }
+
+  function dwellClockPause() {
+    const d = state._dwell;
+    if (!d) return;
+    d.lastTick = 0;
+    if (d.visSince) {
+      d.accMs += Math.max(0, Date.now() - d.visSince);
+      d.visSince = 0;
+    }
+  }
+
+  function dwellClockResume() {
+    const d = state._dwell;
+    if (!d || d.playback || d.visSince || !dwellClockRunning()) return;
+    d.visSince = Date.now();
+  }
+
+  /** Take accumulated ms (>= minMs) from the current session; keeps counting. */
+  function dwellTake(minMs) {
+    const d = state._dwell;
+    if (!d) return null;
+    if (d.visSince) {
+      const now = Date.now();
+      d.accMs += Math.max(0, now - d.visSince);
+      d.visSince = dwellClockRunning() ? now : 0;
+    }
+    if (d.accMs < minMs) return null;
+    const ms = Math.min(Math.round(d.accMs), DWELL_MAX_MS);
+    d.accMs = 0;
+    return { id: d.id, source: d.source, ms };
+  }
+
+  async function flushDwell({ keepalive = false } = {}) {
+    const t = dwellTake(DWELL_MIN_MS);
+    if (!t) return;
+    await postInteract(t.id, "dwell", t.ms, { source: t.source, keepalive });
+  }
+  // ---- dwell session (end) ----
 
   async function onSlideActive(index) {
     // Locked / freeze: refuse index drift
@@ -4154,14 +4313,24 @@
     }
     const prev = state.feedIndex;
     state.feedIndex = index | 0;
-    state.dwellStart = Date.now();
     const item = state.items[state.feedIndex];
     if (!item) return;
+    // Capture playback source for this viewing session of the slide.
+    item._playSource = currentPlaySource();
+    // Flush the previous slide's watch time (with its own captured source)
+    // BEFORE this slide's dwell session starts (flushDwell takes it synchronously).
+    if (!state._dwell || Number(state._dwell.id) !== Number(item.id)) {
+      flushDwell().catch(() => {});
+      dwellBegin(item);
+    }
     if (await expandSeriesIfNeeded(item)) return;
-    rememberFeedSeen(item.id);
-    if (!state.viewedIds.has(item.id)) {
-      state.viewedIds.add(item.id);
-      postInteract(item.id, "view");
+    const playSrc = item._playSource;
+    // Series-mode plays stay out of the feed's session seen/exclude list.
+    if (playSrc !== "series") rememberFeedSeen(item.id);
+    const viewKey = playMarkKey(item.id, playSrc);
+    if (!state.viewedIds.has(viewKey)) {
+      state.viewedIds.add(viewKey);
+      postInteract(item.id, "view", 0, { source: playSrc });
     }
     // Do NOT prune/unload here — mid-snap DOM/scroll edits cause rollback.
     // GC runs after scroll settles (scheduleFeedGc).
@@ -4174,7 +4343,6 @@
       scheduleEnsureFeedAhead(mobile ? 5 : 10);
     }
     if (prev !== (state.feedIndex | 0)) {
-      flushDwell(prev).catch(() => {});
       const prevItem = state.items[prev];
       const v = state._feedPlayer;
       if (prevItem && v) saveWatchPosition(v, prevItem.id, { force: true });
@@ -4210,7 +4378,6 @@
 
     scroller.querySelectorAll(".snap-slide").forEach((el) => bindSlideEl(el, { observe: false }));
     observeFeedMedia();
-    state.dwellStart = Date.now();
   }
 
   function formatMediaTime(sec) {
@@ -4474,6 +4641,7 @@
       paint();
       const mid = mediaIdForProgress();
       if (mid != null) {
+        dwellTick(video, mid);
         maybeReportWatchProgress(video, mid);
         saveWatchPosition(video, mid);
       }
@@ -5350,7 +5518,10 @@
       state.feedSeenIds = (state.feedSeenIds || []).filter((x) => Number(x) !== idNum);
     }
     forgetRandomSeen(idNum);
-    if (state.viewedIds) state.viewedIds.delete(idNum);
+    if (state.viewedIds) {
+      state.viewedIds.delete(idNum);
+      state.viewedIds.delete(`s:${idNum}`);
+    }
     if (String(state.activeFeedId) === String(idNum)) state.activeFeedId = null;
 
     if (!state.items.length) {
@@ -6848,7 +7019,14 @@
         }
       } catch (_) {}
     }
+    // Dwell clock (images): stop while away from the feed, restart on return.
+    try {
+      if (name !== "feed") dwellClockPause();
+    } catch (_) {}
     state.view = name;
+    try {
+      if (name === "feed") dwellClockResume();
+    } catch (_) {}
     document.body.classList.toggle("search-open", name === "search" || name === "series");
     // Feed locks viewport; grid/admin/search need document scroll (standalone + freeze)
     const scrollPage = name !== "feed";
@@ -6913,6 +7091,9 @@
         syncFeedModeSelects();
       } catch (_) {}
     } else if (name === "feed") {
+      try {
+        syncFeedModeSelects();
+      } catch (_) {}
       // Leaving feed pauses the shared player; pin-only scroll sync does not resume.
       // Force re-activate the committed slide (respects userPaused).
       const resumeFeedAfterView = () => {
