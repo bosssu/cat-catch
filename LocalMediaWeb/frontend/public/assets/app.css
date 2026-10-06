@@ -1565,6 +1565,10 @@ body.is-chrome-hidden .lmw-toast {
   opacity: 0;
   pointer-events: none;
 }
+body.is-chrome-hidden .queue-sheet {
+  opacity: 0;
+  pointer-events: none;
+}
 .hud .meta {
   flex: 1 1 auto;
   min-width: 0;
@@ -1596,12 +1600,60 @@ body.is-chrome-hidden .lmw-toast {
   position: relative;
   z-index: 2;
 }
+.hud .title-hit {
+  appearance: none;
+  -webkit-appearance: none;
+  pointer-events: auto;
+  position: relative;
+  z-index: 2;
+  display: block;
+  width: 100%;
+  max-width: 100%;
+  margin: 0;
+  border: 0;
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  text-align: left;
+  padding: 10px 8px 14px 0;
+  min-height: 52px;
+  cursor: pointer;
+  -webkit-tap-highlight-color: rgba(255, 255, 255, 0.14);
+}
+.hud .title-hit::before {
+  content: "";
+  position: absolute;
+  left: -12px;
+  right: 0;
+  top: -8px;
+  bottom: -18px;
+}
+.hud .title-hit-row {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  pointer-events: none;
+}
+.hud .title-hit-mark {
+  flex: 0 0 22px;
+  width: 22px;
+  height: 22px;
+  margin-top: 1px;
+  opacity: 0.72;
+  color: #fff;
+}
+.hud .title-hit-mark svg {
+  width: 18px;
+  height: 18px;
+  display: block;
+}
 .hud .title {
+  flex: 1 1 auto;
+  min-width: 0;
   font-size: 14px;
   font-weight: 600;
   line-height: 1.3;
   text-shadow: 0 1px 8px rgba(0,0,0,0.65);
-  /* 左下角标题：最多两行，避免裁成半截字 */
   max-width: 100%;
   overflow: hidden;
   text-overflow: ellipsis;
@@ -1617,6 +1669,7 @@ body.is-chrome-hidden .lmw-toast {
   margin-top: 5px;
   font-size: 11px;
   color: rgba(255,255,255,0.55);
+  pointer-events: none;
 }
 .hud .stats span {
   display: inline-flex;
@@ -2271,4 +2324,203 @@ button.chip.tag.is-active {
 .lmw-toast.show {
   transform: translateX(-50%) translateY(0);
   opacity: 1;
+}
+
+/* Series episode sheet + feed playlist thumbs */
+.queue-sheet {
+  position: fixed;
+  inset: 0;
+  z-index: 210;
+  display: flex;
+  flex-direction: column;
+  justify-content: flex-end;
+  overflow: hidden;
+  width: 100%;
+  max-width: 100%;
+}
+.queue-sheet.hide { display: none !important; }
+.queue-sheet-backdrop {
+  position: absolute;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.45);
+}
+.queue-sheet-card {
+  position: relative;
+  z-index: 1;
+  width: 100%;
+  max-width: 100%;
+  min-width: 0;
+  box-sizing: border-box;
+  max-height: min(78vh, 720px);
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  background: var(--bg-elevated);
+  border: 1px solid var(--glass-border);
+  border-radius: 18px 18px 0 0;
+  box-shadow: var(--shadow);
+  backdrop-filter: blur(16px);
+  -webkit-backdrop-filter: blur(16px);
+  padding-bottom: var(--safe-bottom);
+}
+.queue-sheet-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 10px 12px 8px;
+  flex: 0 0 auto;
+  min-width: 0;
+}
+.queue-sheet-head .btn {
+  flex: 0 0 auto;
+  white-space: nowrap;
+}
+.queue-sheet-titles {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+.queue-sheet-titles > div:first-child {
+  font-weight: 650;
+  font-size: 15px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+/* Independent of .grid — playlist row is not a grid, tags/thumbs still need overlay. */
+.queue-cell {
+  position: relative;
+  overflow: hidden;
+  aspect-ratio: 1;
+  background: var(--card);
+  border-radius: 14px;
+  border: 1px solid var(--card-border);
+  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.25);
+  cursor: pointer;
+  box-sizing: border-box;
+}
+.queue-cell img.cell-thumb,
+.queue-cell video.cell-motion {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  max-width: none;
+  object-fit: cover;
+  display: block;
+  background: #000;
+}
+.queue-cell .cell-play-hint {
+  position: absolute;
+  right: 8px;
+  bottom: 8px;
+  z-index: 2;
+  width: 28px;
+  height: 28px;
+  border-radius: 50%;
+  display: grid;
+  place-items: center;
+  font-size: 11px;
+  color: #fff;
+  background: rgba(0, 0, 0, 0.55);
+  pointer-events: none;
+}
+.queue-cell .tag {
+  position: absolute;
+  left: 8px;
+  bottom: 8px;
+  z-index: 3;
+  font-size: 11px;
+  line-height: 1.2;
+  color: #fff;
+  background: rgba(0, 0, 0, 0.62);
+  backdrop-filter: blur(6px);
+  padding: 3px 8px;
+  border-radius: 999px;
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  pointer-events: none;
+  max-width: calc(100% - 16px);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.queue-cell.is-current {
+  outline: 2px solid var(--accent);
+  outline-offset: -2px;
+  box-shadow: 0 0 0 3px var(--accent-soft);
+}
+/* Scroll the wrapper, not the grid: iOS Safari overlaps CSS Grid tracks
+   when the grid itself is overflow:auto and there are many items. */
+.queue-thumb-scroll {
+  flex: 1 1 auto;
+  min-width: 0;
+  min-height: 0;
+  max-height: min(62vh, 560px);
+  overflow-x: hidden;
+  overflow-y: auto;
+  -webkit-overflow-scrolling: touch;
+  overscroll-behavior: contain;
+}
+.queue-thumb-grid {
+  display: flex;
+  flex-wrap: wrap;
+  align-content: flex-start;
+  gap: 8px;
+  width: 100%;
+  max-width: 100%;
+  margin: 0;
+  padding: 8px 12px 16px;
+  box-sizing: border-box;
+  overflow: visible;
+}
+.queue-thumb-grid .queue-cell {
+  flex: 0 0 calc((100% - 8px) / 2);
+  width: calc((100% - 8px) / 2);
+  max-width: calc((100% - 8px) / 2);
+  height: auto;
+  aspect-ratio: auto;
+}
+.queue-thumb-grid .queue-cell::before {
+  content: "";
+  display: block;
+  padding-top: 100%;
+}
+@media (min-width: 380px) {
+  .queue-thumb-grid .queue-cell {
+    flex-basis: calc((100% - 16px) / 3);
+    width: calc((100% - 16px) / 3);
+    max-width: calc((100% - 16px) / 3);
+  }
+}
+@media (min-width: 700px) {
+  .queue-thumb-grid .queue-cell {
+    flex-basis: calc((100% - 24px) / 4);
+    width: calc((100% - 24px) / 4);
+    max-width: calc((100% - 24px) / 4);
+  }
+}
+.queue-thumb-row {
+  display: flex;
+  flex-wrap: nowrap;
+  gap: 10px;
+  width: 100%;
+  min-width: 0;
+  box-sizing: border-box;
+  overflow-x: auto;
+  overflow-y: hidden;
+  padding: 8px 14px 18px;
+  scroll-snap-type: x proximity;
+  -webkit-overflow-scrolling: touch;
+  overscroll-behavior-x: contain;
+  touch-action: pan-x;
+}
+.queue-thumb-row .queue-cell {
+  flex: 0 0 112px;
+  width: 112px;
+  height: 112px;
+  min-width: 112px;
+  max-width: 112px;
+  scroll-snap-align: start;
+}
+.hud .title-hit:active {
+  opacity: 0.82;
 }

@@ -194,6 +194,8 @@
                 : "选择剧集";
             btn.classList.toggle("primary", !!state.seriesPick);
         }
+        const cancel = $("btnSeriesPickCancel");
+        if (cancel) cancel.hidden = !state.seriesPick;
         document.body.classList.toggle("mm-series-picking", !!state.seriesPick);
         $("mmGrid")
             .querySelectorAll(".mm-card")
@@ -227,6 +229,14 @@
                 ? `剧集顺序：${state.seriesOrder.map((x, n) => `${n + 1}#${x}`).join(" → ")}`
                 : "点击条目按顺序加入剧集"
         );
+    }
+
+    function cancelSeriesPick() {
+        if (!state.seriesPick) return;
+        state.seriesPick = false;
+        state.seriesOrder = [];
+        updateSeriesPickUi();
+        setStatus("已取消选剧");
     }
 
     async function submitSeries() {
@@ -1715,6 +1725,8 @@
                 submitSeries();
             };
         }
+        const btnSeriesCancel = $("btnSeriesPickCancel");
+        if (btnSeriesCancel) btnSeriesCancel.onclick = () => cancelSeriesPick();
         $("btnRefresh").onclick = () => {
             checkHealth();
             loadTagOptions();
@@ -1724,14 +1736,6 @@
         $("btnOpenFeed").onclick = () => {
             chrome.tabs.create({ url: LMW.baseUrl() + "/" });
         };
-        const btnCs = $("btnConventionScraper");
-        if (btnCs) {
-            btnCs.onclick = () => {
-                chrome.tabs.create({
-                    url: chrome.runtime.getURL("lmw-convention-scraper.html"),
-                });
-            };
-        }
         $("btnMore").onclick = () => loadList({ reset: false });
         const btnSeriesBack = $("btnSeriesBack");
         if (btnSeriesBack) btnSeriesBack.onclick = () => closeSeriesInManage();
@@ -1967,6 +1971,7 @@
             if (e.key === "Escape") {
                 if (!$("mmEdit").classList.contains("hide")) closeEdit();
                 else if (!$("mmPreview").classList.contains("hide")) closePreview();
+                else if (state.seriesPick) cancelSeriesPick();
                 else if (state.openSeriesId) closeSeriesInManage();
             }
         });

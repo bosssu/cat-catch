@@ -110,6 +110,7 @@
     playEpoch: 0,
     /** search page */
     searchQ: "",
+    seriesQ: "",
     searchItems: [],
     searchTotal: 0,
     searchOffset: 0,
@@ -1504,6 +1505,7 @@
     pause: `<svg viewBox="0 0 24 24" aria-hidden="true"><path fill="currentColor" d="M6 5h4v14H6V5zm8 0h4v14h-4V5z"/></svg>`,
     /** center overlay: play while paused */
     play: `<svg viewBox="0 0 24 24" aria-hidden="true"><path fill="currentColor" d="M8 5v14l11-7L8 5z"/></svg>`,
+    queue: `<svg viewBox="0 0 24 24" aria-hidden="true"><path fill="currentColor" d="M4 6h16v2H4V6zm0 5h16v2H4v-2zm0 5h10v2H4v-2z"/></svg>`,
   };
 
   /**
@@ -1819,6 +1821,150 @@
     return withAuthQuery(item.thumb_url);
   }
 
+  function queueThumbHtml(item, { index, current, badge } = {}) {
+    if (!item) return "";
+    const motion = isGridMotionType(item.media_type) ? " cell-has-motion" : "";
+    const cur = current ? " is-current" : "";
+    const label =
+      badge ||
+      (item.episode_index
+        ? `第 ${item.episode_index} 集`
+        : `${(index | 0) + 1}`);
+    const tip = item.title || item.series_title || label;
+    return `<div class="cell queue-cell${motion}${cur}" data-queue-index="${index | 0}" data-id="${item.id}" title="${escapeHtml(tip)}">
+      <img class="cell-thumb" alt="" data-thumb="${escapeHtml(thumbUrl(item) || "")}" data-file="${escapeHtml(fileUrl(item) || "")}" data-type="${escapeHtml(item.media_type || "video")}" />
+      ${isGridMotionType(item.media_type) ? `<span class="cell-play-hint" aria-hidden="true">▶</span>` : ""}
+      <span class="tag">${escapeHtml(label)}</span>
+    </div>`;
+  }
+
+  function bindQueueThumbs(root, onPick) {
+    if (!root) return;
+    root.querySelectorAll("img.cell-thumb").forEach((img) => loadGridStaticThumb(img));
+    root.querySelectorAll(".queue-cell").forEach((cell) => {
+      bindGridHoverPreview(cell);
+      cell.addEventListener("click", (e) => {
+        e.preventDefault();
+        e.stopPropagation();
+        const idx = Number(cell.dataset.queueIndex);
+        if (!Number.isFinite(idx)) return;
+        onPick(idx, cell);
+      });
+    });
+  }
+
+  function playlistHeadline() {
+    const n = (state.items || []).length;
+    const i = Math.min(n, (state.feedIndex | 0) + 1);
+    if (state.feedSource === "search") {
+      return { title: `搜索「${state.searchFeedQ || ""}」`, meta: n ? `${i}/${n}` : "空" };
+    }
+    if (isSeriesFeedMode()) {
+      const it = currentItem() || (state.items && state.items[0]);
+      return {
+        title: (it && (it.series_title || it.title)) || "剧集",
+        meta: n ? `${i}/${n} 集` : "空",
+      };
+    }
+    const names = {
+      random: "随机",
+      similar: "相似",
+      recommend: "推荐",
+      recent: "最新",
+      liked: "已喜欢",
+      series: "剧集",
+    };
+    return { title: names[state.mode] || "Feed", meta: n ? `${i}/${n}` : "空" };
+  }
+
+  function isPlaylistSheetOpen() {
+    const el = document.getElementById("playlistSheet");
+    return !!(el && !el.classList.contains("hide"));
+  }
+
+  function closePlaylistSheet() {
+    const el = document.getElementById("playlistSheet");
+    if (!el) return;
+    el.classList.add("hide");
+    el.setAttribute("aria-hidden", "true");
+  }
+
+  function renderPlaylistSheet() {
+    const row = document.getElementById("playlistSheetRow");
+    const titleEl = document.getElementById("playlistSheetTitle");
+    const metaEl = document.getElementById("playlistSheetMeta");
+    if (!row) return;
+    const head = playlistHeadline();
+    if (titleEl) titleEl.textContent = head.title;
+    if (metaEl) metaEl.textContent = head.meta;
+    const cur = state.feedIndex | 0;
+    row.innerHTML = (state.items || [])
+      .map((item, i) =>
+        queueThumbHtml(item, {
+          index: i,
+          current: i === cur,
+          badge:
+            item && item.episode_index
+              ? `${item.episode_index}${item.episode_count ? "/" + item.episode_count : ""}`
+              : String(i + 1),
+        })
+      )
+      .join("");
+    bindQueueThumbs(row, (idx) => {
+      seekPlaylist(idx);
+    });
+    const curCell = row.querySelector(".queue-cell.is-current");
+    if (curCell) {
+      try {
+        curCell.scrollIntoView({ inline: "center", block: "nearest", behavior: "smooth" });
+      } catch (_) {}
+    }
+  }
+
+  function refreshPlaylistSheetIfOpen() {
+    if (isPlaylistSheetOpen()) renderPlaylistSheet();
+  }
+
+  function openPlaylistSheet() {
+    if (state.view !== "feed") return;
+    const el = document.getElementById("playlistSheet");
+    if (!el) return;
+    el.classList.remove("hide");
+    el.setAttribute("aria-hidden", "false");
+    renderPlaylistSheet();
+  }
+
+  function togglePlaylistSheet() {
+    if (isPlaylistSheetOpen()) closePlaylistSheet();
+    else openPlaylistSheet();
+  }
+
+  async function seekPlaylist(index) {
+    const items = state.items || [];
+    const idx = index | 0;
+    if (idx < 0 || idx >= items.length) return;
+    const item = items[idx];
+    if (!item || item.id == null) return;
+    try {
+      unlockFeedId();
+    } catch (_) {}
+    state.feedIndex = idx;
+    commitFeedId(item.id, idx);
+    let slide = document.querySelector(`#feedScroller .snap-slide[data-id="${item.id}"]`);
+    if (!slide) {
+      renderFeed();
+      slide = document.querySelector(`#feedScroller .snap-slide[data-id="${item.id}"]`);
+    }
+    if (slide) {
+      try {
+        slide.scrollIntoView({ block: "nearest", behavior: "auto" });
+      } catch (_) {}
+      activateFeedSlide(slide, { force: true, fromUserScroll: true });
+    }
+    kickFeedAutoplay(item.id);
+    refreshPlaylistSheetIfOpen();
+  }
+
   /** Immersive: hide topnav / HUD / progress (double-tap). Not zoom. */
   function isChromeHidden() {
     return document.body.classList.contains("is-chrome-hidden");
@@ -2060,6 +2206,10 @@
   function compactFeedIfNeeded() {
     const scroller = $("#feedScroller");
     if (!scroller || state.view !== "feed") return;
+    if (isSeriesFeedMode()) {
+      stripDistantFeedVideos(state.feedIndex | 0);
+      return;
+    }
     if (state._feedScrolling || state._feedCompacting || state._feedActivating) return;
     if (state._programmaticScroll || isPlaybackGuarded() || isOrientLockActive()) return;
     // Never prune DOM while clip identity is frozen (landscape session)
@@ -2690,15 +2840,20 @@
           <div class="hud">
             <div class="meta">
               <div class="type">${typeChip(item)}</div>
-              <div class="title">${escapeHtml(
-                item.series_id && item.episode_index && item.episode_count
-                  ? `${item.series_title || item.title || "剧集"} · ${item.episode_index}/${item.episode_count}`
-                  : item.title || item.source_url || "未命名"
-              )}</div>
-              <div class="stats">
-                <span>${ICO.heart} ${item.like_count || 0}</span>
-                <span>${ICO.eye} ${item.view_count || 0}</span>
-              </div>
+              <button type="button" class="title-hit" data-action="open-playlist" title="打开播放列表" aria-label="打开播放列表">
+                <span class="title-hit-row">
+                  <span class="title">${escapeHtml(
+                    item.series_id && item.episode_index && item.episode_count
+                      ? `${item.series_title || item.title || "剧集"} · ${item.episode_index}/${item.episode_count}`
+                      : item.title || item.source_url || "未命名"
+                  )}</span>
+                  <span class="title-hit-mark" aria-hidden="true">${ICO.queue}</span>
+                </span>
+                <span class="stats">
+                  <span>${ICO.heart} ${item.like_count || 0}</span>
+                  <span>${ICO.eye} ${item.view_count || 0}</span>
+                </span>
+              </button>
             </div>
             <div class="actions">
               <button type="button" class="round mute-btn" data-act="mute" data-id="${item.id}" title="取消静音（播放声音）">${state.wantSound ? ICO.volOn : ICO.volOff}</button>
@@ -2766,6 +2921,7 @@
       const el = scroller.querySelector(`.snap-slide[data-index="${start + j}"]`);
       bindSlideEl(el);
     }
+    refreshPlaylistSheetIfOpen();
     return add.length;
   }
 
@@ -4347,6 +4503,7 @@
       const v = state._feedPlayer;
       if (prevItem && v) saveWatchPosition(v, prevItem.id, { force: true });
     }
+    refreshPlaylistSheetIfOpen();
   }
 
   function typeChip(item) {
@@ -4378,6 +4535,7 @@
 
     scroller.querySelectorAll(".snap-slide").forEach((el) => bindSlideEl(el, { observe: false }));
     observeFeedMedia();
+    refreshPlaylistSheetIfOpen();
   }
 
   function formatMediaTime(sec) {
@@ -6966,6 +7124,9 @@
       clearChromeHidden();
     } catch (_) {}
     try {
+      if (name !== "feed") closePlaylistSheet();
+    } catch (_) {}
+    try {
       // Leaving feed: drop phone-landscape immersive shell
       document.body.classList.remove("lmw-phone-landscape");
       state._landscapeImmersive = false;
@@ -7266,9 +7427,53 @@
   }
 
   function closeSeriesPicker() {
+    closeSeriesEpisodeSheet();
+    clearSeriesSearch();
     const back = state.prevView && state.prevView !== "series" ? state.prevView : "feed";
     setView(back);
     syncFeedModeSelects();
+  }
+
+  function seriesSearchNeedle() {
+    return String(state.seriesQ || "").trim().toLowerCase();
+  }
+
+  function seriesMatchesQuery(s, needle) {
+    if (!needle) return true;
+    const title = String((s && s.title) || "").toLowerCase();
+    const coverTitle = String((s && s.cover && s.cover.title) || "").toLowerCase();
+    return title.includes(needle) || coverTitle.includes(needle);
+  }
+
+  function filteredSeriesPickerItems() {
+    const needle = seriesSearchNeedle();
+    const items = state.seriesPickerItems || [];
+    if (!needle) return items;
+    return items.filter((s) => seriesMatchesQuery(s, needle));
+  }
+
+  function syncSeriesSearchClearBtn() {
+    const input = document.getElementById("seriesSearchInput");
+    const btn = document.getElementById("btnSeriesSearchClear");
+    if (!btn) return;
+    const has = !!(input && String(input.value || "").trim());
+    btn.classList.toggle("hide", !has);
+  }
+
+  function applySeriesSearch(q) {
+    const input = document.getElementById("seriesSearchInput");
+    const query = String(q ?? (input && input.value) ?? "").trim();
+    state.seriesQ = query;
+    if (input && input.value !== query) input.value = query;
+    syncSeriesSearchClearBtn();
+    renderSeriesPicker();
+  }
+
+  function clearSeriesSearch() {
+    state.seriesQ = "";
+    const input = document.getElementById("seriesSearchInput");
+    if (input) input.value = "";
+    syncSeriesSearchClearBtn();
   }
 
   async function loadSeriesPicker() {
@@ -7287,17 +7492,35 @@
     const data = await api(`/api/series?${params}`);
     const items = data.items || [];
     state.seriesPickerItems = items;
-    if (meta) {
-      meta.textContent = items.length ? `剧集 · ${data.total || items.length} 部` : "剧集";
-    }
+    const input = document.getElementById("seriesSearchInput");
+    if (input && state.seriesQ) input.value = state.seriesQ;
+    syncSeriesSearchClearBtn();
     renderSeriesPicker();
-    empty?.classList.toggle("hide", items.length > 0);
   }
 
   function renderSeriesPicker() {
     const grid = $("#seriesGrid");
+    const empty = $("#seriesEmpty");
+    const meta = $("#seriesPickerMeta");
     if (!grid) return;
-    const items = state.seriesPickerItems || [];
+    const all = state.seriesPickerItems || [];
+    const items = filteredSeriesPickerItems();
+    const q = seriesSearchNeedle();
+    if (meta) {
+      if (q) {
+        meta.textContent = items.length
+          ? `剧集 · 搜到 ${items.length} / ${all.length} 部`
+          : `剧集 · 无匹配`;
+      } else {
+        meta.textContent = all.length ? `剧集 · ${all.length} 部` : "剧集";
+      }
+    }
+    if (empty) {
+      empty.textContent = q
+        ? "未找到相关剧集"
+        : "暂无剧集，请到「服务器媒体管理」把条目组成剧集";
+      empty.classList.toggle("hide", items.length > 0);
+    }
     stopAllGridPreviews();
     grid.innerHTML = items
       .map((s) => {
@@ -7325,29 +7548,80 @@
         stopAllGridPreviews();
         const sid = Number(cell.dataset.seriesId);
         if (!sid) return;
-        openSeriesInFeed(sid);
+        openSeriesEpisodeSheet(sid);
       });
     });
   }
 
-  async function openSeriesInFeed(seriesId) {
+  function closeSeriesEpisodeSheet() {
+    const el = document.getElementById("seriesEpisodeSheet");
+    if (!el) return;
+    el.classList.add("hide");
+    el.setAttribute("aria-hidden", "true");
+    state._epSheet = null;
+  }
+
+  function seriesResumeIndex(data, eps) {
+    const resumeId = Number(data && data.current_media_id);
+    let idx = eps.findIndex((x) => Number(x.id) === resumeId);
+    if (idx < 0) {
+      const ei = Math.max(1, Number(data && data.current_episode_index) || 1) - 1;
+      idx = Math.min(Math.max(0, ei), eps.length - 1);
+    }
+    return idx;
+  }
+
+  async function openSeriesEpisodeSheet(seriesId) {
     const data = await api(`/api/series/${Number(seriesId)}`);
     const eps = (data.episodes || []).filter((x) => x && x.id != null);
     if (!eps.length) {
       showToast("该剧集没有可播放条目");
       return;
     }
+    state._epSheet = data;
+    const sheet = document.getElementById("seriesEpisodeSheet");
+    const grid = document.getElementById("epSheetGrid");
+    const titleEl = document.getElementById("epSheetTitle");
+    const metaEl = document.getElementById("epSheetMeta");
+    const resumeIdx = seriesResumeIndex(data, eps);
+    if (titleEl) titleEl.textContent = data.title || "剧集";
+    if (metaEl) {
+      metaEl.textContent = `${eps.length} 集 · 看到第 ${resumeIdx + 1} 集`;
+    }
+    if (grid) {
+      grid.innerHTML = eps
+        .map((item, i) =>
+          queueThumbHtml(item, {
+            index: i,
+            current: i === resumeIdx,
+            badge: `第 ${item.episode_index || i + 1} 集`,
+          })
+        )
+        .join("");
+      bindQueueThumbs(grid, (idx) => {
+        playSeriesEpisodes(data, idx);
+      });
+    }
+    if (sheet) {
+      sheet.classList.remove("hide");
+      sheet.setAttribute("aria-hidden", "false");
+    }
+  }
+
+  function playSeriesEpisodes(data, startIndex) {
+    const eps = ((data && data.episodes) || []).filter((x) => x && x.id != null);
+    if (!eps.length) {
+      showToast("该剧集没有可播放条目");
+      return;
+    }
+    let idx = startIndex | 0;
+    if (idx < 0 || idx >= eps.length) idx = seriesResumeIndex(data, eps);
+    closeSeriesEpisodeSheet();
     clearSearchFeedSource();
     state.mode = "series";
     localStorage.setItem(feedModeKey, "series");
     state.items = eps;
     state.viewedIds = new Set();
-    const resumeId = Number(data.current_media_id);
-    let idx = eps.findIndex((x) => Number(x.id) === resumeId);
-    if (idx < 0) {
-      const ei = Math.max(1, Number(data.current_episode_index) || 1) - 1;
-      idx = Math.min(Math.max(0, ei), eps.length - 1);
-    }
     state.feedIndex = idx;
     commitFeedId(eps[idx].id, idx);
     setView("feed");
@@ -7364,7 +7638,6 @@
       `${data.title || "剧集"} · ${idx + 1}/${eps.length}`
     );
     syncFeedModeSelects();
-    ensureFeedAhead(8, { force: true });
   }
 
   function readSearchSortFromUI() {
@@ -7783,7 +8056,52 @@
           if (t.closest("#btnSeriesBack")) {
             e.preventDefault();
             e.stopPropagation();
+            const epSheet = document.getElementById("seriesEpisodeSheet");
+            if (epSheet && !epSheet.classList.contains("hide")) {
+              closeSeriesEpisodeSheet();
+              return;
+            }
             closeSeriesPicker();
+            return;
+          }
+          if (t.closest("#btnEpSheetBack") || t.closest("[data-ep-sheet-dismiss]")) {
+            e.preventDefault();
+            e.stopPropagation();
+            closeSeriesEpisodeSheet();
+            return;
+          }
+          if (t.closest("#btnEpSheetResume")) {
+            e.preventDefault();
+            e.stopPropagation();
+            const data = state._epSheet;
+            if (data) playSeriesEpisodes(data, seriesResumeIndex(data, data.episodes || []));
+            return;
+          }
+          if (t.closest("[data-action='open-playlist']")) {
+            e.preventDefault();
+            e.stopPropagation();
+            togglePlaylistSheet();
+            return;
+          }
+          if (t.closest("#btnPlaylistClose") || t.closest("[data-playlist-dismiss]")) {
+            e.preventDefault();
+            e.stopPropagation();
+            closePlaylistSheet();
+            return;
+          }
+          if (t.closest("#btnSeriesSearchSubmit")) {
+            e.preventDefault();
+            e.stopPropagation();
+            const v = (document.getElementById("seriesSearchInput") || {}).value || "";
+            applySeriesSearch(v);
+            return;
+          }
+          if (t.closest("#btnSeriesSearchClear")) {
+            e.preventDefault();
+            clearSeriesSearch();
+            renderSeriesPicker();
+            const si = document.getElementById("seriesSearchInput");
+            if (si) si.focus();
             return;
           }
           if (t.closest("#btnSearchSubmit")) {
@@ -7845,6 +8163,32 @@
     for (const sel of feedModeSelects()) {
       sel.addEventListener("change", async (e) => {
         await applyFeedMode(e.target.value);
+      });
+    }
+
+    const seriesSearchInput = document.getElementById("seriesSearchInput");
+    const runSeriesSearchDebounced = debounce(() => {
+      applySeriesSearch((seriesSearchInput && seriesSearchInput.value) || "");
+    }, 320);
+    if (seriesSearchInput && seriesSearchInput.dataset.bound !== "1") {
+      seriesSearchInput.dataset.bound = "1";
+      seriesSearchInput.addEventListener("keydown", (e) => {
+        if (e.key === "Enter") {
+          e.preventDefault();
+          applySeriesSearch(seriesSearchInput.value);
+        }
+        if (e.key === "Escape") {
+          if ((seriesSearchInput.value || "").trim()) {
+            clearSeriesSearch();
+            renderSeriesPicker();
+          } else {
+            closeSeriesPicker();
+          }
+        }
+      });
+      seriesSearchInput.addEventListener("input", () => {
+        syncSeriesSearchClearBtn();
+        runSeriesSearchDebounced();
       });
     }
 
