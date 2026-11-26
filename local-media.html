@@ -5,7 +5,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <title>LocalMediaWeb</title>
   <link rel="stylesheet" href="css/public.css" />
-  <link rel="stylesheet" href="css/local-media.css?v=20260911previewMode2" />
+  <link rel="stylesheet" href="css/local-media.css?v=20261021quickSplit" />
   <script src="js/init.js"></script>
   <script src="lib/jquery.min.js"></script>
   <script src="lib/hls.min.js"></script>
@@ -111,6 +111,23 @@
         </label>
         <button type="button" id="lmRangeAdd" class="button2 lm-range-add-btn">添加</button>
       </div>
+      <div class="lm-quick-split" id="lmQuickSplit">
+        <div class="lm-quick-split-head">快切 · 上面填了起止则切该段，否则切整片</div>
+        <div class="lm-quick-split-row">
+          <label class="lm-quick-split-mode">
+            <input type="radio" name="lmQuickSplitMode" value="duration" checked />
+            每段时长
+          </label>
+          <label class="lm-quick-split-mode">
+            <input type="radio" name="lmQuickSplitMode" value="count" />
+            切成多少段
+          </label>
+        </div>
+        <div class="lm-quick-split-row">
+          <input type="text" id="lmQuickSplitValue" spellcheck="false" placeholder="10:00 或秒数 / 段数" value="10:00" />
+          <button type="button" id="lmQuickSplitBtn" class="button2 lm-range-add-btn">一键切分</button>
+        </div>
+      </div>
       <div class="lm-range-list-wrap">
         <div class="lm-range-list-head">候选时间段 <span id="lmRangeCount" class="lm-range-count">0</span></div>
         <ul id="lmRangeList" class="lm-range-list" aria-label="候选时间段"></ul>
@@ -124,7 +141,7 @@
   </div>
 
   <script src="js/title-rules.js"></script>
-  <script src="js/local-media.js?v=20260911previewMode"></script>
+  <script src="js/local-media.js?v=20261021quickSplitJitter2"></script>
 </body>
 </html>
 

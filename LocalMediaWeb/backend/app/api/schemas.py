@@ -85,6 +85,12 @@ class SeriesCreate(BaseModel):
     title: str = ""
 
 
+class SeriesEpisodesAppend(BaseModel):
+    """Append media ids to an existing series (request order, after current last episode)."""
+
+    ids: list[int] = Field(default_factory=list)
+
+
 class FeedRequest(BaseModel):
     """POST /api/feed — same fields as GET; exclude_ids as int list (random persistence)."""
 

@@ -124,6 +124,8 @@
      * - "normal": /api/feed ranked by mode
      * - "search": /api/media?q=… (same UI/ops as normal feed)
      */
+    /** When set, series-mode playlist stays inside this series_id (no cross-series append). */
+    seriesLockId: null,
     feedSource: "normal",
     /** active query when feedSource === "search" */
     searchFeedQ: "",
@@ -1376,6 +1378,15 @@
     return (state.mode || "") === "series" && state.feedSource !== "search";
   }
 
+  function clearSeriesLock() {
+    state.seriesLockId = null;
+  }
+
+  function setSeriesLock(seriesId) {
+    const n = Number(seriesId);
+    state.seriesLockId = Number.isFinite(n) ? n : null;
+  }
+
   function excludeSeriesIds() {
     const s = new Set();
     for (const it of state.items || []) {
@@ -1389,7 +1400,11 @@
     if (!isSeriesFeedMode() || !item || item.series_id == null) return false;
     const sid = Number(item.series_id);
     const same = (state.items || []).filter((x) => x && Number(x.series_id) === sid);
-    if (same.length > 1) return false;
+    if (same.length > 1) {
+      // Already expanded this series; keep lock so ahead-prefetch cannot append others.
+      if (state.seriesLockId == null) setSeriesLock(sid);
+      return false;
+    }
     if (_seriesExpanding.has(sid)) return false;
     _seriesExpanding.add(sid);
     try {
@@ -1398,13 +1413,20 @@
       if (eps.length < 2) return false;
       const idx = state.items.findIndex((x) => x && Number(x.id) === Number(item.id));
       if (idx < 0) return false;
-      const before = state.items.slice(0, idx);
-      const after = state.items.slice(idx + 1);
-      state.items = [...before, ...eps, ...after];
+      // Lock to this series and drop other-series slides (prevents 串台 on swipe).
+      setSeriesLock(sid);
+      state.items = eps.slice();
       const resumeId = data.current_media_id || item.id;
       let ni = state.items.findIndex((x) => Number(x.id) === Number(resumeId));
-      if (ni < 0) ni = idx;
+      if (ni < 0) {
+        ni = state.items.findIndex((x) => Number(x.id) === Number(item.id));
+      }
+      if (ni < 0) ni = 0;
       state.feedIndex = ni;
+      // Commit resume id BEFORE renderFeed so observeFeedMedia / bare view
+      // cannot race-activate episode 1 and overwrite the series cursor.
+      const resumeItem = state.items[ni];
+      if (resumeItem && resumeItem.id != null) commitFeedId(resumeItem.id, ni);
       renderFeed();
       requestAnimationFrame(() => {
         const cur = state.items[ni];
@@ -2551,6 +2573,8 @@
     }
     const ex = exclude != null ? exclude : excludeFeedIds();
     if (isSeriesFeedMode()) {
+      // Locked to one series (opened from series list / expanded): do not append others.
+      if (state.seriesLockId != null) return [];
       const data = await api("/api/feed", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
@@ -2969,6 +2993,7 @@
     const next = mode || "random";
     // Leaving search playlist → ranked feed modes
     clearSearchFeedSource();
+    if ((mode || "random") !== "series") clearSeriesLock();
     state.mode = next;
     if (next !== "similar" && clearSimilar) {
       state.similarTo = null;
@@ -2999,6 +3024,7 @@
    * Playlist = current search results; more pages append as you swipe near the end.
    */
   function openSearchResultInFeed(startId) {
+    clearSeriesLock();
     const list = (state.searchItems || []).filter((x) => x && x.id != null);
     if (!list.length) {
       showToast("没有可播放的搜索结果");
@@ -3549,12 +3575,14 @@
       bar.classList.add("hide");
       bar.setAttribute("aria-hidden", "true");
       document.body.classList.remove("has-cast-bar");
+      document.body.style.removeProperty("--cast-bar-h");
       releaseCastMediaSession();
       return;
     }
     bar.classList.remove("hide");
     bar.setAttribute("aria-hidden", "false");
     document.body.classList.add("has-cast-bar");
+    document.body.style.setProperty("--cast-bar-h", bar.offsetHeight + "px");
     const dev = _castSession.deviceName || "电视";
     const mid = _castSession.mediaId;
     const t = (_castSession.title || "").trim();
@@ -6173,11 +6201,18 @@
     // ── Rule: only user swipe may change clip ──
     if (wantId && curId && wantId !== curId) {
       if (!fromUser) {
-        // Orient/resize/IO/retry must never switch
-        hardSnapToFeedId(lockedId || curId, {
-          stayLocked: isFeedIdentityLocked(),
-        });
-        return;
+        // Exception: force activate of the already-committed resume target
+        // (series expand / kickFeedAutoplay after a raced ep1 activate).
+        const committed = getCommittedFeedId();
+        const allowForceToCommitted =
+          force && committed != null && wantId === String(committed);
+        if (!allowForceToCommitted) {
+          // Orient/resize/IO/retry must never switch
+          hardSnapToFeedId(lockedId || curId, {
+            stayLocked: isFeedIdentityLocked(),
+          });
+          return;
+        }
       }
       if (lockedId != null && wantId !== lockedId) {
         hardSnapToFeedId(lockedId, { stayLocked: true });
@@ -6687,8 +6722,27 @@
       requestAnimationFrame(() => {
         syncActiveFromScroll();
         if (!state.activeFeedId) {
-          const first = document.querySelector("#feedScroller .snap-slide");
-          if (first) activateFeedSlide(first, { force: true });
+          // Prefer committed resume / feedIndex over DOM-first (episode 1).
+          // Series expand commits the resume id before renderFeed; without
+          // this preference, auto-activate would fire a bare view on ep1 and
+          // move the backend series cursor backward.
+          const committed = getCommittedFeedId();
+          let slide = null;
+          if (committed != null) {
+            slide = document.querySelector(
+              `#feedScroller .snap-slide[data-id="${committed}"]`
+            );
+          }
+          if (!slide && state.feedIndex != null) {
+            slide =
+              document.querySelector(
+                `#feedScroller .snap-slide[data-index="${state.feedIndex}"]`
+              ) || null;
+          }
+          if (!slide) {
+            slide = document.querySelector("#feedScroller .snap-slide");
+          }
+          if (slide) activateFeedSlide(slide, { force: true });
         }
       });
     }
@@ -7620,6 +7674,8 @@
     clearSearchFeedSource();
     state.mode = "series";
     localStorage.setItem(feedModeKey, "series");
+    setSeriesLock(data && data.id);
+
     state.items = eps;
     state.viewedIds = new Set();
     state.feedIndex = idx;

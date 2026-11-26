@@ -5,10 +5,10 @@
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <title>服务器媒体管理 · LocalMediaWeb</title>
   <link rel="stylesheet" href="css/public.css" />
-  <link rel="stylesheet" href="css/lmw-media-manage.css?v=20261006seriesPickCancel2" />
+  <link rel="stylesheet" href="css/lmw-media-manage.css?v=20261022subview1" />
   <script src="js/init.js"></script>
   <script src="js/function.js"></script>
-  <script src="js/local-media-web.js?v=20260927seriesMark"></script>
+  <script src="js/local-media-web.js?v=20261022subview1"></script>
 </head>
 <body class="mm-body">
   <header class="mm-header">
@@ -111,10 +111,12 @@
         <button type="button" id="btnBatchReplace" class="button2">覆盖标签</button>
         <!-- 去码请用本机 FFmpegBridge → JasnaBridge；服务端默认不跑 jasna -->
         <button type="button" id="btnDedupe" class="button2" title="扫描库内文件内容（SHA-256）完全相同的条目，每组仅保留一条并删除其余">一键去重</button>
+        <button type="button" id="btnDownloadSel" class="button2" title="把勾选的视频下载到本机（Chrome 下载目录），不打开预览">下载选中</button>
         <button type="button" id="btnBatchDel" class="button2 danger">批量删除</button>
       </div>
       <span id="mmStatus" class="mm-status muted"></span>
     </div>
+    <div id="mmJobStatus" class="mm-job-status" hidden></div>
   </header>
 
   <main class="mm-main">
@@ -150,6 +152,17 @@
     </div>
   </div>
 
-  <script src="js/lmw-media-manage.js?v=20261006seriesPickCancel2"></script>
+  <!-- 字幕浏览 -->
+  <div id="mmSubView" class="mm-modal hide" aria-hidden="true">
+    <div class="mm-modal-card mm-subview-card" role="dialog" aria-labelledby="mmSubViewTitle">
+      <div class="mm-modal-head" id="mmSubViewTitle">字幕浏览</div>
+      <pre id="mmSubViewBody" class="mm-subview-body"></pre>
+      <div class="mm-modal-actions">
+        <button type="button" id="mmSubViewClose" class="button2">关闭</button>
+      </div>
+    </div>
+  </div>
+
+  <script src="js/lmw-media-manage.js?v=20261022subview1"></script>
 </body>
 </html>

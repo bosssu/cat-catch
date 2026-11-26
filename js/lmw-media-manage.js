@@ -36,6 +36,10 @@
         markedSeriesId: null,
         /** Episode rows inserted so off-page members stay visible until the next reload. */
         markInjectedIds: [],
+        /** Media ids snapshotted before switching type to 剧集, to append on series-card click. */
+        pendingAppendIds: [],
+        /** "pick" = 选择剧集 click order; "check" = grid checkboxes. */
+        pendingAppendFrom: "",
         previewMode: "normal",
     };
 
@@ -178,7 +182,23 @@
 
     function setStatus(msg) {
         const el = $("mmStatus");
-        if (el) el.textContent = msg || "";
+        const t = msg || "";
+        if (el) {
+            el.textContent = t;
+            el.title = t;
+        }
+    }
+
+    /** Full-width job line (subtitle etc.). Not cleared by setStatus / loadList. */
+    function setJobStatus(msg, kind) {
+        const el = $("mmJobStatus");
+        if (!el) return;
+        const t = msg || "";
+        el.hidden = !t;
+        el.textContent = t;
+        el.title = t;
+        el.classList.toggle("is-err", kind === "err");
+        el.classList.toggle("is-ok", kind === "ok");
     }
 
     function seriesOrdOf(id) {
@@ -194,8 +214,7 @@
                 : "选择剧集";
             btn.classList.toggle("primary", !!state.seriesPick);
         }
-        const cancel = $("btnSeriesPickCancel");
-        if (cancel) cancel.hidden = !state.seriesPick;
+        updateAppendPendingUi();
         document.body.classList.toggle("mm-series-picking", !!state.seriesPick);
         $("mmGrid")
             .querySelectorAll(".mm-card")
@@ -237,6 +256,86 @@
         state.seriesOrder = [];
         updateSeriesPickUi();
         setStatus("已取消选剧");
+    }
+
+    function pendingAppendCount() {
+        return (state.pendingAppendIds || []).length;
+    }
+
+    function appendBannerText() {
+        const n = pendingAppendCount();
+        if (!n) return "";
+        const how = state.pendingAppendFrom === "pick" ? "点选顺序" : "勾选";
+        return `已备 ${n} 条（${how}），点一部剧追加到末尾`;
+    }
+
+    function updateAppendPendingUi() {
+        const n = pendingAppendCount();
+        const picking = !!state.seriesPick;
+        const cancel = $("btnSeriesPickCancel");
+        if (cancel) {
+            cancel.hidden = !(picking || n);
+            cancel.title = picking ? "退出选剧，不提交" : "取消备货，不追加";
+        }
+        document.body.classList.toggle(
+            "mm-append-pending",
+            n > 0 && isSeriesBrowse() && !state.openSeriesId
+        );
+    }
+
+    function cancelAppendPending() {
+        if (!pendingAppendCount()) return;
+        state.pendingAppendIds = [];
+        state.pendingAppendFrom = "";
+        updateAppendPendingUi();
+        setStatus("已取消备货");
+    }
+
+    function snapshotAppendIfNeeded(prevType, nextType) {
+        if (nextType === "series" && prevType !== "series") {
+            const pickIds =
+                state.seriesPick && state.seriesOrder.length
+                    ? state.seriesOrder.map(Number).filter((id) => id > 0)
+                    : [];
+            if (pickIds.length) {
+                state.pendingAppendIds = pickIds.slice();
+                state.pendingAppendFrom = "pick";
+                return;
+            }
+            const ids = selectedIds()
+                .map(Number)
+                .filter((id) => id > 0);
+            state.pendingAppendIds = ids.length ? ids : [];
+            state.pendingAppendFrom = ids.length ? "check" : "";
+            return;
+        }
+        if (nextType !== "series") {
+            state.pendingAppendIds = [];
+            state.pendingAppendFrom = "";
+        }
+    }
+
+    async function appendPendingToSeries(sid, title) {
+        const ids = (state.pendingAppendIds || []).slice();
+        if (!ids.length) return;
+        const label = title || `#${sid}`;
+        if (
+            !window.confirm(
+                `将 ${ids.length} 条追加到「${label}」末尾；已在其他剧中的会移过来。`
+            )
+        ) {
+            return;
+        }
+        try {
+            const s = await LMW.appendSeriesEpisodes(sid, { ids });
+            state.pendingAppendIds = [];
+            state.pendingAppendFrom = "";
+            updateAppendPendingUi();
+            state._seriesStatusKeep = `已追加到「${s.title}」· 现 ${s.episode_count} 集`;
+            await loadList({ reset: true });
+        } catch (e) {
+            setStatus("追加失败：" + (e.message || e));
+        }
     }
 
     async function submitSeries() {
@@ -625,7 +724,7 @@
       }
       ${
           mtype === "video" || mtype === "m3u8"
-              ? `<button type="button" data-act="subtitle" data-id="${m.id}" title="本机 ASR，按扩展设置可选翻译，字幕写回此条目">字幕</button>`
+              ? `<button type="button" data-act="subtitle" data-id="${m.id}" title="本机 ASR，按扩展设置可选翻译，字幕写回此条目">字幕</button><button type="button" data-act="subtitle-view" data-id="${m.id}" title="查看已写入的字幕">字幕浏览</button>`
               : ""
       }
       ${
@@ -923,12 +1022,15 @@
                 setStatus(
                     `剧集「${state.openSeriesTitle || state.openSeriesId}」· 点「返回剧集」回到列表`
                 );
+            } else if (pendingAppendCount() && isSeriesBrowse()) {
+                setStatus(appendBannerText());
             } else if (state._seriesStatusKeep) {
                 setStatus(state._seriesStatusKeep);
             } else {
                 setStatus("");
             }
             state._seriesStatusKeep = "";
+            updateAppendPendingUi();
         } catch (e) {
             if (e && e.name === "AbortError") return;
             setStatus("加载失败：" + (e.message || e));
@@ -1104,6 +1206,100 @@
             loadTagCombos();
         } catch (e) {
             setStatus("去重失败：" + (e.message || e));
+        } finally {
+            if (btn) btn.disabled = false;
+        }
+    }
+
+    function downloadExtForMedia(m) {
+        const mime = String(m.mime || "").toLowerCase();
+        const path = String(m.rel_path || m.file_url || "").toLowerCase();
+        const mtype = String(m.media_type || "").toLowerCase();
+        const fromMime = {
+            "video/mp4": "mp4",
+            "video/webm": "webm",
+            "video/quicktime": "mov",
+            "video/x-matroska": "mkv",
+            "application/vnd.apple.mpegurl": "m3u8",
+            "application/x-mpegurl": "m3u8",
+        }[mime];
+        if (fromMime) return fromMime;
+        const mPath = path.match(/\.([a-z0-9]{2,5})(?:\?|$)/);
+        if (mPath) return mPath[1];
+        if (mtype === "m3u8") return "m3u8";
+        return "mp4";
+    }
+
+    function downloadFileName(m) {
+        const raw = String(m.title || "media-" + m.id).trim() || "media-" + m.id;
+        const base = raw
+            .replace(/[\\/:*?"<>|]+/g, "_")
+            .replace(/\s+/g, " ")
+            .slice(0, 80)
+            .trim() || "media-" + m.id;
+        const ext = downloadExtForMedia(m);
+        const already = new RegExp("\\." + ext + "$", "i").test(base);
+        return already ? base : base + "." + ext;
+    }
+
+    function isVideoMedia(m) {
+        const t = String(m.media_type || "").toLowerCase();
+        return t === "video" || t === "m3u8";
+    }
+
+    /**
+     * Save selected video files via chrome.downloads (token URL), not preview/play.
+     */
+    async function downloadSelectedVideos() {
+        const ids = selectedIds();
+        if (!ids.length) {
+            setStatus("请先勾选媒体");
+            return;
+        }
+        const rows = ids
+            .map((id) => state.items.find((x) => Number(x.id) === Number(id)))
+            .filter((m) => m && isVideoMedia(m) && m.file_url);
+        const skipped = ids.length - rows.length;
+        if (!rows.length) {
+            setStatus("选中项里没有可下载的视频（仅 video / m3u8）");
+            return;
+        }
+        const btn = $("btnDownloadSel");
+        if (btn) btn.disabled = true;
+        let ok = 0;
+        let fail = 0;
+        try {
+            for (let i = 0; i < rows.length; i++) {
+                const m = rows[i];
+                setStatus(`下载中 ${i + 1}/${rows.length} · #${m.id} ${m.title || ""}`);
+                const url = typeof LMW.mediaUrlWithToken === "function"
+                    ? LMW.mediaUrlWithToken(m.file_url)
+                    : LMW.absUrl(m.file_url);
+                const filename = downloadFileName(m);
+                try {
+                    await new Promise((resolve, reject) => {
+                        chrome.downloads.download(
+                            { url, filename, saveAs: false, conflictAction: "uniquify" },
+                            (downloadId) => {
+                                const err = chrome.runtime && chrome.runtime.lastError;
+                                if (err) reject(new Error(err.message || "downloads.download"));
+                                else if (!downloadId) reject(new Error("downloads.download returned empty id"));
+                                else resolve(downloadId);
+                            }
+                        );
+                    });
+                    ok += 1;
+                } catch (e) {
+                    fail += 1;
+                    console.warn("download selected failed", m.id, e);
+                }
+            }
+            setStatus(
+                `已提交下载 ${ok} 个视频` +
+                    (fail ? ` · 失败 ${fail}` : "") +
+                    (skipped ? ` · 跳过非视频 ${skipped}` : "") +
+                    "（Chrome 下载目录）"
+            );
         } finally {
             if (btn) btn.disabled = false;
         }
@@ -1409,6 +1605,49 @@
         $("mmEdit").setAttribute("aria-hidden", "false");
     }
 
+    function closeSubtitleView() {
+        const box = $("mmSubView");
+        if (!box) return;
+        box.classList.add("hide");
+        box.setAttribute("aria-hidden", "true");
+        const body = $("mmSubViewBody");
+        if (body) body.textContent = "";
+    }
+
+    async function openSubtitleView(id) {
+        const m = state.items.find((x) => x.id === id);
+        const box = $("mmSubView");
+        const titleEl = $("mmSubViewTitle");
+        const body = $("mmSubViewBody");
+        if (!box || !body) return;
+        const label = m ? `#${id} ${m.title || ""}`.trim() : `#${id}`;
+        if (titleEl) titleEl.textContent = "字幕浏览 · " + label;
+        body.textContent = "加载中…";
+        box.classList.remove("hide");
+        box.setAttribute("aria-hidden", "false");
+        try {
+            const srt = await LMW.getSubtitleSrt(id);
+            const cues = typeof LMW._countSrtCues === "function" ? LMW._countSrtCues(srt) : 0;
+            if (!String(srt || "").trim()) {
+                body.textContent = "暂无字幕";
+                setStatus(`#${id} 暂无字幕`);
+                return;
+            }
+            if (titleEl) titleEl.textContent = `字幕浏览 · ${label} · ${cues} 条`;
+            body.textContent = srt;
+            setStatus(`#${id} 字幕 ${cues} 条`);
+        } catch (e) {
+            const msg = String((e && e.message) || e || "");
+            if (/^404\b/.test(msg) || /not found/i.test(msg)) {
+                body.textContent = "暂无字幕";
+                setStatus(`#${id} 暂无字幕`);
+                return;
+            }
+            body.textContent = "读取失败：\n" + msg;
+            setStatus(`#${id} 字幕浏览失败：` + msg);
+        }
+    }
+
     function closeEdit() {
         state.editId = null;
         $("mmEdit").classList.add("hide");
@@ -1521,6 +1760,10 @@
             }
             return;
         }
+        if (act === "subtitle-view") {
+            openSubtitleView(id);
+            return;
+        }
         if (act === "subtitle") {
             const m = state.items.find((x) => x.id === id);
             const mtype = (m && m.media_type) || "";
@@ -1553,12 +1796,18 @@
                 btn.disabled = true;
                 btn.textContent = "字幕中…";
             }
-            setStatus(`#${id} 字幕：下载原文件…`);
+            const jobLine = (msg, kind) => {
+                const line = `#${id} 字幕：${msg}`;
+                setJobStatus(line, kind);
+                setStatus(line);
+            };
+            jobLine("下载原文件…");
             try {
                 const blob = await LMW.fetchMediaFileBlob(id);
-                await LMW.generateSubtitle(id, blob, {
+                jobLine(`下载完成 ${formatSize(blob.size)}`);
+                const saved = await LMW.generateSubtitle(id, blob, {
                     filename: `${String(m.title || "video").slice(0, 60)}.mp4`,
-                    onUpdate: (msg) => setStatus(`#${id} 字幕：${msg}`),
+                    onUpdate: (msg) => jobLine(msg),
                 });
                 const fresh = await LMW.getMedia(id);
                 const idx = state.items.findIndex((x) => x.id === id);
@@ -1576,9 +1825,26 @@
                 } else {
                     await loadList({ reset: true });
                 }
-                setStatus(`已写入字幕 #${id}`);
+                const lastEnd = Number(saved && saved.lastEndSec) || 0;
+                const videoDur = Number(m.duration_sec) || Number(fresh && fresh.duration_sec) || 0;
+                const cues = Number(saved && saved.cues) || 0;
+                if (videoDur > 30 && lastEnd > 0 && lastEnd < videoDur * 0.25) {
+                    jobLine(
+                        `已写入但偏短：${cues} 条到 ${formatDuration(lastEnd)} / 视频 ${formatDuration(videoDur)}。多半是识别端 VAD 裁掉后半，请重启 whisper-asr（已改默认 vad_filter=false）后再生成`,
+                        "err"
+                    );
+                } else {
+                    jobLine(
+                        `已写入字幕 · ${cues} 条` +
+                            (lastEnd ? ` · 到 ${formatDuration(lastEnd)}` : ""),
+                        "ok"
+                    );
+                }
             } catch (e) {
-                setStatus(`字幕 #${id} 失败：` + (e.message || e));
+                const detail = String((e && e.message) || e || "未知错误");
+                const line = detail.indexOf("失败") >= 0 ? `#${id} 字幕 ${detail}` : `#${id} 字幕失败：${detail}`;
+                setJobStatus(line, "err");
+                setStatus(line);
                 if (btn && btn.isConnected) {
                     btn.disabled = false;
                     btn.textContent = "字幕";
@@ -1726,7 +1992,12 @@
             };
         }
         const btnSeriesCancel = $("btnSeriesPickCancel");
-        if (btnSeriesCancel) btnSeriesCancel.onclick = () => cancelSeriesPick();
+        if (btnSeriesCancel) {
+            btnSeriesCancel.onclick = () => {
+                if (state.seriesPick) cancelSeriesPick();
+                else cancelAppendPending();
+            };
+        }
         $("btnRefresh").onclick = () => {
             checkHealth();
             loadTagOptions();
@@ -1753,7 +2024,12 @@
 
         const reloadDebounced = debounce(() => loadList({ reset: true }), 300);
         $("mmQ").addEventListener("input", reloadDebounced);
-        ["mmType", "mmTag", "mmLiked", "mmSort"].forEach((id) => {
+        $("mmType").addEventListener("change", () => {
+            const next = $("mmType").value || "";
+            snapshotAppendIfNeeded(state.filters.type, next);
+            loadList({ reset: true });
+        });
+        ["mmTag", "mmLiked", "mmSort"].forEach((id) => {
             $(id).addEventListener("change", () => loadList({ reset: true }));
         });
         const previewSel = $("mmPreviewMode");
@@ -1786,6 +2062,8 @@
         if (btnJasna) btnJasna.onclick = () => batchJasna();
         const btnDedupe = $("btnDedupe");
         if (btnDedupe) btnDedupe.onclick = () => oneClickDedupe();
+        const btnDownloadSel = $("btnDownloadSel");
+        if (btnDownloadSel) btnDownloadSel.onclick = () => downloadSelectedVideos();
 
         // Tag library autocomplete: batch bar / upload / edit modal
         if (typeof LMW.attachTagAutocomplete === "function") {
@@ -1908,10 +2186,13 @@
             if (seriesCard && isSeriesBrowse() && !state.openSeriesId) {
                 e.preventDefault();
                 const titleEl = seriesCard.querySelector(".mm-card-title");
-                openSeriesInManage(
-                    Number(seriesCard.dataset.seriesId),
-                    titleEl ? titleEl.textContent : ""
-                );
+                const title = titleEl ? titleEl.textContent : "";
+                const sid = Number(seriesCard.dataset.seriesId);
+                if (pendingAppendCount()) {
+                    appendPendingToSeries(sid, title);
+                    return;
+                }
+                openSeriesInManage(sid, title);
                 return;
             }
             const prev = t.closest("[data-preview]");
@@ -1966,12 +2247,18 @@
         $("mmEdit").addEventListener("click", (e) => {
             if (e.target.id === "mmEdit") closeEdit();
         });
+        $("mmSubViewClose").onclick = closeSubtitleView;
+        $("mmSubView").addEventListener("click", (e) => {
+            if (e.target.id === "mmSubView") closeSubtitleView();
+        });
 
         window.addEventListener("keydown", (e) => {
             if (e.key === "Escape") {
-                if (!$("mmEdit").classList.contains("hide")) closeEdit();
+                if (!$("mmSubView").classList.contains("hide")) closeSubtitleView();
+                else if (!$("mmEdit").classList.contains("hide")) closeEdit();
                 else if (!$("mmPreview").classList.contains("hide")) closePreview();
                 else if (state.seriesPick) cancelSeriesPick();
+                else if (pendingAppendCount()) cancelAppendPending();
                 else if (state.openSeriesId) closeSeriesInManage();
             }
         });

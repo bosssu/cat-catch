@@ -180,7 +180,7 @@ G.OptionLists = {
     /** 本机 YtDlpBridge（页面 URL 下载，默认 8792） */
     ytdlpBridgeURL: "http://127.0.0.1:8792",
     /** 字幕：本机 ASR（encode=true 由识别服务自己解码） */
-    lmwAsrUrl: "http://127.0.0.1:9000/asr?encode=true&task=transcribe&output=srt",
+    lmwAsrUrl: "http://127.0.0.1:9000/asr?encode=true&task=transcribe&output=srt&vad_filter=false",
     /** 只识别，不翻译 */
     lmwSubtitleAsrOnly: false,
     /** OpenAI 兼容 chat completions */

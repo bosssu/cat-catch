@@ -184,3 +184,94 @@ def test_series_source_interact_skips_rank_counters(client: TestClient):
     assert nr.json()["view_count"] == 1
     nr = client.post(f"/api/media/{mid}/interact", json={"event": "progress", "progress": 0.5})
     assert nr.json()["max_progress"] == 0.5
+
+
+def test_bare_view_does_not_move_series_cursor(client: TestClient):
+    """Opening a slide posts view; that must not steal the resume cursor (ep1 race)."""
+    ids = client.media_ids  # type: ignore[attr-defined]
+    r = client.post("/api/series", json={"ids": ids[:3], "title": "Show Cursor Guard"})
+    sid = r.json()["id"]
+    # Establish cursor on episode 2 via real progress
+    mid2 = ids[1]
+    ir = client.post(
+        f"/api/media/{mid2}/interact",
+        json={"event": "progress", "progress": 0.3, "position_sec": 20, "duration_sec": 120},
+    )
+    assert ir.status_code == 200
+    g0 = client.get(f"/api/series/{sid}").json()
+    assert g0["current_media_id"] == mid2
+    assert g0["current_episode_index"] == 2
+    # Bare view + dwell on episode 1 must leave cursor on episode 2
+    mid1 = ids[0]
+    for body in (
+        {"event": "view"},
+        {"event": "view", "source": "series"},
+        {"event": "dwell", "dwell_ms": 8000, "source": "series"},
+    ):
+        vr = client.post(f"/api/media/{mid1}/interact", json=body)
+        assert vr.status_code == 200, vr.text
+    g1 = client.get(f"/api/series/{sid}").json()
+    assert g1["current_media_id"] == mid2
+    assert g1["current_episode_index"] == 2
+    # ended on episode 3 may advance cursor
+    mid3 = ids[2]
+    er = client.post(
+        f"/api/media/{mid3}/interact",
+        json={"event": "ended", "progress": 1.0, "position_sec": 0, "source": "series"},
+    )
+    assert er.status_code == 200
+    g2 = client.get(f"/api/series/{sid}").json()
+    assert g2["current_media_id"] == mid3
+    assert g2["current_episode_index"] == 3
+
+
+def test_append_episodes_keeps_id_order_and_cursor(client: TestClient):
+    ids = client.media_ids  # type: ignore[attr-defined]
+    created = client.post("/api/series", json={"ids": ids[:2], "title": "Show Append"})
+    assert created.status_code == 200, created.text
+    sid = created.json()["id"]
+    mid = ids[1]
+    ir = client.post(
+        f"/api/media/{mid}/interact",
+        json={"event": "progress", "progress": 0.3, "position_sec": 12, "duration_sec": 120},
+    )
+    assert ir.status_code == 200
+    r = client.post(f"/api/series/{sid}/episodes", json={"ids": [ids[2], ids[3]]})
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert body["id"] == sid
+    assert body["title"] == "Show Append"
+    assert [e["id"] for e in body["episodes"]] == ids
+    assert [e["episode_index"] for e in body["episodes"]] == [1, 2, 3, 4]
+    assert body["current_media_id"] == mid
+    assert body["current_episode_index"] == 2
+
+
+def test_append_moves_member_from_other_series(client: TestClient):
+    ids = client.media_ids  # type: ignore[attr-defined]
+    a = client.post("/api/series", json={"ids": ids[:2], "title": "A"})
+    b = client.post("/api/series", json={"ids": ids[2:], "title": "B"})
+    assert a.status_code == 200 and b.status_code == 200
+    sid_a = a.json()["id"]
+    sid_b = b.json()["id"]
+    r = client.post(f"/api/series/{sid_a}/episodes", json={"ids": [ids[2]]})
+    assert r.status_code == 200, r.text
+    assert [e["id"] for e in r.json()["episodes"]] == [ids[0], ids[1], ids[2]]
+    assert client.get(f"/api/series/{sid_b}").status_code == 404
+    lone = client.get(f"/api/media/{ids[3]}").json()
+    assert lone["series_id"] is None
+
+
+def test_append_skips_existing_and_rejects_empty(client: TestClient):
+    ids = client.media_ids  # type: ignore[attr-defined]
+    created = client.post("/api/series", json={"ids": ids[:2], "title": "Keep"})
+    sid = created.json()["id"]
+    empty = client.post(f"/api/series/{sid}/episodes", json={"ids": []})
+    assert empty.status_code == 400
+    only_old = client.post(f"/api/series/{sid}/episodes", json={"ids": [ids[0]]})
+    assert only_old.status_code == 400
+    mixed = client.post(f"/api/series/{sid}/episodes", json={"ids": [ids[0], ids[2]]})
+    assert mixed.status_code == 200, mixed.text
+    assert [e["id"] for e in mixed.json()["episodes"]] == [ids[0], ids[1], ids[2]]
+    missing = client.post("/api/series/999999/episodes", json={"ids": [ids[3]]})
+    assert missing.status_code == 404

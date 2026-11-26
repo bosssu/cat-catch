@@ -758,6 +758,43 @@ body.lm-multi-merge-mode .lm-card {
 .lm-range-add-btn:hover {
   background: #3a4f7a;
 }
+.lm-quick-split {
+  margin: 0 0 14px;
+  padding: 10px 10px 12px;
+  border: 1px solid #333348;
+  border-radius: 8px;
+  background: #161622;
+}
+.lm-quick-split-head {
+  font-size: 12px;
+  color: #9aa;
+  margin-bottom: 8px;
+}
+.lm-quick-split-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-top: 6px;
+  flex-wrap: wrap;
+}
+.lm-quick-split-mode {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  font-size: 12px;
+  color: #bcc;
+  cursor: pointer;
+}
+.lm-quick-split-row input[type="text"] {
+  flex: 1 1 140px;
+  min-width: 0;
+  background: #12121a;
+  color: #eee;
+  border: 1px solid #444;
+  border-radius: 6px;
+  padding: 8px 10px;
+  font-size: 14px;
+}
 .lm-range-list-wrap {
   margin: 0 0 14px;
   border: 1px solid #333348;

@@ -3266,8 +3266,158 @@
                 $("#lmRangeOk").off("click.range");
                 $("#lmRangeCancel").off("click.range");
                 $("#lmRangeAdd").off("click.range");
+                $("#lmQuickSplitBtn").off("click.range");
+                $m.find("input[name='lmQuickSplitMode']").off("change.range");
                 $m.off("click.range");
                 $(document).off("keydown.range");
+            };
+
+            const applyQuickSplit = () => {
+                const startRaw = String($start.val() || "").trim();
+                const endFilled = String($end.val() || "").trim();
+                const startIsDefault =
+                    !startRaw || startRaw === "00:00:00" || startRaw === "0";
+                const endIsDefault =
+                    !endFilled || endFilled === "00:00:00" || endFilled === "0";
+                const hasWindow = !startIsDefault || !endIsDefault;
+
+                const startSec = parseTimeToSeconds(startRaw || "00:00:00") || 0;
+                let endSec = parseTimeToSeconds(endFilled);
+                if (endSec != null && !(endSec > 0)) endSec = null;
+
+                let winStart = 0;
+                let winEnd = null;
+                if (hasWindow) {
+                    winStart = startSec;
+                    if (endSec != null && endSec > 0) {
+                        winEnd = endSec;
+                    } else if (playlistDur != null && playlistDur > 0) {
+                        winEnd = playlistDur;
+                    } else {
+                        setModalStatus(
+                            "已填开始时间但结束为空：需要片长才能切到片尾。等「本列表约 …」或填写结束时间。"
+                        );
+                        return;
+                    }
+                    if (!(winEnd > winStart)) {
+                        setModalStatus("结束时间须大于开始时间");
+                        return;
+                    }
+                    if (playlistDur != null && playlistDur > 0) {
+                        if (winStart >= playlistDur) {
+                            setModalStatus(
+                                "开始时间已超过本 m3u8 时长 " + formatSecHms(playlistDur)
+                            );
+                            return;
+                        }
+                        if (winEnd > playlistDur + 0.5) winEnd = playlistDur;
+                    }
+                } else {
+                    if (playlistDur == null || !(playlistDur > 0)) {
+                        setModalStatus(
+                            "尚未探测到本 m3u8 片长，无法快切。等提示出现「本列表约 …」后再试。"
+                        );
+                        return;
+                    }
+                    winStart = 0;
+                    winEnd = playlistDur;
+                }
+
+                const span = winEnd - winStart;
+                const mode =
+                    String(
+                        ($m.find("input[name='lmQuickSplitMode']:checked").val() || "duration")
+                    ).trim() || "duration";
+                const raw = String($("#lmQuickSplitValue").val() || "").trim();
+                if (!raw) {
+                    setModalStatus(mode === "count" ? "请填写要切成多少段" : "请填写每段时长");
+                    return;
+                }
+                const segs = [];
+                if (mode === "count") {
+                    const n = Math.floor(+raw);
+                    if (!Number.isFinite(n) || n < 2) {
+                        setModalStatus("段数须为 ≥ 2 的整数");
+                        return;
+                    }
+                    if (n > 200) {
+                        setModalStatus("段数过多（最多 200）");
+                        return;
+                    }
+                    const weights = [];
+                    for (let i = 0; i < n; i++) {
+                        const j = 1 + (Math.random() * 2 - 1) * 0.14;
+                        weights.push(Math.max(0.72, Math.min(1.28, j)));
+                    }
+                    const wsum = weights.reduce((acc, w) => acc + w, 0) || n;
+                    let a = winStart;
+                    for (let i = 0; i < n; i++) {
+                        const b = i === n - 1 ? winEnd : a + (span * weights[i]) / wsum;
+                        segs.push({
+                            startSec: a,
+                            endSec: b,
+                            startStr: formatSecHms(a),
+                            endStr: formatSecHms(b),
+                        });
+                        a = b;
+                    }
+                } else {
+                    const dur = parseTimeToSeconds(raw);
+                    if (dur == null || !(dur > 0)) {
+                        setModalStatus("每段时长无效（可用 10:00 或秒数）");
+                        return;
+                    }
+                    if (dur >= span) {
+                        setModalStatus(
+                            "每段时长已不短于选定区间 " +
+                                formatSecHms(span) +
+                                "，无需切分"
+                        );
+                        return;
+                    }
+                    const minLen = Math.max(5, dur * 0.72);
+                    const maxLen = dur * 1.28;
+                    const amp = Math.max(4, dur * 0.14);
+                    let a = winStart;
+                    let guard = 0;
+                    while (a < winEnd - 0.05 && guard < 200) {
+                        const remaining = winEnd - a;
+                        let b;
+                        if (remaining <= maxLen + 0.5) {
+                            b = winEnd;
+                        } else {
+                            let len = dur + (Math.random() * 2 - 1) * amp;
+                            if (len < minLen) len = minLen;
+                            if (len > maxLen) len = maxLen;
+                            if (remaining - len < minLen) {
+                                len = remaining / 2;
+                            }
+                            b = a + len;
+                        }
+                        segs.push({
+                            startSec: a,
+                            endSec: b,
+                            startStr: formatSecHms(a),
+                            endStr: formatSecHms(b),
+                        });
+                        a = b;
+                        guard++;
+                    }
+                    if (guard >= 200) {
+                        setModalStatus("切分段数过多（最多 200）");
+                        return;
+                    }
+                }
+                draft = segs;
+                renderList();
+                $start.val("00:00:00");
+                $end.val("00:00:00");
+                const scope = hasWindow
+                    ? formatSecHms(winStart) + "–" + formatSecHms(winEnd)
+                    : "整片";
+                setModalStatus(
+                    "已对 " + scope + " 快切为 " + segs.length + " 段（覆盖原候选）"
+                );
             };
             const finish = (ok) => {
                 if (ok) {
@@ -3315,11 +3465,19 @@
             $("#lmRangeAdd").on("click.range", () => {
                 tryAddFromInputs();
             });
+            $("#lmQuickSplitBtn").on("click.range", () => applyQuickSplit());
+            $m.find("input[name='lmQuickSplitMode']").on("change.range", function () {
+                const $v = $("#lmQuickSplitValue");
+                if (this.value === "count") {
+                    $v.attr("placeholder", "段数，如 4");
+                    if (!/^\d+$/.test(String($v.val() || "").trim())) $v.val("4");
+                } else {
+                    $v.attr("placeholder", "10:00 或秒数");
+                    if (!String($v.val() || "").includes(":") && +$v.val() < 2) $v.val("10:00");
+                }
+            });
             $("#lmRangeOk").on("click.range", () => finish(true));
             $("#lmRangeCancel").on("click.range", () => finish(false));
-            $m.on("click.range", (e) => {
-                if (e.target === $m[0]) finish(false);
-            });
             $(document).on("keydown.range", (e) => {
                 if (e.key === "Escape") finish(false);
                 if (e.key === "Enter" && !e.shiftKey) {

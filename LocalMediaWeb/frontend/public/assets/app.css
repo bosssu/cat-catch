@@ -2363,6 +2363,11 @@ button.chip.tag.is-active {
   -webkit-backdrop-filter: blur(16px);
   padding-bottom: var(--safe-bottom);
 }
+/* Cast bar is fixed over the sheet; lift the whole card by the measured bar height. */
+body.has-cast-bar .queue-sheet-card {
+  margin-bottom: var(--cast-bar-h, 0px);
+  padding-bottom: 0;
+}
 .queue-sheet-head {
   display: flex;
   align-items: center;

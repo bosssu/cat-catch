@@ -426,9 +426,9 @@
           </div>
           <div class="item">
             <div><span>字幕 ASR 地址</span>
-              <p class="explain" style="margin:4px 0 0;font-size:12px;opacity:.85;">管理页「字幕」把视频 POST 到此地址（表单字段 audio_file），取回 SRT。默认本机 faster-whisper 兼容接口，encode=true 表示由识别服务解码。</p>
+              <p class="explain" style="margin:4px 0 0;font-size:12px;opacity:.85;">管理页「字幕」把视频 POST 到此地址（表单字段 audio_file），取回 SRT。encode=true 由识别服务解码。vad_filter=false：不要用 VAD 裁掉后半段（日语/英语视频容易只认出开头几秒）。日语可加 &amp;language=ja，英语 language=en。</p>
             </div>
-            <input id="lmwAsrUrl" save="input" type="text" class="width100" placeholder="http://127.0.0.1:9000/asr?encode=true&task=transcribe&output=srt">
+            <input id="lmwAsrUrl" save="input" type="text" class="width100" placeholder="http://127.0.0.1:9000/asr?encode=true&task=transcribe&output=srt&vad_filter=false">
           </div>
           <div class="item">
             <div>

@@ -13,7 +13,7 @@ const LMW = {
         jasnaBridgeURL: "http://127.0.0.1:8791",
         /** 本机 YtDlpBridge（页面 URL → yt-dlp，默认 8792） */
         ytdlpBridgeURL: "http://127.0.0.1:8792",
-        lmwAsrUrl: "http://127.0.0.1:9000/asr?encode=true&task=transcribe&output=srt",
+        lmwAsrUrl: "http://127.0.0.1:9000/asr?encode=true&task=transcribe&output=srt&vad_filter=false",
         lmwSubtitleAsrOnly: false,
         lmwSubtitleAiUrl: "",
         lmwSubtitleAiModel: "",
@@ -733,12 +733,16 @@ const LMW = {
      * Download media file bytes from LMW (after server m3u8 job etc.).
      */
     async fetchMediaFileBlob(mediaId) {
-        const res = await fetch(this.baseUrl() + `/api/media/${mediaId}/file`, {
-            headers: this.headers(false),
-        });
+        const url = this.baseUrl() + `/api/media/${mediaId}/file`;
+        let res;
+        try {
+            res = await fetch(url, { headers: this.headers(false) });
+        } catch (e) {
+            throw this._stageError("下载", url, e);
+        }
         if (!res.ok) {
             const text = await res.text().catch(() => "");
-            throw new Error(`download media ${mediaId}: ${text || res.statusText}`);
+            throw this._httpError("下载", url, res.status, text);
         }
         return res.blob();
     },
@@ -1234,6 +1238,16 @@ const LMW = {
         });
     },
 
+    appendSeriesEpisodes(seriesId, body = {}) {
+        return this.request(`/api/series/${Number(seriesId)}/episodes`, {
+            method: "POST",
+            headers: this.headers(true),
+            body: JSON.stringify({
+                ids: body.ids || [],
+            }),
+        });
+    },
+
     listSeries(params = {}, options = {}) {
         const q = new URLSearchParams();
         q.set("offset", String(params.offset ?? 0));
@@ -1313,6 +1327,70 @@ const LMW = {
         return s;
     },
 
+    _elapsedLabel(ms) {
+        const sec = Math.max(0, Math.floor(Number(ms) / 1000));
+        const m = Math.floor(sec / 60);
+        const s = sec % 60;
+        return m ? `${m}m${String(s).padStart(2, "0")}s` : `${s}s`;
+    },
+
+    _isNetFail(err) {
+        const raw = String((err && err.message) || err || "");
+        return /failed to fetch|networkerror|load failed|network request failed/i.test(raw);
+    },
+
+    _stageError(stage, url, err, extra) {
+        const raw = String((err && err.message) || err || "");
+        const parts = [`失败 · 阶段=${stage}`];
+        if (this._isNetFail(err)) {
+            parts.push("连不上（检查服务是否在跑）");
+        } else {
+            parts.push(raw.slice(0, 280));
+        }
+        if (url) parts.push("URL=" + url);
+        if (extra) parts.push(extra);
+        return new Error(parts.join(" · "));
+    },
+
+    _httpError(stage, url, status, body) {
+        const parts = [
+            `失败 · 阶段=${stage}`,
+            `HTTP ${status}`,
+            String(body || "").replace(/\s+/g, " ").trim().slice(0, 240),
+        ].filter(Boolean);
+        if (url) parts.push("URL=" + url);
+        return new Error(parts.join(" · "));
+    },
+
+    _countSrtCues(srt) {
+        const n = String(srt || "").match(/-->/g);
+        return n ? n.length : 0;
+    },
+
+    _srtLastEndSec(srt) {
+        const re = /-->\s*(\d+):(\d+):(\d+)[,.](\d+)/g;
+        let m;
+        let last = 0;
+        while ((m = re.exec(String(srt || "")))) {
+            last = Number(m[1]) * 3600 + Number(m[2]) * 60 + Number(m[3]) + Number(m[4]) / 1000;
+        }
+        return last;
+    },
+
+    _blobMediaFilename(blob, filename) {
+        const t = String((blob && blob.type) || "").toLowerCase();
+        let ext = "";
+        if (t.includes("webm")) ext = ".webm";
+        else if (t.includes("matroska")) ext = ".mkv";
+        else if (t.includes("quicktime")) ext = ".mov";
+        else if (t.includes("mp4") || t.includes("mpeg")) ext = ".mp4";
+        else {
+            const fromName = String(filename || "").match(/\.[a-z0-9]{2,5}$/i);
+            ext = fromName ? fromName[0] : ".bin";
+        }
+        return "media" + ext;
+    },
+
     async _translateSrt(srt, cfg, onUpdate) {
         if (!cfg.aiUrl || !cfg.model || !cfg.key) {
             throw new Error("要翻译请在扩展设置里填写翻译接口、模型 id 和 API Key，或打开「只识别」");
@@ -1321,31 +1399,37 @@ const LMW = {
         const chunks = this._splitSrt(srt, 10000);
         const out = [];
         for (let i = 0; i < chunks.length; i++) {
-            if (onUpdate) onUpdate(`翻译 ${i + 1}/${chunks.length}`);
-            const res = await fetch(cfg.aiUrl, {
-                method: "POST",
-                headers: {
-                    "Content-Type": "application/json",
-                    Authorization: "Bearer " + cfg.key,
-                },
-                body: JSON.stringify({
-                    model: cfg.model,
-                    temperature: 0.2,
-                    messages: [
-                        { role: "system", content: cfg.prompt },
-                        { role: "user", content: chunks[i] },
-                    ],
-                }),
-            });
+            const stage = `翻译 ${i + 1}/${chunks.length}`;
+            if (onUpdate) onUpdate(stage);
+            let res;
+            try {
+                res = await fetch(cfg.aiUrl, {
+                    method: "POST",
+                    headers: {
+                        "Content-Type": "application/json",
+                        Authorization: "Bearer " + cfg.key,
+                    },
+                    body: JSON.stringify({
+                        model: cfg.model,
+                        temperature: 0.2,
+                        messages: [
+                            { role: "system", content: cfg.prompt },
+                            { role: "user", content: chunks[i] },
+                        ],
+                    }),
+                });
+            } catch (e) {
+                throw this._stageError("翻译", cfg.aiUrl, e, `${i + 1}/${chunks.length}`);
+            }
             const raw = await res.text();
             if (!res.ok) {
-                throw new Error(`翻译失败 HTTP ${res.status}: ${raw.slice(0, 240)}`);
+                throw this._httpError("翻译", cfg.aiUrl, res.status, raw);
             }
             let data;
             try {
                 data = JSON.parse(raw);
             } catch (e) {
-                throw new Error("翻译接口没有返回 JSON");
+                throw new Error(`失败 · 阶段=翻译 · 接口没有返回 JSON · URL=${cfg.aiUrl}`);
             }
             const content =
                 data &&
@@ -1355,7 +1439,7 @@ const LMW = {
                 data.choices[0].message.content;
             const piece = this._stripFence(content);
             if (!piece || piece.indexOf("-->") < 0) {
-                throw new Error("翻译结果不是 SRT");
+                throw new Error(`失败 · 阶段=翻译 · 结果不是 SRT · ${i + 1}/${chunks.length}`);
             }
             out.push(piece);
         }
@@ -1369,29 +1453,68 @@ const LMW = {
     async generateSubtitle(id, blob, { filename = "media.bin", onUpdate } = {}) {
         const cfg = this.subtitleSettings();
         if (!cfg.asrUrl) throw new Error("未配置字幕 ASR 地址");
-        if (onUpdate) onUpdate("识别中…");
+        const sizeMb = blob && blob.size ? (blob.size / (1024 * 1024)).toFixed(1) : "?";
+        const t0 = Date.now();
+        let tick = null;
+        const beat = () => {
+            if (onUpdate) {
+                onUpdate(
+                    `识别中 ${this._elapsedLabel(Date.now() - t0)} · ${sizeMb}MB · ${cfg.asrUrl}`
+                );
+            }
+        };
+        beat();
+        tick = setInterval(beat, 5000);
         const fd = new FormData();
-        fd.append("audio_file", blob, filename || "media.bin");
-        const asrRes = await fetch(cfg.asrUrl, { method: "POST", body: fd });
+        fd.append("audio_file", blob, this._blobMediaFilename(blob, filename));
+        let asrRes;
+        try {
+            asrRes = await fetch(cfg.asrUrl, { method: "POST", body: fd });
+        } catch (e) {
+            throw this._stageError("ASR", cfg.asrUrl, e);
+        } finally {
+            if (tick) clearInterval(tick);
+        }
         const asrText = await asrRes.text();
         if (!asrRes.ok) {
-            throw new Error(`ASR 失败 HTTP ${asrRes.status}: ${asrText.slice(0, 240)}`);
+            throw this._httpError("ASR", cfg.asrUrl, asrRes.status, asrText);
         }
         if (!asrText.trim() || asrText.indexOf("-->") < 0) {
-            throw new Error("ASR 没有返回 SRT");
+            throw new Error(
+                `失败 · 阶段=ASR · 没有返回 SRT · ${this._elapsedLabel(Date.now() - t0)} · URL=${cfg.asrUrl}`
+            );
         }
         let finalText = asrText;
         if (!cfg.asrOnly) {
             finalText = await this._translateSrt(asrText, cfg, onUpdate);
         }
-        if (onUpdate) onUpdate("写回字幕…");
+        const cues = this._countSrtCues(finalText);
+        const lastEndSec = this._srtLastEndSec(finalText);
+        if (onUpdate) onUpdate(`写回字幕… ${cues} 条 · 末条 ${this._elapsedLabel(lastEndSec * 1000)}`);
         const headers = this.headers(false);
         headers["Content-Type"] = "text/plain; charset=utf-8";
-        return this.request(`/api/media/${id}/subtitle`, {
-            method: "PUT",
-            headers,
-            body: finalText,
+        const putUrl = this.baseUrl() + `/api/media/${id}/subtitle`;
+        try {
+            const saved = await this.request(`/api/media/${id}/subtitle`, {
+                method: "PUT",
+                headers,
+                body: finalText,
+            });
+            const extra = { cues, lastEndSec };
+            if (saved && typeof saved === "object") return Object.assign({}, saved, extra);
+            return extra;
+        } catch (e) {
+            throw this._stageError("写回", putUrl, e);
+        }
+    },
+
+    /** Sidecar SRT text for one media id. 404 → empty string. */
+    async getSubtitleSrt(id) {
+        const res = await this.request(`/api/media/${Number(id)}/subtitle?format=srt`, {
+            headers: this.headers(false),
         });
+        if (res && typeof res.text === "function") return await res.text();
+        return String(res || "");
     },
 
     deleteMedia(id) {

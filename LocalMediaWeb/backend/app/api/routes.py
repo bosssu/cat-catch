@@ -40,6 +40,7 @@ from app.api.schemas import (
     MediaReclassifyRequest,
     ProbeUrlRequest,
     SeriesCreate,
+    SeriesEpisodesAppend,
     TagSuggestRequest,
     TagsBatchUpdate,
     TagsUpdate,
@@ -236,6 +237,33 @@ def _touch_series_cursor(db, m: MediaItem) -> None:
         return
     s.current_media_id = int(m.id)
     s.current_episode_index = int(ep.episode_index)
+
+
+def _normalize_media_ids(raw) -> list[int]:
+    ids: list[int] = []
+    seen: set[int] = set()
+    for x in raw or []:
+        try:
+            mid = int(x)
+        except (TypeError, ValueError):
+            continue
+        if mid <= 0 or mid in seen:
+            continue
+        seen.add(mid)
+        ids.append(mid)
+    return ids
+
+
+def _series_detail(db, s: MediaSeries) -> dict:
+    episodes = _series_episodes_out(db, s)
+    return {
+        "id": int(s.id),
+        "title": s.title,
+        "current_media_id": s.current_media_id,
+        "current_episode_index": int(s.current_episode_index or 1),
+        "episode_count": len(episodes),
+        "episodes": episodes,
+    }
 
 
 def _series_episodes_out(db, series: MediaSeries) -> list[MediaOut]:
@@ -918,15 +946,7 @@ def create_series(body: SeriesCreate, db=Depends(get_db)):
         db.add(SeriesEpisode(series_id=int(s.id), media_id=int(m.id), episode_index=i))
     db.commit()
     db.refresh(s)
-    episodes = _series_episodes_out(db, s)
-    return {
-        "id": int(s.id),
-        "title": s.title,
-        "current_media_id": s.current_media_id,
-        "current_episode_index": int(s.current_episode_index or 1),
-        "episode_count": len(episodes),
-        "episodes": episodes,
-    }
+    return _series_detail(db, s)
 
 
 @router.get("/series", dependencies=[Depends(require_token)])
@@ -989,15 +1009,55 @@ def get_series(series_id: int, db=Depends(get_db)):
     s = db.get(MediaSeries, series_id)
     if not s:
         raise HTTPException(404, "剧集不存在")
-    episodes = _series_episodes_out(db, s)
-    return {
-        "id": int(s.id),
-        "title": s.title,
-        "current_media_id": s.current_media_id,
-        "current_episode_index": int(s.current_episode_index or 1),
-        "episode_count": len(episodes),
-        "episodes": episodes,
+    return _series_detail(db, s)
+
+
+@router.post("/series/{series_id}/episodes", dependencies=[Depends(require_token)])
+def append_series_episodes(series_id: int, body: SeriesEpisodesAppend, db=Depends(get_db)):
+    s = db.get(MediaSeries, series_id)
+    if not s:
+        raise HTTPException(404, "剧集不存在")
+    ids = _normalize_media_ids(body.ids)
+    if not ids:
+        raise HTTPException(400, "至少选择 1 条媒体")
+    existing = {
+        int(e.media_id)
+        for e in db.scalars(
+            select(SeriesEpisode).where(SeriesEpisode.series_id == int(s.id))
+        ).all()
     }
+    ids = [i for i in ids if i not in existing]
+    if not ids:
+        raise HTTPException(400, "没有可追加的条目")
+    rows = _load_media_in_order(db, ids)
+    if len(rows) != len(ids):
+        missing = [i for i in ids if i not in {int(m.id) for m in rows}]
+        raise HTTPException(404, f"媒体不存在: {missing[:8]}")
+    for mid in ids:
+        _detach_media_from_series(db, mid)
+    db.flush()
+    s = db.get(MediaSeries, series_id)
+    if not s:
+        raise HTTPException(404, "剧集不存在")
+    mx = (
+        db.scalar(
+            select(func.max(SeriesEpisode.episode_index)).where(
+                SeriesEpisode.series_id == int(s.id)
+            )
+        )
+        or 0
+    )
+    for i, m in enumerate(rows, start=1):
+        db.add(
+            SeriesEpisode(
+                series_id=int(s.id),
+                media_id=int(m.id),
+                episode_index=int(mx) + i,
+            )
+        )
+    db.commit()
+    db.refresh(s)
+    return _series_detail(db, s)
 
 
 @router.delete("/series/{series_id}", dependencies=[Depends(require_token)])
@@ -1329,7 +1389,12 @@ def interact(media_id: int, body: InteractEvent, db=Depends(get_db)):
             m.last_position_sec = 0.0
     else:
         raise HTTPException(400, "event must be view|dwell|skip|progress|ended")
-    if ev in ("view", "progress", "ended", "dwell"):
+    # Bare "view" (and short dwell) used to move the series resume cursor as
+    # soon as a slide activated. Series expand can briefly activate episode 1
+    # before the real resume slide; that raced the cursor back to ep1. Only
+    # advance the cursor on meaningful playback: progress with a position, or
+    # ended. Series-mode source:"series" still skips recommendation counters.
+    if ev == "ended" or (ev == "progress" and body.position_sec is not None):
         _touch_series_cursor(db, m)
     db.commit()
     db.refresh(m)

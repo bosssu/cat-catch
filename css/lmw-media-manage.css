@@ -450,8 +450,31 @@
 
 .mm-status {
   font-size: 12px;
-  flex: 1 1 120px;
+  flex: 1 1 100%;
   min-width: 0;
+  white-space: pre-wrap;
+  word-break: break-word;
+  overflow-wrap: anywhere;
+  line-height: 1.45;
+}
+
+.mm-job-status {
+  width: 100%;
+  font-size: 12px;
+  line-height: 1.45;
+  white-space: pre-wrap;
+  word-break: break-word;
+  overflow-wrap: anywhere;
+  padding: 4px 2px 0;
+  color: #c9ceda;
+}
+
+.mm-job-status.is-err {
+  color: #f0a0a0;
+}
+
+.mm-job-status.is-ok {
+  color: #9ddeb0;
 }
 
 /* ——— Buttons ——— */
@@ -805,8 +828,22 @@ body.mm-series-picking .mm-card {
   background: rgba(14, 165, 233, 0.18);
 }
 
+.mm-card-actions button[data-act="subtitle-view"] {
+  border-color: rgba(125, 211, 252, 0.28);
+  color: #bae6fd;
+}
+
+.mm-card-actions button[data-act="subtitle-view"]:hover {
+  background: rgba(14, 165, 233, 0.14);
+}
+
 .mm-card.mm-series-item {
   cursor: pointer;
+}
+
+body.mm-append-pending .mm-card.mm-series-item {
+  outline: 1px dashed rgba(56, 189, 248, 0.45);
+  outline-offset: 2px;
 }
 
 .mm-card.mm-series-item .mm-card-title {
@@ -928,6 +965,30 @@ body.mm-series-picking .mm-card {
   justify-content: flex-end;
   gap: 8px;
   margin-top: 8px;
+}
+
+.mm-subview-card {
+  width: min(720px, 96vw);
+  max-height: min(88vh, 860px);
+  display: flex;
+  flex-direction: column;
+}
+
+.mm-subview-body {
+  margin: 0;
+  flex: 1 1 auto;
+  min-height: 180px;
+  max-height: min(64vh, 640px);
+  overflow: auto;
+  padding: 10px 12px;
+  border-radius: 8px;
+  background: rgba(0, 0, 0, 0.35);
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  font-size: 12px;
+  line-height: 1.5;
+  white-space: pre-wrap;
+  word-break: break-word;
+  font-family: Consolas, "Cascadia Mono", "Microsoft YaHei", monospace;
 }
 
 /* Narrow: stack upload columns */
